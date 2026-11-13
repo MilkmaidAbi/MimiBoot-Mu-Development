@@ -327,6 +327,19 @@ Protection also holds while a debugger is attached (DISABLEINDEBUG cleared); fla
 Other chips lock their bootloader with persistent fuses or option bytes instead: mbtool provision prints the commands."""
 
 [[option]]
+id = "LOCK_GOLDEN"
+macro = "MB_FEAT_LOCK_GOLDEN"
+kind = "bool"
+default = true
+cores = ["night"]
+builds = ["mcu"]
+vendors = ["nrf"]
+depends = ["BOOT_LOCK", "LAYOUT=ab+golden"]
+menu = "security"
+title = "Lock the golden (recovery) slot too"
+help = """With the bootloader's flash lock on, also write-protect the golden slot until reset, so a compromised app can't erase or replace the image the board falls back to. A new golden image is still installed through MimiBoot itself (console 'recv g force', mbtool), which runs before the lock; the app library can no longer write it."""
+
+[[option]]
 id = "PROTECTED_FLOOR"
 macro = "MB_FEAT_PROTECTED_FLOOR"
 kind = "bool"

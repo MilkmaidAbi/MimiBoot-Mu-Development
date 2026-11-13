@@ -236,6 +236,14 @@ Other chips lock their bootloader with persistent fuses or option bytes instead:
 
 C macro: `MB_FEAT_BOOT_LOCK`
 
+### `LOCK_GOLDEN`: Lock the golden (recovery) slot too
+
+default **on**; needs `BOOT_LOCK`, `LAYOUT=ab+golden`. (full core; builds: STM32/nRF/SAMD)
+
+With the bootloader's flash lock on, also write-protect the golden slot until reset, so a compromised app can't erase or replace the image the board falls back to. A new golden image is still installed through MimiBoot itself (console 'recv g force', mbtool), which runs before the lock; the app library can no longer write it.
+
+C macro: `MB_FEAT_LOCK_GOLDEN`
+
 ### `PROTECTED_FLOOR`: Keep the rollback floors in the locked region
 
 default **off**; needs `BOOT_LOCK`. (full core; builds: STM32/nRF/SAMD)

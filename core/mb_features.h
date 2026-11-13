@@ -94,6 +94,9 @@
 #ifndef MB_FEAT_BOOT_LOCK
 #define MB_FEAT_BOOT_LOCK       0   /* write-protect the bootloader region until reset before starting an image */
 #endif
+#ifndef MB_FEAT_LOCK_GOLDEN
+#define MB_FEAT_LOCK_GOLDEN     0   /* with BOOT_LOCK: the golden slot is locked as well */
+#endif
 #ifndef MB_FEAT_PROTECTED_FLOOR
 #define MB_FEAT_PROTECTED_FLOOR 0   /* rollback floors also kept in the (locked) bootloader region */
 #endif

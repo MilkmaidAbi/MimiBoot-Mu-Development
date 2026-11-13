@@ -55,6 +55,7 @@ Mini build have not run anywhere.
 | `PROTECTED_FLOOR` on nRF | emulator (nRF51): booting golden 1.2.3 writes the floor entry through the real NVMC driver and it reads back as expected. Not run on nRF52 |
 | `BOOT_LOCK` (MPU PROTENSET / BPROT / ACL) | built: every nRF board compiles with it; the register addresses were checked in the disassembly against Nordic's MDK. QEMU doesn't model block protection, so the lock itself has never been seen to hold |
 | `DEBUG_LOCK` (APPROTECT.FORCEPROTECT) | built only |
+| `LOCK_GOLDEN` (the golden slot locked with the bootloader) | built only (same lock code as `BOOT_LOCK`, a second region) |
 | `CONSOLE_AUTH` | host: `tests/test_auth.c` (what a locked console refuses and allows, menu keys, bad answers, the lockout). Emulator (nRF51): mbtool answers a challenge from the emulated hardware RNG with the unlock key, a locked `reject` is refused before and runs after, a stranger's key is refused. The nRF52 RNG path has not run |
 | fault reset + breadcrumb | host: a reported fault marks the slot bad and the next one boots. The Cortex-M handler and its `.noinit` note have not been triggered on a chip or in QEMU |
 | MCUboot trailer confirmation (direct-xip `image_ok`) | host: `tests/test_profile.c` in the MCUboot profiles: a trial confirmed by its trailer, an unset `image_ok`, the align-32 magic, a damaged magic. Not run with a real Zephyr app |

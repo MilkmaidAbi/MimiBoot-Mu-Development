@@ -302,6 +302,11 @@ static int start(uint32_t vectors, uint32_t lo, uint32_t hi) {
     // now. A lock that doesn't take is not a reason to stop booting: the board
     // would be bricked by its own protection.
     (void)mcu_flash_lock(layout.boot.offset, layout.boot.size);
+#if MB_FEAT_LOCK_GOLDEN
+    // and the recovery image: what the board falls back to must survive the app
+    for (int i = 0; i < layout.n_slots; i++)
+        if (layout.slot[i].role == MB_ROLE_GOLDEN) (void)mcu_flash_lock(layout.slot[i].offset, layout.slot[i].size);
+#endif
 #endif
     quiesce();
 #if MB_VECTORS == MB_VECTORS_REMAP

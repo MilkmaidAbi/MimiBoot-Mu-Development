@@ -89,6 +89,10 @@ where they are and the log copy carries on.
 
 Notes:
 
+- On nRF the lock also covers the golden (recovery) slot (`LOCK_GOLDEN`, on by
+  default with `BOOT_LOCK` and an A/B + golden layout), so a compromised app
+  can't erase what the board falls back to. New golden images go in through
+  MimiBoot's own upload, which runs before the lock.
 - The nRF locks are written from Nordic's register descriptions and the nRF
   Connect SDK's own flash-protection drivers. They compile for every nRF
   board; they haven't run on silicon yet.
