@@ -19,7 +19,7 @@ from . import gen
 from .model import ROOT, Config, parse_size
 
 NIGHT_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
-              "mb_control", "mb_grub", "mb_formats"]
+              "mb_control", "mb_grub", "mb_formats", "mb_floor"]
 VENDOR_SOURCES = {"stm32": ["port/stm32/stm32_flash.c", "port/stm32/stm32_periph.c"],
                   "nrf": ["port/nrf/nrf_flash.c", "port/nrf/nrf_periph.c"],
                   "samd": ["port/samd/samd_flash.c", "port/samd/samd_periph.c"]}

@@ -87,6 +87,28 @@ static int f_program(uint32_t off, const void* buf, size_t len) {
     return MB_OK;
 }
 
+// The protected floor store: the last 4 KB of the bootloader region, written
+// 16 bytes at a time (as nRF/STM32 would), with the same power-cut injection.
+static int floor_program(uint32_t off, const void* buf, size_t len) {
+    if (off < 0xF000 || off + len > 0x10000 || off % 16 || len % 16) return MB_E_BADARG;
+    if (sim.fail_writes || sim.floor_locked) return MB_E_IO;
+    const uint8_t* b = buf;
+    if (cut_now()) {
+        for (size_t i = 0; i < len / 2; i++) sim_flash[off + i] &= b[i];
+        power_fail();
+    }
+    for (size_t i = 0; i < len; i++) sim_flash[off + i] &= b[i];
+    sim.programs++;
+    return MB_OK;
+}
+static const mb_floor_store_t floor_store = { 0xF000, 0x1000, 16, f_read, floor_program };
+
+static int f_fault_slot(void) {
+    int s = sim.fault_slot;
+    sim.fault_slot = -1;
+    return s;
+}
+
 // The sim "chip" can run Arm or RISC-V. Like the RP2350 port without a
 // universal bootloader: an XIP image must match the current architecture;
 // a RAM image of the other one is started through an architecture switch.
@@ -176,6 +198,7 @@ mb_port_t sim_port = {
     .time_ms = f_time, .watchdog_arm = f_wdt, .watchdog_disarm = f_wdt_off, .button = f_button,
     .console_open = f_console_open, .getc = f_getc, .write = f_write,
     .reboot = f_reboot, .reboot_rom = f_rom, .reset_cause = f_cause, .reset_reason = f_reason, .self_slot = f_self,
+    .floor = &floor_store, .fault_slot = f_fault_slot,
 };
 
 void sim_reset(void) {
@@ -184,8 +207,10 @@ void sim_reset(void) {
     memset(&sim, 0, sizeof(sim));
     sim.arch = MB_ARCH_ARM;
     sim.reset_cause = MB_RESET_POWER;
+    sim.fault_slot = -1;
     sim_port.require_signature = false;
     sim_port.keys = &keyring;
+    sim_port.floor = &floor_store;
 }
 
 void sim_input(const void* data, size_t len) {

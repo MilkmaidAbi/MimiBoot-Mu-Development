@@ -30,6 +30,28 @@
 #include <stdio.h>
 #include <string.h>
 
+volatile uint8_t mb_checking_slot = MB_SLOT_NONE;
+
+// The protected floors (port flash the app can't write), read once per decision.
+// The effective floor is the higher of these and the log's copy.
+static uint32_t hw_floor[MB_FLOOR_COUNT];
+
+static void load_floors(const mb_port_t *p) { mb_floor_get(p, hw_floor); }
+
+static uint32_t security_floor(const mb_bcl_rec_t *r) {
+    return r->min_security > hw_floor[MB_FLOOR_SECURITY] ? r->min_security : hw_floor[MB_FLOOR_SECURITY];
+}
+
+// A golden image that is older than one already accepted must not take over.
+// The log remembers which image set its golden_version (the same image may
+// come back after a log wipe); the protected copy only knows the version, so
+// it refuses anything strictly older.
+static bool golden_too_old(const mb_bcl_rec_t *r, uint64_t id, uint32_t version) {
+    if (r->golden_id && id != r->golden_id && version <= r->golden_version)
+        return true;
+    return version < hw_floor[MB_FLOOR_GOLDEN];
+}
+
 static bool startable(const mb_port_t *p, const mb_image_hdr_t *h) {
     if (strncmp(h->target, p->target, sizeof(h->target)) != 0)
         return false;
@@ -71,8 +93,7 @@ static void reconcile(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[M
             mark_bad(r, i, MB_BAD_TARGET);
             continue;
         }
-        if (mb_slot_role(p, i) == MB_ROLE_GOLDEN && r->golden_id && id != r->golden_id &&
-            info[i].hdr.version <= r->golden_version) {
+        if (mb_slot_role(p, i) == MB_ROLE_GOLDEN && golden_too_old(r, id, info[i].hdr.version)) {
             mark_bad(r, i, MB_BAD_GOLDEN_OLD); // monotonic golden: only a strictly newer one may replace it
             continue;
         }
@@ -80,6 +101,8 @@ static void reconcile(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[M
         s->tries_left = MB_DEFAULT_TRIES;
     }
 }
+
+static bool verify(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[MB_MAX_SLOTS], int slot);
 
 // Can `slot` be booted? Marks it bad in r if it never can.
 static bool admit(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[MB_MAX_SLOTS], int slot, uint8_t want_arch) {
@@ -95,11 +118,20 @@ static bool admit(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[MB_MA
     if (want_arch != MB_ARCH_ANY && info[slot].hdr.arch != want_arch)
         return false; // config mismatch, not the image's fault
 #if MB_FEAT_ANTI_ROLLBACK
-    if (mb_slot_role(p, slot) == MB_ROLE_AB && info[slot].hdr.security_version < r->min_security) {
+    if (mb_slot_role(p, slot) == MB_ROLE_AB && info[slot].hdr.security_version < security_floor(r)) {
         mark_bad(r, slot, MB_BAD_ROLLBACK);
         return false;
     }
 #endif
+    mb_checking_slot = (uint8_t)slot; // a fault from here on is this image's flash
+    bool ok = verify(p, r, info, slot);
+    mb_checking_slot = MB_SLOT_NONE;
+    return ok;
+}
+
+// Signature, then the payload hash (per MB_BOOT_VERIFY)
+static bool verify(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[MB_MAX_SLOTS], int slot) {
+    mb_slot_rec_t *s = &r->slot[slot];
     // The "signature checked" flag lives in the log, which a running image can
     // write. When signatures are *required* it is therefore never trusted:
     // every boot verifies. (Optional mode uses it only to save time.)
@@ -299,6 +331,7 @@ int mb_decide(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg, m
     plan->choice.slot = MB_SLOT_NONE;
     plan->choice.entry = -1;
     mb_bcl_rec_t r = log->cur;
+    load_floors(p);
     reconcile(p, &r, info);
 
     // crash-loop guard (an architecture handover reboot is not a crash: the
@@ -432,6 +465,7 @@ int mb_plan_entry(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cf
     if (entry < 0 || entry >= cfg->n)
         return MB_E_BADARG;
     mb_bcl_rec_t r = log->cur;
+    load_floors(p);
     reconcile(p, &r, info);
     r.request = MB_REQ_NONE;
     const mb_entry_t *e = &cfg->e[entry];
@@ -460,14 +494,22 @@ int mb_plan_slot(const mb_port_t *p, const mb_bcl_t *log, mb_slot_info_t info[MB
     if (slot < 0 || slot >= p->layout->n_slots)
         return MB_E_BADARG;
     mb_bcl_rec_t r = log->cur;
+    load_floors(p);
     reconcile(p, &r, info);
     r.request = MB_REQ_NONE;
     bool ok = admit(p, &r, info, slot, MB_ARCH_ANY);
     plan->base = r;
     plan->base_dirty = differs(&r, &log->cur);
     if (!ok) {
-        // forced: a header, a startable image, a good signature and hash; its state stays as it is
+        // forced: a header, a startable image, a good signature and hash; its
+        // state stays as it is. Never past the rollback floors, though: forcing
+        // an old signed image is exactly the attack the floors exist for.
         if (!force || !info[slot].header_ok || !startable(p, &info[slot].hdr))
+            return MB_E_REFUSED;
+        const mb_image_hdr_t *fh = &info[slot].hdr;
+        if (MB_FEAT_ANTI_ROLLBACK && mb_slot_role(p, slot) == MB_ROLE_AB && fh->security_version < security_floor(&log->cur))
+            return MB_E_REFUSED;
+        if (mb_slot_role(p, slot) == MB_ROLE_GOLDEN && golden_too_old(&log->cur, mb_image_id(fh), fh->version))
             return MB_E_REFUSED;
         if (mb_image_check_sig(p, &info[slot]) != MB_OK || mb_image_verify(p, slot, &info[slot]) != MB_OK)
             return MB_E_REFUSED;
@@ -597,15 +639,37 @@ int mb_boot(const mb_port_t *p, mb_bcl_t *log, const mb_config_t *cfg, mb_slot_i
         if (prepared)
             return prepared;
     }
-    if (plan->boot_dirty) {
+    // The log copy of the floors never drops below the protected copy (apps
+    // read the floor from the log)
+    load_floors(p);
+    bool lift = plan->boot.min_security < hw_floor[MB_FLOOR_SECURITY] ||
+                plan->boot.golden_version < hw_floor[MB_FLOOR_GOLDEN];
+    if (plan->boot_dirty || lift) {
         mb_bcl_rec_t r = plan->boot;
-        r.boot_count++;
+        if (r.min_security < hw_floor[MB_FLOOR_SECURITY])
+            r.min_security = hw_floor[MB_FLOOR_SECURITY];
+        if (r.golden_version < hw_floor[MB_FLOOR_GOLDEN])
+            r.golden_version = hw_floor[MB_FLOOR_GOLDEN];
+        if (plan->boot_dirty)
+            r.boot_count++;
         int rc = mb_bcl_commit(log, &r);
         // a trial that can't be recorded mustn't run: it could loop forever
         if (rc != MB_OK && plan->choice.trial)
             return MB_E_IO;
     }
     const mb_image_hdr_t *hdr = &info[slot].hdr;
+    // Raise the protected floors to a *confirmed* image that is about to run:
+    // never higher than a real, signed, accepted image, so an app that writes
+    // a silly floor into the log can't brick everything it doesn't like. A
+    // failed raise doesn't stop the boot (the log copy still holds).
+    const mb_slot_rec_t *bs = &plan->boot.slot[slot];
+    if (bs->state == MB_ST_GOOD) {
+        int role = mb_slot_role(p, slot);
+        if (MB_FEAT_ANTI_ROLLBACK && role == MB_ROLE_AB && hdr->security_version > hw_floor[MB_FLOOR_SECURITY])
+            mb_floor_raise(p, MB_FLOOR_SECURITY, hdr->security_version);
+        if (role == MB_ROLE_GOLDEN && hdr->version > hw_floor[MB_FLOOR_GOLDEN])
+            mb_floor_raise(p, MB_FLOOR_GOLDEN, hdr->version);
+    }
     uint32_t wd = hdr->trial_timeout_ms ? hdr->trial_timeout_ms : MB_DEFAULT_TRIAL_MS;
     int rc;
     if (hdr->load_type == MB_LOAD_RAM) {
@@ -638,6 +702,13 @@ int mb_boot_ram(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg,
         return MB_E_UNSUPP;
     if (!startable(p, hdr))
         return MB_E_UNSUPP;
+    // With signatures required, a RAM image is held to the same floor, or an
+    // old signed image with a known hole could be run this way. (With them
+    // optional anyone may upload an unsigned image, so a floor would only get
+    // in the way of lab tools.)
+    load_floors(p);
+    if (MB_FEAT_ANTI_ROLLBACK && p->require_signature && hdr->security_version < security_floor(&log->cur))
+        return MB_E_REFUSED;
     mb_slot_info_t tmp;
     memset(&tmp, 0, sizeof(tmp));
     tmp.hdr = *hdr;
@@ -676,6 +747,21 @@ void mb_main(const mb_port_t *p) {
     // the key is read once per power-up: if nobody opens the console, the
     // normal boot goes ahead even while the key is still held
     unsigned flags = p->button && p->button() ? MB_F_MENU : 0;
+    // The CPU faulted while checking a slot last time (an ECC error or bus
+    // fault on damaged flash): that image is bad, so the next pass falls back
+    int faulted = p->fault_slot ? p->fault_slot() : -1;
+    if (faulted >= 0 && faulted < p->layout->n_slots) {
+        static mb_bcl_t flog;
+        mb_bcl_load(&flog, p);
+        mb_bcl_rec_t r = flog.cur;
+        // the check never finished, so the log may not know this image yet:
+        // name it, or the next reconcile would treat it as a new one
+        static mb_slot_info_t fi;
+        if (mb_image_read_header(p, faulted, &fi) == MB_OK)
+            r.slot[faulted].image_id = mb_image_id(&fi.hdr);
+        mark_bad(&r, faulted, MB_BAD_FAULT);
+        mb_bcl_commit(&flog, &r);
+    }
     for (;;) {
         static mb_bcl_t log;
         static mb_config_t cfg;

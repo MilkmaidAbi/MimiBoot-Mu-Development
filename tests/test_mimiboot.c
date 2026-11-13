@@ -275,6 +275,173 @@ static void test_golden(void) {
     CHECK(boot() == -SIM_ROM, "and the old one can't come back");
 }
 
+// ---------------------------------------------------------------------------
+// protected floors: what an app that has been taken over can and can't undo
+// ---------------------------------------------------------------------------
+
+static uint32_t hw_floor(int which) {
+    uint32_t v[MB_FLOOR_COUNT];
+    mb_floor_get(&sim_port, v);
+    return v[which];
+}
+
+// what a hostile app can do: write any log record it likes
+static void forge_log(uint32_t min_security, uint32_t golden_version) {
+    mb_bcl_t b;
+    mb_bcl_load(&b, &sim_port);
+    mb_bcl_rec_t r = b.cur;
+    r.min_security = min_security;
+    r.golden_version = golden_version;
+    r.golden_id = 0;
+    mb_bcl_commit(&b, &r);
+}
+
+static void wipe_log(void) {
+    for (int i = 0; i < 2; i++)
+        memset(sim_flash + sim_port.layout->log[i].offset, 0xFF, sim_port.layout->log[i].size);
+}
+
+typedef struct { int which; uint32_t value; int rc; } raise_t;
+static void raise_fn(void* ctx) { raise_t* r = ctx; r->rc = mb_floor_raise(&sim_port, r->which, r->value); }
+
+static void test_protected_floors(void) {
+    printf("protected floors: confirmed images raise them, a hostile log can't lower them\n");
+    sim_reset();
+    install_raw(MB_SLOT_A, "app", MB_VERSION(1, 0, 0), 1, 1, 30000);
+    boot();
+    app_confirms();
+    CHECK(hw_floor(MB_FLOOR_SECURITY) == 0, "a confirm alone writes only the log");
+    CHECK(boot() == MB_SLOT_A && hw_floor(MB_FLOOR_SECURITY) == 1, "the next boot of the confirmed image raises the store to 1");
+    install_raw(MB_SLOT_B, "app", MB_VERSION(2, 0, 0), 3, 2, 30000);
+    CHECK(boot() == MB_SLOT_B, "trial of B (security 3)");
+    CHECK(hw_floor(MB_FLOOR_SECURITY) == 1, "a trial doesn't raise the store");
+    app_confirms();
+    CHECK(boot() == MB_SLOT_B && hw_floor(MB_FLOOR_SECURITY) == 3, "confirmed B raised it to 3");
+    uint32_t w0 = writes();
+    for (int i = 0; i < 5; i++) boot();
+    CHECK(writes() == w0, "steady state: no writes (%u)", writes() - w0);
+
+    // A still holds the old security-1 image. The app forges a log with the
+    // floor at 0 and A marked good and active.
+    forge_log(0, 0);
+    mb_client_init(&sim_port);
+    mb_client_reject(MB_SLOT_B);
+    {
+        mb_bcl_t b;
+        mb_bcl_load(&b, &sim_port);
+        mb_bcl_rec_t r = b.cur;
+        r.active = MB_SLOT_A;
+        r.slot[MB_SLOT_A].state = MB_ST_GOOD;
+        mb_bcl_commit(&b, &r);
+    }
+    CHECK(boot() != MB_SLOT_A && log_now().slot[MB_SLOT_A].bad_reason == MB_BAD_ROLLBACK, "forged log floor: old A still refused");
+    CHECK(log_now().min_security == 0 || log_now().min_security >= 3, "log floor is never left below the store");
+
+    printf("protected floors: a wiped log\n");
+    sim_reset();
+    install_raw(MB_SLOT_A, "app", MB_VERSION(1, 0, 0), 1, 1, 30000);
+    install_raw(MB_SLOT_B, "app", MB_VERSION(2, 0, 0), 3, 2, 30000);
+    boot();                                                     // B first (newer)
+    app_confirms();
+    boot();
+    CHECK(hw_floor(MB_FLOOR_SECURITY) == 3, "store at 3");
+    // the app erases the log and the new image, leaving only the old one
+    wipe_log();
+    memset(sim_flash + sim_port.layout->slot[MB_SLOT_B].offset, 0xFF, 0x1000);
+    CHECK(boot() != MB_SLOT_A, "old image doesn't boot after a log wipe");
+    CHECK(log_now().slot[MB_SLOT_A].bad_reason == MB_BAD_ROLLBACK, "refused as a rollback");
+
+    printf("protected floors: console 'boot force' and ramboot respect them\n");
+    sim.console = true;
+    sim.button = true;
+    sim_input("c\rboot a force\r", 15);
+    sim_outcome_t o = sim_power_on();
+    CHECK(o == SIM_CONSOLE_IDLE && strstr(sim.out, "not bootable"), "boot a force refused (%d)", o);
+    sim.button = false;
+    sim.console = false;
+    make_payload(40, 4000);
+    mb_image_hdr_t ram = make_header_ex("old-ram", MB_VERSION(1, 0, 0), 2, 4000, 0, MB_ARCH_ARM, MB_LOAD_RAM, SIM_RAM_BASE + 0x1000, 0);
+    memcpy(sim_ram + 0x1000, payload, 4000);
+    mb_bcl_t lg;
+    mb_bcl_load(&lg, &sim_port);
+    mb_config_t cfg;
+    mb_config_builtin(&sim_port, &cfg);
+    sim_port.require_signature = true;
+    CHECK(mb_boot_ram(&sim_port, &lg, &cfg, &ram, "") == MB_E_REFUSED, "signatures required: RAM image below the floor refused");
+    sim_port.require_signature = false;
+
+    printf("protected floors: golden\n");
+    sim_reset();
+    install_raw(MB_SLOT_GOLDEN, "rescue", MB_VERSION(1, 2, 0), 0, 5, 20000);
+    CHECK(boot() == MB_SLOT_GOLDEN && hw_floor(MB_FLOOR_GOLDEN) == MB_VERSION(1, 2, 0), "golden 1.2 recorded in the store");
+    wipe_log();
+    install_raw(MB_SLOT_GOLDEN, "rescue", MB_VERSION(1, 1, 0), 0, 6, 20000);
+    CHECK(boot() == -SIM_ROM && log_now().slot[MB_SLOT_GOLDEN].bad_reason == MB_BAD_GOLDEN_OLD, "older golden refused after a log wipe");
+    install_raw(MB_SLOT_GOLDEN, "rescue", MB_VERSION(1, 2, 0), 0, 5, 20000);
+    wipe_log();
+    CHECK(boot() == MB_SLOT_GOLDEN, "the same golden version comes back fine");
+
+    printf("protected floors: store full, torn entry, locked store\n");
+    sim_reset();
+    for (uint32_t v = 1; v <= 256; v++) {
+        raise_t r = { MB_FLOOR_SECURITY, v, 0 };
+        raise_fn(&r);
+        if (r.rc != MB_OK) { CHECK(r.rc == MB_E_NOSPACE && v == 257, "store took %u entries", v - 1); break; }
+    }
+    raise_t full = { MB_FLOOR_SECURITY, 999, 0 };
+    raise_fn(&full);
+    CHECK(full.rc == MB_E_NOSPACE && hw_floor(MB_FLOOR_SECURITY) == 256, "full: NOSPACE, keeps 256 (%d, %u)", full.rc, hw_floor(0));
+    install_raw(MB_SLOT_A, "app", MB_VERSION(9, 0, 0), 300, 1, 30000);
+    boot();
+    app_confirms();
+    CHECK(boot() == MB_SLOT_A, "a full store doesn't stop the boot");
+
+    sim_reset();
+    raise_t a = { MB_FLOOR_SECURITY, 5, 0 };
+    raise_fn(&a);
+    sim.cut_at = sim.ops + 1;
+    raise_t torn = { MB_FLOOR_SECURITY, 9, 0 };
+    CHECK(sim_guard(raise_fn, &torn) == SIM_POWERCUT, "power cut in the middle of a raise");
+    sim.cut_at = 0;
+    CHECK(hw_floor(MB_FLOOR_SECURITY) == 5, "torn entry ignored: still 5");
+    raise_t again = { MB_FLOOR_SECURITY, 9, 0 };
+    raise_fn(&again);
+    CHECK(again.rc == MB_OK && hw_floor(MB_FLOOR_SECURITY) == 9, "next raise lands after the torn entry: 9");
+    raise_t lower = { MB_FLOOR_SECURITY, 2, 0 };
+    raise_fn(&lower);
+    CHECK(lower.rc == MB_OK && hw_floor(MB_FLOOR_SECURITY) == 9, "a lower value is a no-op");
+    raise_t gold = { MB_FLOOR_GOLDEN, 7, 0 };
+    raise_fn(&gold);
+    CHECK(hw_floor(MB_FLOOR_GOLDEN) == 7 && hw_floor(MB_FLOOR_SECURITY) == 9, "the two floors are independent");
+
+    sim_reset();
+    sim.floor_locked = true;
+    install_raw(MB_SLOT_A, "app", MB_VERSION(1, 0, 0), 4, 1, 30000);
+    boot();
+    app_confirms();
+    CHECK(boot() == MB_SLOT_A && hw_floor(MB_FLOOR_SECURITY) == 0 && log_now().min_security == 4,
+          "store can't be written: the boot goes on, the log keeps the floor");
+    sim.floor_locked = false;
+
+    sim_reset();
+    sim_port.floor = NULL;
+    install_raw(MB_SLOT_A, "app", MB_VERSION(1, 0, 0), 4, 1, 30000);
+    boot();
+    app_confirms();
+    CHECK(boot() == MB_SLOT_A && log_now().min_security == 4, "a port without a store: log floor as before");
+
+    printf("fault while checking a slot: marked bad, next one boots\n");
+    good_a();
+    install_raw(MB_SLOT_B, "app", MB_VERSION(2, 0, 0), 1, 3, 30000);
+    sim.fault_slot = MB_SLOT_B;
+    CHECK(boot() == MB_SLOT_A, "B faulted last time: A boots");
+    CHECK(log_now().slot[MB_SLOT_B].state == MB_ST_BAD && log_now().slot[MB_SLOT_B].bad_reason == MB_BAD_FAULT, "B bad (fault)");
+    CHECK(mb_checking_slot == MB_SLOT_NONE, "nothing being checked between boots");
+    install_raw(MB_SLOT_B, "app", MB_VERSION(2, 0, 1), 1, 4, 30000);
+    CHECK(boot() == MB_SLOT_B, "a new image in B gets its chance");
+    sim_reset();
+}
+
 static void test_requests(void) {
     printf("requests\n");
     good_a();
@@ -1076,6 +1243,7 @@ int main(int argc, char** argv) {
     test_bad_hash();
     test_antirollback();
     test_golden();
+    test_protected_floors();
     test_requests();
     test_flash_mode();
     test_log_wear();

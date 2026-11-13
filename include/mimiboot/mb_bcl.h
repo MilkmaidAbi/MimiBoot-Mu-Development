@@ -48,6 +48,7 @@
 #define MB_BAD_REJECTED     7   /* rejected by the app or the console */
 #define MB_BAD_GOLDEN_OLD   8   /* golden replaced by a version that isn't newer */
 #define MB_BAD_SIGNATURE    9   /* unsigned when signatures are required, or a bad signature */
+#define MB_BAD_FAULT        10  /* the CPU faulted while checking it (bad flash: ECC, bus error) */
 
 /* slot flags */
 #define MB_SF_SIG_OK        0x01    /* signature checked for this image_id: don't redo it every boot */

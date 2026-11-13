@@ -36,6 +36,20 @@ typedef struct {
     const uint8_t (*keys)[32];
 } mb_keyring_t;
 
+/* Protected rollback floors (core/mb_floor.c): one erase unit the running
+ * image can't write (the port locks it), read and programmed through these
+ * functions, which bypass the port's "never the bootloader region" check.
+ * program is NULL on the app side: apps may read the floors, not raise them. */
+#define MB_FLOOR_SECURITY   0       /* anti-rollback floor for A/B images */
+#define MB_FLOOR_GOLDEN     1       /* newest golden version accepted */
+#define MB_FLOOR_COUNT      2
+typedef struct mb_floor_store {
+    uint32_t off, size;         /* flash offset and size of the store (one erase unit) */
+    uint32_t entry;             /* bytes per entry: 16, or the chip's program unit if larger */
+    int (*read)(uint32_t off, void* buf, size_t len);
+    int (*program)(uint32_t off, const void* buf, size_t len);
+} mb_floor_store_t;
+
 typedef struct mb_port {
     const char* name;           /* "rp2350", "sim" */
     const char* target;         /* images must carry this in hdr.target */
@@ -90,6 +104,14 @@ typedef struct mb_port {
 
     /* client side (apps): which slot is this image running from? */
     int (*self_slot)(void);
+
+    /* optional: protected copies of the rollback floors (NULL: the log only) */
+    const mb_floor_store_t* floor;
+
+    /* optional: the slot whose check was running when the CPU faulted before
+     * the last reset (the fault handler leaves a note and resets), or -1.
+     * Reading it clears it. The core marks that slot bad. */
+    int (*fault_slot)(void);
 
     /* Optional Night services; runtime capability checks include silicon policy. */
     uint32_t (*capabilities)(void);

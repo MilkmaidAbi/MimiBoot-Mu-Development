@@ -89,7 +89,9 @@ int mb_client_status(mb_client_status_t *st) {
     if (!port || mb_bcl_load(&log, port) != MB_OK)
         return MB_E_IO;
     st->active = log.cur.active;
-    st->min_security = log.cur.min_security;
+    uint32_t hw[MB_FLOOR_COUNT];
+    mb_floor_get(port, hw); // the bootloader's protected copy, when the port has one
+    st->min_security = log.cur.min_security > hw[MB_FLOOR_SECURITY] ? log.cur.min_security : hw[MB_FLOOR_SECURITY];
     st->last_kind = log.cur.last_kind;
     st->strikes = log.cur.last_slot == self ? log.cur.strikes : 0;
     if (ho_valid)

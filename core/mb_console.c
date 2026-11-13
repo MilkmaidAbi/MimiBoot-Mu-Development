@@ -41,8 +41,8 @@ static const char* state_name(int st) {
 
 static const char* bad_name(int r) {
     static const char* n[] = { "", "header", "hash", "never confirmed", "rollback", "can't start here",
-                               "launch failed", "rejected", "golden not newer", "signature" };
-    return r >= 0 && r <= MB_BAD_SIGNATURE ? n[r] : "?";
+                               "launch failed", "rejected", "golden not newer", "signature", "CPU fault while checking" };
+    return r >= 0 && r <= MB_BAD_FAULT ? n[r] : "?";
 }
 
 __attribute__((unused)) static const char* kind_name(int k) {

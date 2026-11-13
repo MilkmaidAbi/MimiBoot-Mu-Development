@@ -23,6 +23,8 @@ typedef struct {
     uint32_t ops, cut_at;       /* cut the power at the cut_at-th erase/program (0 = never) */
     uint32_t erases, programs;
     bool fail_writes;           /* every erase/program returns an error */
+    bool floor_locked;          /* the protected floor store refuses writes (a chip whose lock blocks the loader too) */
+    int fault_slot;             /* what the port's fault note says at the next power-on (-1: none) */
     bool launch_fails;
     // what happened
     int booted_slot;            /* -1 for a RAM image started from the console */

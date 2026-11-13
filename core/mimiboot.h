@@ -65,6 +65,14 @@ int  mb_image_check_sig(const mb_port_t* p, mb_slot_info_t* info);         /* MB
 void mb_image_seal(mb_image_hdr_t* h);                                      /* sets hdr_crc */
 int  mb_image_check_header(const mb_port_t* p, const mb_image_hdr_t* h, uint32_t room);
 
+/* ---- protected rollback floors (core/mb_floor.c) -------------------------------- */
+int mb_floor_get(const mb_port_t* p, uint32_t out[MB_FLOOR_COUNT]);     /* zeros (+MB_E_UNSUPP) without a store */
+int mb_floor_raise(const mb_port_t* p, int which, uint32_t value);      /* never lowers; MB_E_NOSPACE when full */
+
+/* The slot whose image is being checked right now (MB_SLOT_NONE otherwise):
+ * a port's fault handler records it so the next boot can mark it bad. */
+extern volatile uint8_t mb_checking_slot;
+
 /* ---- boot control log -------------------------------------------------------- */
 typedef struct {
     const mb_port_t* port;
