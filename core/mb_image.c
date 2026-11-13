@@ -123,11 +123,19 @@ int mb_image_verify(const mb_port_t* p, int slot, mb_slot_info_t* info) {
     return info->hash_state > 0 ? MB_OK : MB_E_CORRUPT;
 }
 
+#if MB_FEAT_SIGNATURES
+static uint32_t key_id_of(const uint8_t* key) {
+    return (uint32_t)key[0] | (uint32_t)key[1] << 8 | (uint32_t)key[2] << 16 | (uint32_t)key[3] << 24;
+}
+#endif
+
 // Signed: the key named by key_id must be in the build's keyring and the
 // signature must verify. Unsigned: fine unless the build requires signatures.
-// MCUboot images: Ed25519 over the 32-byte SHA-256 digest (imgtool's non-pure
-// mode); any key in the keyring may match. mb_image_verify then makes sure the
-// digest is the real one.
+// Ed25519 (the default) signs the first MB_IMG_SIGNED_BYTES of the header;
+// ECDSA P-256 (MB_IMG_F_ECDSA) signs their SHA-256. MCUboot images: the
+// signature is over the image's 32-byte SHA-256 digest (imgtool's default,
+// non-pure mode) and any key of the right kind may match; mb_image_verify then
+// makes sure the digest is the real one.
 int mb_image_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
     if (info->sig_state) return info->sig_state > 0 ? MB_OK : MB_E_SIGNATURE;
     const mb_image_hdr_t* h = &info->hdr;
@@ -137,11 +145,36 @@ int mb_image_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
         return info->sig_state > 0 ? MB_OK : MB_E_SIGNATURE;
     }
 #if MB_FEAT_SIGNATURES
-    if (!p->keys) {
+    bool ecdsa = (h->flags & MB_IMG_F_ECDSA) != 0;
+    bool have_keys = ecdsa ? (MB_FEAT_ECDSA && p->p256_keys && p->p256_keys->count) : (p->keys && p->keys->count);
+    if (!have_keys) {
         if (p->require_signature) return MB_E_SIGNATURE;
         info->sig_state = 1;
         info->proof_sig = MB_PROOF_UNSIGNED;      // nothing to check it against: counts as unsigned
         return MB_OK;
+    }
+    if (ecdsa) {
+#if MB_FEAT_ECDSA
+        uint8_t digest[32];
+        if (info->fmt == MB_FMT_MCUBOOT) {
+            memcpy(digest, h->sha256, 32);
+        } else {
+            mb_sha256_t s;
+            mb_sha256_init(&s);
+            mb_sha256_update(&s, h, MB_IMG_SIGNED_BYTES);
+            mb_sha256_final(&s, digest);
+        }
+        for (int k = 0; k < p->p256_keys->count; k++) {
+            const uint8_t* key = p->p256_keys->keys[k];
+            if (info->fmt != MB_FMT_MCUBOOT && key_id_of(key) != h->key_id) continue;
+            if (mb_ecdsa_p256_verify(h->signature, digest, key)) {
+                info->sig_state = 1;
+                info->proof_sig = MB_PROOF_SIG;
+                return MB_OK;
+            }
+        }
+#endif
+        return MB_E_SIGNATURE;
     }
     for (int k = 0; k < p->keys->count; k++) {
         const uint8_t* key = p->keys->keys[k];
@@ -149,8 +182,7 @@ int mb_image_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
         if (info->fmt == MB_FMT_MCUBOOT) {
             ok = mb_ed25519_verify(h->signature, h->sha256, 32, key);
         } else {
-            uint32_t id = (uint32_t)key[0] | (uint32_t)key[1] << 8 | (uint32_t)key[2] << 16 | (uint32_t)key[3] << 24;
-            if (id != h->key_id) continue;
+            if (key_id_of(key) != h->key_id) continue;
             ok = mb_ed25519_verify(h->signature, h, MB_IMG_SIGNED_BYTES, key);
         }
         if (ok) { info->sig_state = 1; info->proof_sig = MB_PROOF_SIG; return MB_OK; }

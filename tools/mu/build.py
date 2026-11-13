@@ -19,7 +19,7 @@ from . import gen
 from .model import ROOT, Config, parse_size
 
 NIGHT_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
-              "mb_control", "mb_grub", "mb_formats", "mb_floor"]
+              "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa"]
 VENDOR_SOURCES = {"stm32": ["port/stm32/stm32_flash.c", "port/stm32/stm32_periph.c"],
                   "nrf": ["port/nrf/nrf_flash.c", "port/nrf/nrf_periph.c"],
                   "samd": ["port/samd/samd_flash.c", "port/samd/samd_periph.c"]}
@@ -154,7 +154,8 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
     recipe = {
         "cc": "arm-none-eabi-gcc",
         "sources": [f"core/{n}.c" for n in NIGHT_CORE] + ["port/cortexm/cm_port.c"] + VENDOR_SOURCES[t.get("vendor")],
-        "headers": ["core/*.h", "include/mimiboot/*.h", "port/cortexm/*.h", f"port/{t.get('vendor')}/*.h"],
+        "headers": ["core/*.h", "include/mimiboot/*.h", "port/cortexm/*.h", f"port/{t.get('vendor')}/*.h",
+                    "third_party/micro-ecc/*"],
         "cflags": [f"-mcpu={cpu}", "-mthumb", "-std=c11", "-Os", "-g", "-Wall", "-Wextra", "-Wno-unused-parameter",
                    "-ffunction-sections", "-fdata-sections", "-fno-common", "-ffreestanding"]
                   # flash at address 0 (nRF, SAMD): reading it is not a null dereference

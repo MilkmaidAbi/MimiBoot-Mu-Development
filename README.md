@@ -41,7 +41,7 @@ On the 32-bit chips (the "full" core):
   skip that and trust a new image once it checks out, for firmware that knows nothing
   about MimiBoot.
 - Check images with SHA-256 on every boot, only on their first boot, or not at all.
-- Verify Ed25519 signatures, optionally refusing anything unsigned. Anti-rollback with a
+- Verify Ed25519 (or ECDSA P-256) signatures, optionally refusing anything unsigned. Anti-rollback with a
   security version floor.
 - Boot MimiBoot's own image format, Zephyr / MCUboot images signed with imgtool, and
   plain firmware binaries (FreeRTOS, bare metal, Arduino builds).
@@ -143,6 +143,7 @@ docs/               test status, security, option reference, Zephyr / FreeRTOS n
 
 ## License
 
-MIT. The STK500 code was written from Atmel's AVR061 application note.
+MIT. The STK500 code was written from Atmel's AVR061 application note. The ECDSA
+arithmetic is micro-ecc (BSD 2-clause, `third_party/micro-ecc`).
 
 (I doubt people will even ever see this proj, so Imma just anyhow put MIT lol)

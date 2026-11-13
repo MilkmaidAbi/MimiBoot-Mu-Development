@@ -46,7 +46,31 @@ __attribute__((unused)) static void copy_target(mb_image_hdr_t* x, const mb_port
 static uint16_t le16(const uint8_t* b) { return (uint16_t)(b[0] | b[1] << 8); }
 static uint32_t le32(const uint8_t* b) { return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24; }
 
-typedef struct { bool sha, sig, pure, enc; uint8_t sha256[32], sig64[64]; uint32_t sec_cnt; bool have_sec; } tlvs_t;
+#define TLV_ECDSA_SIG           0x22u               /* ECDSA P-256 over the image digest, DER */
+
+typedef struct { bool sha, sig, ecdsa, pure, enc; uint8_t sha256[32], sig64[64]; uint32_t sec_cnt; bool have_sec; } tlvs_t;
+
+// DER  SEQUENCE { INTEGER r, INTEGER s }  ->  r || s, 32 bytes each (what imgtool writes)
+static bool der_to_raw(const uint8_t* d, uint32_t n, uint8_t out[64]) {
+    if (n < 8 || d[0] != 0x30 || d[1] != n - 2) return false;
+    uint32_t at = 2;
+    for (int part = 0; part < 2; part++) {
+        if (at + 2 > n || d[at] != 0x02) return false;
+        uint32_t len = d[at + 1];
+        at += 2;
+        if (len == 0 || len > 33 || at + len > n) return false;
+        const uint8_t* v = d + at;
+        if (len == 33) {                    // a leading zero keeps a high bit from reading as negative
+            if (v[0] != 0) return false;
+            v++;
+            len--;
+        }
+        memset(out + 32 * part, 0, 32 - len);
+        memcpy(out + 32 * part + 32 - len, v, len);
+        at += d[at - 1];
+    }
+    return at == n;
+}
 
 // Walk one TLV area: [off] = {u16 magic, u16 total incl. this info}, then {u16 type, u16 len, data}...
 static int walk(const mb_port_t* p, uint32_t base, uint32_t room, uint32_t off, uint16_t magic, uint32_t* total, tlvs_t* t) {
@@ -63,6 +87,11 @@ static int walk(const mb_port_t* p, uint32_t base, uint32_t room, uint32_t off, 
         if (at + len > off + tot) return MB_E_CORRUPT;
         if (type == TLV_SHA256 && len == 32) { if (p->flash_read(base + at, t->sha256, 32)) return MB_E_IO; t->sha = true; }
         else if (type == TLV_ED25519 && len == 64) { if (p->flash_read(base + at, t->sig64, 64)) return MB_E_IO; t->sig = true; }
+        else if (type == TLV_ECDSA_SIG && len >= 8 && len <= 72 && !t->sig) {
+            uint8_t der[72];
+            if (p->flash_read(base + at, der, len)) return MB_E_IO;
+            if (der_to_raw(der, len, t->sig64)) t->sig = t->ecdsa = true;
+        }
         else if (type == TLV_SIG_PURE) t->pure = true;
         else if (type >= TLV_ENC_FIRST && type <= TLV_ENC_LAST) t->enc = true;
         else if (type == TLV_SEC_CNT && len == 4) {
@@ -111,7 +140,7 @@ int mb_mcuboot_probe(const mb_port_t* p, int slot, mb_slot_info_t* out) {
     copy_target(x, p);
     x->arch = MB_ARCH_ANY;
     if (t.sig) {
-        x->flags |= MB_IMG_F_SIGNED;
+        x->flags |= MB_IMG_F_SIGNED | (t.ecdsa ? MB_IMG_F_ECDSA : 0);
         memcpy(x->signature, t.sig64, 64);
     }
     out->header_ok = true;

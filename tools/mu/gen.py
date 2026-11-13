@@ -13,19 +13,32 @@ NATIVE_HDR = 0x1000
 VECTOR_MODES = {"vtor": 0, "remap": 1, "relay": 2}
 
 
-def read_keys(path: str) -> list[bytes]:
-    keys = []
+def read_keys_any(path: str) -> tuple[list[bytes], list[bytes]]:
+    """(Ed25519 keys, P-256 keys): one public key per line, 64 hex digits (Ed25519)
+    or 128 hex digits (P-256 X || Y, as mbtool keygen --type p256 writes)"""
+    ed, p256 = [], []
     for line in Path(path).read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         k = bytes.fromhex(line.split()[0])
-        if len(k) != 32:
-            raise ValueError(f"{path}: each key is 64 hex digits")
-        keys.append(k)
-    if not keys:
+        if len(k) == 32:
+            ed.append(k)
+        elif len(k) == 64:
+            p256.append(k)
+        else:
+            raise ValueError(f"{path}: each key is 64 (Ed25519) or 128 (P-256) hex digits")
+    if not ed and not p256:
         raise ValueError(f"{path}: no keys")
-    return keys
+    return ed, p256
+
+
+def read_keys(path: str) -> list[bytes]:
+    """Ed25519 keys only (console unlock, signed config)"""
+    ed, _ = read_keys_any(path)
+    if not ed:
+        raise ValueError(f"{path}: no Ed25519 keys (console unlock and signed configs use Ed25519)")
+    return ed
 
 
 def _c_bytes(b: bytes) -> str:
@@ -56,11 +69,18 @@ def key_macros(cfg: Config) -> list[str]:
     path = cfg.effective("KEYS")
     if not path or not cfg.effective("SIGNATURES"):
         return []
-    keys = read_keys(path)
-    out = [f"#define MB_TRUSTED_KEY_COUNT {len(keys)}",
-           "#define MB_TRUSTED_KEYS {" + ",".join(_c_bytes(k) for k in keys) + "}"]
+    keys, p256 = read_keys_any(path)
+    out = []
+    if keys:
+        out += [f"#define MB_TRUSTED_KEY_COUNT {len(keys)}",
+                "#define MB_TRUSTED_KEYS {" + ",".join(_c_bytes(k) for k in keys) + "}"]
+    if p256:
+        if not cfg.effective("ECDSA"):
+            raise ValueError(f"{path} has P-256 keys: turn on ECDSA, or remove them")
+        out += [f"#define MB_TRUSTED_P256_KEY_COUNT {len(p256)}",
+                "#define MB_TRUSTED_P256_KEYS {" + ",".join(_c_bytes(k) for k in p256) + "}"]
     if cfg.effective("CONSOLE_AUTH"):
-        ukeys = read_keys(cfg.effective("UNLOCK_KEYS")) if cfg.effective("UNLOCK_KEYS") else keys
+        ukeys = read_keys(cfg.effective("UNLOCK_KEYS")) if cfg.effective("UNLOCK_KEYS") else read_keys(path)
         out += [f"#define MB_UNLOCK_KEY_COUNT {len(ukeys)}",
                 "#define MB_UNLOCK_KEYS {" + ",".join(_c_bytes(k) for k in ukeys) + "}"]
     return out
@@ -392,7 +412,7 @@ def mcu_outputs(cfg: Config, lay: Layout, out: Path):
 
 VENDOR_FLASH = {"stm32": "port/stm32/stm32_flash.c", "nrf": "port/nrf/nrf_flash.c", "samd": "port/samd/samd_flash.c"}
 CLIENT_CORE = ["core/mb_hash.c", "core/mb_ed25519.c", "core/mb_image.c", "core/mb_bcl.c", "core/mb_config.c",
-               "core/mb_control.c", "core/mb_grub.c", "core/mb_recv.c", "core/mb_formats.c", "core/mb_floor.c", "client/mb_client.c",
+               "core/mb_control.c", "core/mb_grub.c", "core/mb_recv.c", "core/mb_formats.c", "core/mb_floor.c", "core/mb_ecdsa.c", "client/mb_client.c",
                "port/cortexm/cm_port.c"]
 CHUNK = {"stm32": "8 bytes (L4/G0/G4 program 8 bytes once per erase)", "nrf": "4 bytes",
          "samd": "64 bytes on SAM D21 (a page is written once per erase), 16 on SAM D51 (ECC quad-words)"}

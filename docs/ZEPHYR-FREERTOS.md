@@ -48,8 +48,10 @@ themselves at all (neither MCUboot's way nor MimiBoot's, see below), also turn o
 What MimiBoot checks: the image header, the SHA-256 TLV over header + image +
 protected TLVs (every boot), the ED25519 TLV (imgtool's default mode signs the
 digest), the security counter TLV for anti-rollback. Refused: encrypted images and
-"pure" signatures. RSA/ECDSA signatures aren't checked: such an image counts as
-unsigned, so it boots only while signatures are optional.
+"pure" signatures. ECDSA P-256 signatures (imgtool `-t ecdsa-p256`, the ECDSA_SIG
+TLV) are checked when the build has `ECDSA` on: put the key's raw public point in
+`KEYS` (128 hex digits, X then Y). RSA signatures aren't checked: such an image
+counts as unsigned, so it boots only while signatures are optional.
 
 ### Confirming from Zephyr
 

@@ -45,6 +45,7 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mb_ed25519 as ed25519  # noqa: E402
+import mb_p256 as p256  # noqa: E402
 
 MAGIC = 0x474D494D
 HDR_VERSION = 2
@@ -54,7 +55,7 @@ PAYLOAD_OFF = 4096
 LOAD_CHAIN, LOAD_RAM = 1, 2
 ARCH_ANY, ARCH_ARM, ARCH_RISCV = 0, 1, 2
 ARCH_NAMES = {ARCH_ANY: "any", ARCH_ARM: "arm", ARCH_RISCV: "riscv"}
-F_GOLDEN, F_SIGNED = 0x1, 0x2
+F_GOLDEN, F_SIGNED, F_ECDSA = 0x1, 0x2, 0x4
 TARGET = "rp2350"
 XIP_BASE = 0x10000000
 SRAM_BASE, SRAM_END = 0x20000000, 0x20082000
@@ -226,25 +227,27 @@ def build_header(payload, name, version, secver=0, golden=False, trial_ms=0, tar
                  load_type=LOAD_CHAIN, load_addr=0, handoff_addr=0, secret=None, build_time=None, entry=None):
     flags = F_GOLDEN if golden else 0
     key_id = 0
+    if secret is not None and not isinstance(secret, Secret):
+        secret = Secret("ed25519", secret)
     if secret:
-        flags |= F_SIGNED
-        key_id = struct.unpack("<I", ed25519.public_key(secret)[:4])[0]
+        flags |= F_SIGNED | (F_ECDSA if secret.ecdsa else 0)
+        key_id = secret.key_id
     fields = [MAGIC, HDR_VERSION, HDR_SIZE, flags, load_type, PAYLOAD_OFF, len(payload), hashlib.sha256(payload).digest(),
               version, secver, int(time.time() if build_time is None else build_time), load_addr, load_addr if entry is None else entry, trial_ms,
               name.encode()[:31].ljust(32, b"\0"), target.encode()[:15].ljust(16, b"\0"), arch, b"\0" * 3,
               handoff_addr, key_id, b"\0" * 48, b"\0" * 64]
     body = struct.pack(HDR_FMT, *fields)
     if secret:
-        body = body[:SIGNED_BYTES] + ed25519.sign(secret, body[:SIGNED_BYTES])
+        body = body[:SIGNED_BYTES] + secret.sign(body[:SIGNED_BYTES])
     return body + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF)
 
 
 def resign(hdr, secret):
     body = bytearray(hdr[:HDR_SIZE - 4])
-    flags = struct.unpack_from("<I", body, 8)[0] | F_SIGNED
+    flags = (struct.unpack_from("<I", body, 8)[0] & ~F_ECDSA) | F_SIGNED | (F_ECDSA if secret.ecdsa else 0)
     struct.pack_into("<I", body, 8, flags)
-    struct.pack_into("<I", body, 136, struct.unpack("<I", ed25519.public_key(secret)[:4])[0])
-    body[SIGNED_BYTES:] = ed25519.sign(secret, bytes(body[:SIGNED_BYTES]))
+    struct.pack_into("<I", body, 136, secret.key_id)
+    body[SIGNED_BYTES:] = secret.sign(bytes(body[:SIGNED_BYTES]))
     return bytes(body) + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF)
 
 
@@ -274,6 +277,42 @@ def image_file(path):
     elif hashlib.sha256(payload).digest() != h["sha256"]:
         problems.append("payload SHA-256 mismatch")
     return img, h, payload, problems
+
+
+class Secret:
+    """A signing key: Ed25519 (file: 64 hex digits) or ECDSA P-256 (file: "p256:" + 64 hex digits)."""
+
+    def __init__(self, kind, raw):
+        self.kind, self.raw = kind, raw
+        self.ecdsa = kind == "p256"
+        self.public = p256.public_key(raw) if self.ecdsa else ed25519.public_key(raw)
+        self.key_id = struct.unpack("<I", self.public[:4])[0]      # the first 4 bytes of the public key
+
+    def sign(self, msg):
+        return p256.sign(self.raw, msg) if self.ecdsa else ed25519.sign(self.raw, msg)
+
+
+def read_secret(path):
+    s = open(path).read().strip()
+    if s.startswith("p256:"):
+        raw = bytes.fromhex(s[5:])
+        if len(raw) != 32:
+            die("%s: a P-256 secret is 32 bytes" % path)
+        return Secret("p256", raw)
+    return Secret("ed25519", read_key(path))
+
+
+def read_public(path):
+    """-> (kind, key): 64 hex digits Ed25519, 128 hex digits P-256 (X || Y)"""
+    try:
+        k = bytes.fromhex(open(path).read().split()[0])
+    except (ValueError, IndexError):
+        die("%s: expected a hex public key" % path)
+    if len(k) == 32:
+        return "ed25519", k
+    if len(k) == 64:
+        return "p256", k
+    die("%s: a public key is 32 (Ed25519) or 64 (P-256) bytes" % path)
 
 
 def read_key(path):
@@ -351,7 +390,7 @@ def cmd_pack(a):
             die("RP2040 vector table has an invalid stack pointer or reset PC")
         if load_addr + len(payload) > 0x20020000:
             die("RP2040 RAM payload overlaps loader at 0x20020000")
-    secret = read_key(a.key) if a.key else None
+    secret = read_secret(a.key) if a.key else None
     name = a.name or os.path.splitext(os.path.basename(a.input))[0]
     hdr = build_header(payload, name, parse_version(a.version), a.secver, a.golden, a.trial_ms, a.target, arch,
                        load_type, load_addr, handoff, secret, entry=vectors if a.target=="rp2040" else None)
@@ -377,8 +416,15 @@ def cmd_info(a):
     print("built     %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(h["build_time"])))
     if h["flags"] & F_SIGNED:
         line = "signed    key %08x" % h["key_id"]
+        line += " (%s)" % ("ECDSA P-256" if h["flags"] & F_ECDSA else "Ed25519")
         if a.pub:
-            ok = ed25519.verify(read_key(a.pub), img[:SIGNED_BYTES], h["signature"])
+            kind, pub = read_public(a.pub)
+            if (kind == "p256") != bool(h["flags"] & F_ECDSA):
+                ok = False
+            elif kind == "p256":
+                ok = p256.verify(pub, img[:SIGNED_BYTES], h["signature"])
+            else:
+                ok = ed25519.verify(pub, img[:SIGNED_BYTES], h["signature"])
             line += ": signature %s" % ("OK" if ok else "BAD")
             if not ok:
                 problems.append("bad signature")
@@ -397,9 +443,10 @@ def cmd_sign(a):
     img, h, _, problems = image_file(a.image)
     if problems:
         die("refusing to sign a broken image: " + ", ".join(problems))
-    img = resign(img[:HDR_SIZE], read_key(a.key)) + img[HDR_SIZE:]
+    secret = read_secret(a.key)
+    img = resign(img[:HDR_SIZE], secret) + img[HDR_SIZE:]
     open(a.output or a.image, "wb").write(img)
-    print("signed %s with key %s" % (a.output or a.image, ed25519.public_key(read_key(a.key))[:4].hex()))
+    print("signed %s with %s key %s" % (a.output or a.image, secret.kind, secret.public[:4].hex()))
 
 
 def cmd_keygen(a):
@@ -407,13 +454,20 @@ def cmd_keygen(a):
     if os.path.exists(base + ".key") and not a.force:
         die("%s.key exists (--force to replace it; images signed with it would stop booting)" % base)
     os.makedirs(os.path.dirname(base) or ".", exist_ok=True)
-    secret = os.urandom(32)
-    pub = ed25519.public_key(secret)
-    open(base + ".key", "w").write(secret.hex() + "\n")
+    if a.type == "p256":
+        secret = p256.generate()
+        pub = p256.public_key(secret)
+        open(base + ".key", "w").write("p256:" + secret.hex() + "\n")
+    else:
+        secret = os.urandom(32)
+        pub = ed25519.public_key(secret)
+        open(base + ".key", "w").write(secret.hex() + "\n")
     open(base + ".pub", "w").write(pub.hex() + "\n")
     with open(base + "_keys.h", "w") as f:
         f.write("/* MimiBoot trusted keys: generated by mbtool keygen. Build with -DMB_KEYS_HEADER=... */\n")
-        f.write("#define MB_TRUSTED_KEY_COUNT 1\n#define MB_TRUSTED_KEYS { { %s } }\n" % ", ".join("0x%02x" % b for b in pub))
+        tag = "P256_" if a.type == "p256" else ""
+        f.write("#define MB_TRUSTED_%sKEY_COUNT 1\n#define MB_TRUSTED_%sKEYS { { %s } }\n"
+                % (tag, tag, ", ".join("0x%02x" % b for b in pub)))
     gi = os.path.join(os.path.dirname(base) or ".", ".gitignore")
     lines = open(gi).read().split() if os.path.exists(gi) else []
     if "*.key" not in lines:
@@ -781,6 +835,8 @@ def main():
     p = sub.add_parser("sign"); p.add_argument("image"); p.add_argument("--key", required=True); p.add_argument("-o", "--output")
     p.set_defaults(fn=cmd_sign)
     p = sub.add_parser("keygen"); p.add_argument("--out", default="keys/mimiboot"); p.add_argument("--force", action="store_true")
+    p.add_argument("--type", choices=["ed25519", "p256"], default="ed25519",
+                   help="ed25519 (default) or p256 (ECDSA P-256: boards built with ECDSA)")
     p.set_defaults(fn=cmd_keygen)
     p = sub.add_parser("uf2"); p.add_argument("image"); p.add_argument("--slot", required=True); p.add_argument("-o", "--output")
     p.set_defaults(fn=cmd_uf2)

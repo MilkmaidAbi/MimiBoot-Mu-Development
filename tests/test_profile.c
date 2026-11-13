@@ -4,6 +4,7 @@
  * core must still pick and boot what it can.
  */
 #include "tests/sim_port.h"
+#include "tests/gen_signed.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -69,6 +70,21 @@ static void put_trailer(int slot, uint32_t align, int image_ok) {
     uint32_t ok_off = (size - 16 - align) / align * align;
     sim_flash[off + ok_off] = (uint8_t)image_ok;
 }
+
+#if MB_FEAT_ECDSA
+// put_mcuboot()'s image plus an ECDSA_SIG TLV (0x22, DER) made by tests/gen_signed.py
+static void put_mcuboot_ecdsa(int slot, int corrupt) {
+    put_mcuboot(slot, MCUBOOT_ECDSA_SEED);
+    uint32_t at = sim_port.layout->slot[slot].offset + 0x200 + 1024;
+    uint32_t n = sizeof mcuboot_ecdsa_der;
+    uint8_t* t = sim_flash + at;
+    t[2] = (uint8_t)(40 + 4 + n);                   // the TLV area grows by one entry
+    uint8_t* e = t + 40;
+    e[0] = 0x22; e[1] = 0; e[2] = (uint8_t)n; e[3] = 0;
+    memcpy(e + 4, mcuboot_ecdsa_der, n);
+    if (corrupt) e[4 + n - 3] ^= 0x01;              // a bit of s
+}
+#endif
 
 static int state_of(int slot) {
     mb_bcl_t lg;
@@ -172,6 +188,20 @@ int main(void) {
     sim_flash[sim_port.layout->slot[MB_SLOT_A].offset + sim_port.layout->slot[MB_SLOT_A].size - 3] ^= 0x40;
     sim_power_on();
     CHECK(state_of(MB_SLOT_A) == (MB_FEAT_AB_TRIAL ? MB_ST_TRIAL : MB_ST_GOOD), "damaged magic: no confirmation");
+
+#if MB_FEAT_ECDSA
+    // imgtool-style ECDSA P-256 (DER, over the image digest), signatures required
+    sim_reset();
+    sim_port.require_signature = true;
+    put_mcuboot_ecdsa(MB_SLOT_A, 0);
+    CHECK(sim_power_on() == SIM_BOOTED && sim.booted_slot == MB_SLOT_A, "MCUboot + ECDSA_SIG TLV boots with signatures required");
+    sim_reset();
+    sim_port.require_signature = true;
+    put_mcuboot_ecdsa(MB_SLOT_A, 1);
+    o = sim_power_on();
+    CHECK(o != SIM_BOOTED, "MCUboot + a damaged ECDSA signature: refused");
+    sim_port.require_signature = false;
+#endif
 #endif
 
 #if MB_FEAT_IMG_RAW

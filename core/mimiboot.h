@@ -32,6 +32,9 @@ void mb_sha512_final(mb_sha512_t* s, uint8_t out[64]);
 /* Ed25519 (RFC 8032) verification only: the private key never sees the device */
 bool mb_ed25519_verify(const uint8_t sig[64], const void* msg, size_t len, const uint8_t pub[32]);
 
+/* ECDSA P-256 over a SHA-256 digest (MB_FEAT_ECDSA): sig = r || s, pub = X || Y, big-endian */
+bool mb_ecdsa_p256_verify(const uint8_t sig[64], const uint8_t digest[32], const uint8_t pub[64]);
+
 /* ---- slots ------------------------------------------------------------------ */
 const char* mb_slot_name(const mb_port_t* p, int slot);            /* "a" "b" "g" "c" ... */
 int  mb_slot_parse(const mb_port_t* p, const char* s);             /* name -> index, -1 */

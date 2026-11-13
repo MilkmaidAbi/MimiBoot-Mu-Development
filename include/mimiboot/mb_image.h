@@ -37,6 +37,7 @@
 /* flags */
 #define MB_IMG_F_GOLDEN     0x0001  /* built to be the recovery image */
 #define MB_IMG_F_SIGNED     0x0002  /* signature[] is valid for key_id */
+#define MB_IMG_F_ECDSA      0x0004  /* with F_SIGNED: ECDSA P-256 (r || s) over SHA-256 of the signed bytes, not Ed25519 */
 
 #define MB_VERSION(maj, min, pat)   (((uint32_t)(maj) << 24) | ((uint32_t)(min) << 16) | (uint32_t)(pat))
 #define MB_VERSION_MAJOR(v)         ((v) >> 24)

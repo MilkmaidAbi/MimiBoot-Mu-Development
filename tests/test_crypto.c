@@ -5,6 +5,7 @@
  */
 #include "core/mimiboot.h"
 #include "tests/wycheproof_ed25519.h"
+#include "tests/wycheproof_p256.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -86,11 +87,37 @@ void test_crypto(void) {
     printf("Ed25519 (Wycheproof, %u vectors)\n", (unsigned)(sizeof wp_ed25519 / sizeof wp_ed25519[0]));
     unsigned acc_yes = 0, acc_no = 0;
     for (unsigned i = 0; i < sizeof wp_ed25519 / sizeof wp_ed25519[0]; i++) {
-        const wp_ed25519_t* t = &wp_ed25519[i];
+        const wp_vector_t* t = &wp_ed25519[i];
         bool ok = t->sig_len == 64 && mb_ed25519_verify((const uint8_t*)t->sig, t->msg, t->msg_len, (const uint8_t*)t->pub);
         if (t->result == 2) { ok ? acc_yes++ : acc_no++; continue; }
         CK(ok == (t->result == 1), "Wycheproof tcId %d: expected %s, got %s", t->id, t->result ? "valid" : "invalid",
            ok ? "accepted" : "refused");
     }
     printf("  'acceptable' vectors: %u accepted, %u refused\n", acc_yes, acc_no);
+
+#if MB_FEAT_ECDSA
+    // ECDSA P-256 (micro-ecc) against Wycheproof's P1363 vectors (raw r || s).
+    // The verifier takes a digest: hash the message here, as the image code does.
+    printf("ECDSA P-256 (Wycheproof, %u vectors)\n", (unsigned)(sizeof wp_p256 / sizeof wp_p256[0]));
+    for (unsigned i = 0; i < sizeof wp_p256 / sizeof wp_p256[0]; i++) {
+        const wp_vector_t* t = &wp_p256[i];
+        uint8_t d[32];
+        mb_sha256_t s;
+        mb_sha256_init(&s);
+        mb_sha256_update(&s, t->msg, t->msg_len);
+        mb_sha256_final(&s, d);
+        bool ok = t->sig_len == 64 && mb_ecdsa_p256_verify((const uint8_t*)t->sig, d, (const uint8_t*)t->pub);
+        // Known: micro-ecc refuses two *valid* signatures built so that its
+        // Shamir double-multiplication passes through the point at infinity
+        // (tcId 60) or hits an extreme k / s^-1 (tcId 210). A false reject is
+        // safe (nothing forged gets in) and a real signer lands there with
+        // probability ~2^-256. Pinned here so a change in either direction shows.
+        if (t->id == 60 || t->id == 210) {
+            CK(!ok, "Wycheproof P-256 tcId %d: known false reject now accepted (micro-ecc changed?)", t->id);
+            continue;
+        }
+        CK(ok == (t->result == 1), "Wycheproof P-256 tcId %d: expected %s, got %s", t->id, t->result ? "valid" : "invalid",
+           ok ? "accepted" : "refused");
+    }
+#endif
 }

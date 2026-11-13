@@ -38,6 +38,13 @@ static const mb_keyring_t keyring = { MB_TRUSTED_KEY_COUNT, trusted };
 #ifndef MB_REQUIRE_SIGNATURE
 #define MB_REQUIRE_SIGNATURE 0
 #endif
+#if defined(MB_TRUSTED_P256_KEY_COUNT) && MB_FEAT_ECDSA
+static const uint8_t trusted_p256[MB_TRUSTED_P256_KEY_COUNT][64] = MB_TRUSTED_P256_KEYS;
+static const mb_keyring_p256_t p256_ring = { MB_TRUSTED_P256_KEY_COUNT, trusted_p256 };
+#define P256_RING (&p256_ring)
+#else
+#define P256_RING NULL
+#endif
 #if defined(MB_UNLOCK_KEY_COUNT) && !defined(MB_CM_CLIENT)
 static const uint8_t unlock_trusted[MB_UNLOCK_KEY_COUNT][32] = MB_UNLOCK_KEYS;
 static const mb_keyring_t unlock_ring = { MB_UNLOCK_KEY_COUNT, unlock_trusted };
@@ -223,7 +230,7 @@ static int client_self_slot(void) {
 }
 const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
-    .keys = KEYRING, .require_signature = MB_REQUIRE_SIGNATURE,
+    .keys = KEYRING, .p256_keys = P256_RING, .require_signature = MB_REQUIRE_SIGNATURE,
     .flash_read = f_read, .flash_erase = f_erase, .flash_program = f_program, .reboot = client_reboot,
     .self_slot = client_self_slot, .floor = FLOOR,
 };
@@ -399,7 +406,7 @@ static uint32_t caps(void) { return MB_CAP_CONTROL | MB_CAP_CONFIG | MB_CAP_RAM 
 
 const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
-    .keys = KEYRING, .require_signature = MB_REQUIRE_SIGNATURE, .unlock_keys = UNLOCK_RING, .random = RANDOM,
+    .keys = KEYRING, .p256_keys = P256_RING, .require_signature = MB_REQUIRE_SIGNATURE, .unlock_keys = UNLOCK_RING, .random = RANDOM,
     .flash_read = f_read, .flash_erase = f_erase, .flash_program = f_program,
     .can_start = can_start, .launch = launch, .ram_ptr = ram_ptr, .launch_ram = launch_ram,
     .time_ms = time_ms, .watchdog_arm = wd_arm, .watchdog_disarm = wd_off, .button = button,

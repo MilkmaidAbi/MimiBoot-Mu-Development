@@ -759,6 +759,44 @@ static void put_signed(int slot, const uint8_t* hdr, uint32_t seed, uint32_t siz
     put_image(slot, &h);
 }
 
+static void test_ecdsa_images(void) {
+#if MB_FEAT_ECDSA
+    printf("ECDSA P-256 images (mbtool-signed, micro-ecc-verified)\n");
+    sim_reset();
+    put_signed(MB_SLOT_A, signed_p256_hdr, SIGNED_P256_SEED, SIGNED_P256_SIZE);
+    mb_slot_info_t info;
+    mb_image_read_header(&sim_port, MB_SLOT_A, &info);
+    CHECK((info.hdr.flags & MB_IMG_F_ECDSA) && mb_image_check_sig(&sim_port, &info) == MB_OK, "mbtool's P-256 signature verifies");
+    sim_port.require_signature = true;
+    CHECK(boot() == MB_SLOT_A, "required + P-256 signed: boots");
+    app_confirms();
+    put_signed(MB_SLOT_B, signed_p256_other_hdr, SIGNED_P256_OTHER_SEED, SIGNED_P256_OTHER_SIZE);
+    CHECK(boot() == MB_SLOT_A && log_now().slot[MB_SLOT_B].bad_reason == MB_BAD_SIGNATURE, "P-256 key not trusted: refused");
+    mb_image_hdr_t h;
+    memcpy(&h, signed_p256_hdr, sizeof h);
+    h.security_version = 7;                         // a signed field changed (CRC fixed up)
+    mb_image_seal(&h);
+    make_payload(SIGNED_P256_SEED, SIGNED_P256_SIZE);
+    put_image(MB_SLOT_B, &h);
+    CHECK(boot() == MB_SLOT_A && log_now().slot[MB_SLOT_B].bad_reason == MB_BAD_SIGNATURE, "P-256: field changed after signing refused");
+    memcpy(&h, signed_p256_hdr, sizeof h);
+    h.flags &= ~MB_IMG_F_ECDSA;                     // claim it's Ed25519: must not pass either way
+    mb_image_seal(&h);
+    put_image(MB_SLOT_B, &h);
+    CHECK(boot() == MB_SLOT_A && log_now().slot[MB_SLOT_B].bad_reason == MB_BAD_SIGNATURE, "algorithm flag flipped: refused");
+    // no P-256 keys in the build: a P-256 image is unsigned as far as it can tell
+    const mb_keyring_p256_t* keep = sim_port.p256_keys;
+    sim_port.p256_keys = NULL;
+    sim_reset();
+    sim_port.p256_keys = NULL;
+    put_signed(MB_SLOT_A, signed_p256_hdr, SIGNED_P256_SEED, SIGNED_P256_SIZE);
+    sim_port.require_signature = true;
+    CHECK(boot() == -SIM_ROM, "no P-256 keys + required signatures: refused");
+    sim_port.require_signature = false;
+    sim_port.p256_keys = keep;
+#endif
+}
+
 static void test_signatures(void) {
     printf("signatures (Python-signed, C-verified)\n");
     sim_reset();
@@ -1303,6 +1341,7 @@ int main(int argc, char** argv) {
     test_entries();
     test_handoff();
     test_signatures();
+    test_ecdsa_images();
     test_guard();
     test_ram_images();
     test_universal();

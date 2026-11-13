@@ -32,6 +32,9 @@
 #ifndef MB_FEAT_CFG_FILE
 #define MB_FEAT_CFG_FILE        1   /* boot config text kept in flash (else: built-in entries) */
 #endif
+#ifndef MB_FEAT_ECDSA
+#define MB_FEAT_ECDSA           0   /* ECDSA P-256 signatures (micro-ecc), besides Ed25519 */
+#endif
 #ifndef MB_FEAT_CFG_SIGNED
 #define MB_FEAT_CFG_SIGNED      0   /* only a config signed with a trusted key is used */
 #endif

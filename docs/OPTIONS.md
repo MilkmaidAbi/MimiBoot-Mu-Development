@@ -164,6 +164,16 @@ Verify image signatures against the public keys compiled in (KEYS). About 6 KB o
 
 C macro: `MB_FEAT_SIGNATURES`
 
+### `ECDSA`: ECDSA P-256 signatures as well
+
+default **off**; needs `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)
+
+Also accept images signed with ECDSA P-256: MimiBoot images signed with a P-256 key (mbtool keygen --type p256, then pack --key) and Zephyr/MCUboot images signed by imgtool with an ecdsa-p256 key (the ECDSA_SIG TLV). P-256 is on the EU's agreed-mechanisms list; Ed25519 isn't (it is recommended by ETSI TS 119 312).
+
+Put the P-256 public keys (128 hex digits) in the KEYS file next to any Ed25519 ones. The arithmetic is micro-ecc v1.2 (BSD), about 5 KB; a check takes longer than Ed25519 on the small cores.
+
+C macro: `MB_FEAT_ECDSA`
+
 ### `REQUIRE_SIGNATURE`: Refuse unsigned images (secure boot)
 
 default **off**; needs `SIGNATURES`. (full core)

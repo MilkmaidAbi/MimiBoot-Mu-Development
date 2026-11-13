@@ -36,6 +36,12 @@ typedef struct {
     const uint8_t (*keys)[32];
 } mb_keyring_t;
 
+/* Trusted ECDSA P-256 keys (MB_FEAT_ECDSA): the raw point X || Y */
+typedef struct {
+    int count;
+    const uint8_t (*keys)[64];
+} mb_keyring_p256_t;
+
 /* Protected rollback floors (core/mb_floor.c): one erase unit the running
  * image can't write (the port locks it), read and programmed through these
  * functions, which bypass the port's "never the bootloader region" check.
@@ -59,6 +65,7 @@ typedef struct mb_port {
 
     /* security policy: build-time constants */
     const mb_keyring_t* keys;   /* NULL: no keys, signatures can't be checked */
+    const mb_keyring_p256_t* p256_keys;     /* MB_FEAT_ECDSA: P-256 keys (NULL: none) */
     bool require_signature;     /* refuse unsigned images */
     const mb_keyring_t* unlock_keys;    /* MB_FEAT_CONSOLE_AUTH: who may unlock the console */
 

@@ -466,6 +466,29 @@ def main():
         o = boot(machine, flash_image(work, "client", lay["flash_size"], boot_bin, g["offset"], cimg.read_bytes()))
         check(f"{board}: client library: slot from VTOR, validated handoff", "MU-CLIENT slot=2" in o and "handoff=1" in o, o)
 
+        # 6b. ECDSA P-256 (micro-ecc, as Thumb-2 code): a mbtool P-256 image with signatures
+        #     required boots; one signed by a stranger's P-256 key doesn't
+        mbtool("keygen", "--type", "p256", "--out", str(work / "p256"))
+        mbtool("keygen", "--type", "p256", "--out", str(work / "p256-stranger"))
+        (work / "mixed.pub").write_text((work / "trusted.pub").read_text() + (work / "p256.pub").read_text())
+        cfg_ec = Config(db, board)
+        cfg_ec.set("LAYOUT", "ab+golden")
+        cfg_ec.set("KEYS", str(work / "mixed.pub"))
+        cfg_ec.set("ECDSA", True)
+        cfg_ec.set("REQUIRE_SIGNATURE", True)
+        out_ec = work / f"{board}-ecdsa"
+        info_ec = mubuild.build(cfg_ec, out_ec, log=lambda *a: None)
+        print(f"{board} (ECDSA): bootloader {info_ec['flash_used']} B flash")
+        for keyname, want in (("p256", True), ("p256-stranger", False)):
+            eimg = work / f"{keyname}.mimg"
+            mbtool("pack", str(elf), "--target", lay["target"], "-o", str(eimg), "--golden", "--key", str(work / f"{keyname}.key"))
+            o = boot(machine, flash_image(work, f"ecdsa-{keyname}", lay["flash_size"], out_ec / "mimiboot.bin", g["offset"],
+                                          eimg.read_bytes()))
+            if want:
+                check(f"{board}: ECDSA P-256 signed image boots (signatures required)", f"MU-APP {board}-native" in o, o)
+            else:
+                check(f"{board}: image signed by an untrusted P-256 key is refused", "MU-APP" not in o and "nothing bootable" in o, o)
+
         # 7. Zephyr/MCUboot image signed by imgtool with an Ed25519 key
         if not imgtool:
             print("[SKIP] MCUboot cases: set IMGTOOL")
@@ -504,6 +527,26 @@ def main():
         o = boot(machine, flash_image(work, "mcuboot-unsigned", lay["flash_size"], out2 / "mimiboot.bin", g["offset"],
                                       unsigned.read_bytes()))
         check(f"{board}: unsigned MCUboot image refused when signatures are required", "MU-APP" not in o and "nothing bootable" in o, o)
+
+        # 8. imgtool with an ECDSA P-256 key (MCUboot's ECDSA_SIG TLV, DER)
+        eckey = work / "ec.pem"
+        run([imgtool, "keygen", "-k", eckey, "-t", "ecdsa-p256"])
+        ecpub = subprocess.run([str(Path(imgtool).with_name("python")), "-c",
+                                "import sys;from cryptography.hazmat.primitives import serialization as s;"
+                                "k=s.load_pem_private_key(open(sys.argv[1],'rb').read(),None);"
+                                "print(k.public_key().public_bytes(s.Encoding.X962,s.PublicFormat.UncompressedPoint)[1:].hex())",
+                                str(eckey)], capture_output=True, text=True, check=True).stdout.strip()
+        (work / "ec.pub").write_text(ecpub + "\n")
+        ecsigned = work / "mcuboot.ecdsa.bin"
+        run([imgtool, "sign", "--header-size", "0x200", "--pad-header", "--align", "8", "--version", "1.2.3",
+             "--slot-size", hex(g["size"]), "--key", eckey, mc_bin, ecsigned])
+        cfg.set("KEYS", str(work / "ec.pub"))
+        cfg.set("ECDSA", True)
+        out3 = work / f"{board}-mcuboot-ecdsa-build"
+        mubuild.build(cfg, out3, log=lambda *a: None)
+        o = boot(machine, flash_image(work, "mcuboot-ecdsa", lay["flash_size"], out3 / "mimiboot.bin", g["offset"],
+                                      ecsigned.read_bytes()))
+        check(f"{board}: imgtool ECDSA P-256 Zephyr/MCUboot image boots (signature required)", "MU-APP mcuboot" in o, o)
 
     if not os.environ.get("MU_QEMU_KEEP"):
         shutil.rmtree(work, ignore_errors=True)

@@ -142,8 +142,9 @@ falls back.
 
 | Mechanism | Used for |
 |---|---|
-| Ed25519 (RFC 8032) | image signatures, console unlock |
-| SHA-256 | payload hashes; Ed25519 uses SHA-512 internally |
+| Ed25519 (RFC 8032) | image signatures, console unlock, signed config |
+| ECDSA P-256 (FIPS 186, `ECDSA`) | image signatures: MimiBoot images and imgtool `ecdsa-p256` Zephyr images |
+| SHA-256 | payload hashes, the digest ECDSA signs; Ed25519 uses SHA-512 internally |
 | CRC-32 | corruption checks only (headers, log, config, upload frames, the Lite core): not a security mechanism |
 
 Ed25519 isn't on the EU's ECCG agreed-mechanisms list (ECDSA P-256 and LMS
@@ -153,8 +154,17 @@ every invalid one (malleable S, non-canonical encodings, truncated or padded
 signatures, wrong keys) is refused. Of the 29 cases Wycheproof leaves to the
 implementation (small-order and mixed-order public keys), all are accepted:
 the check is cofactorless. That matters only when an attacker picks the
-public key, and here the keys are compiled in. ECDSA P-256 and LMS support are
-planned.
+public key, and here the keys are compiled in.
+
+ECDSA P-256 is on the ECCG list. The arithmetic is micro-ecc v1.2 (BSD 2-clause,
+`third_party/micro-ecc`, unmodified, portable C). Against Wycheproof's 262 P-256
+vectors every invalid signature is refused and every valid one accepted except
+two: signatures built so that micro-ecc's combined multiplication passes through
+the point at infinity (tcId 60) or an extreme intermediate value (tcId 210).
+Those are false rejects, never false accepts, and an honest signer hits them
+with probability about 2^-256; the test pins them so any change shows. mbtool's
+own P-256 signer (`tools/mb_p256.py`, RFC 6979 deterministic nonces) gets all
+262 right and matches RFC 6979's published test vector. LMS support is planned.
 
 The AVR Lite core does no cryptography at all.
 
