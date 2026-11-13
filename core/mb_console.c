@@ -457,9 +457,24 @@ static void cmd_cfg(const mb_port_t* p, mb_config_t* cfg, int argc, char** argv)
 
 typedef enum { MENU_AUTO, MENU_BOOT, MENU_EDIT, MENU_SHELL, MENU_REBOOT, MENU_ROM } menu_result_t;
 
+// One line saying what this build enforces, yellow when it is weaker than
+// signed-only + hash every boot + a locked bootloader (where the port can).
+static void security_line(const mb_port_t* p) {
+    bool keys = p->keys && p->keys->count;
+    bool weak = !p->require_signature || MB_BOOT_VERIFY != MB_BOOT_VERIFY_EVERY ||
+                (p->lockdown && strstr(p->lockdown, "NOT"));
+    mb_printf(p, "  %ssecurity: %s, hash %s, %s%s%s\033[0m\n", weak ? "\033[33m" : "\033[2m",
+              p->require_signature ? "signed images only" : keys ? "unsigned images ALLOWED" : "no signature checks",
+              MB_BOOT_VERIFY == MB_BOOT_VERIFY_EVERY ? "every boot" : MB_BOOT_VERIFY == MB_BOOT_VERIFY_ONCE ? "once per image" : "never",
+              !MB_FEAT_ANTI_ROLLBACK ? "no anti-rollback" : p->floor ? "rollback floors in locked flash" : "rollback floor in the boot log",
+              p->lockdown ? ", " : "", p->lockdown ? p->lockdown : "");
+}
+
 static void draw_menu(const mb_port_t* p, const mb_bcl_t* log, const mb_config_t* cfg, mb_slot_info_t* info, int sel, int dflt, int secs) {
-    mb_printf(p, "\033[H\033[2J\033[1;38;5;208m  MimiBoot-Night %s \"%s\"\033[0m   %s, %s\n\n", MIMIBOOT_VERSION, MIMIBOOT_CODENAME,
+    mb_printf(p, "\033[H\033[2J\033[1;38;5;208m  MimiBoot-Night %s \"%s\"\033[0m   %s, %s\n", MIMIBOOT_VERSION, MIMIBOOT_CODENAME,
               p->name, p->reset_reason ? p->reset_reason() : "");
+    security_line(p);
+    put(p, "\n");
     for (int i = 0; i < cfg->n; i++) {
         const mb_entry_t* e = &cfg->e[i];
         int slot = e->slot == MB_SLOT_AB ? (log->cur.active < 2 ? log->cur.active : MB_SLOT_A) : e->slot;
@@ -647,7 +662,10 @@ static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_i
             }else{valid=argc==2;if(valid){if(!strcmp(argv[1],"restart"))q.action=MB_CONTROL_RESTART;else if(!strcmp(argv[1],"menu"))q.action=MB_CONTROL_MENU;else if(!strcmp(argv[1],"config"))q.action=MB_CONTROL_CONFIG;else if(!strcmp(argv[1],"flash"))q.action=MB_CONTROL_FLASH;else if(!strcmp(argv[1],"bootsel"))q.action=MB_CONTROL_ROM;else valid=false;}}
             int rc=valid?mb_control_submit(p,&q):MB_E_BADARG;mb_printf(p,"control: %d\n",rc);if(!rc&&p->reboot)p->reboot();
         }
-        else if (!strcmp(cmd, "version")) mb_printf(p, "MimiBoot-Night %s \"%s\" on %s (%s)\n", MIMIBOOT_VERSION, MIMIBOOT_CODENAME, p->name, arch_name(p->arch));
+        else if (!strcmp(cmd, "version")) {
+            mb_printf(p, "MimiBoot-Night %s \"%s\" on %s (%s)\n", MIMIBOOT_VERSION, MIMIBOOT_CODENAME, p->name, arch_name(p->arch));
+            security_line(p);
+        }
         else mb_printf(p, "unknown command '%s' (help)\n", cmd);
     }
 }

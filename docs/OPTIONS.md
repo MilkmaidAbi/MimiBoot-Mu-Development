@@ -12,7 +12,7 @@ Set options in the TUI (`python mimiconf.py`) or with `python mimiconf.py set ID
 | `minimal` | **Minimal: just boot the app**. The smallest bootloader that still checks what it starts. No console, no uploads, one slot, no OS hooks. Flash it, link your firmware for the slot, done. |
 | `hobby` | **Hobby: console, uploads, no ceremony**. Everything handy on the bench: boot menu, command line with diagnostics, uploads over the console, A/B slots without trials (new images just boot), Zephyr and raw firmware accepted. No signatures. |
 | `product` | **Product: safe field updates**. A/B + golden recovery, updates must confirm or roll back, watchdog on trial boots, crash-loop guard, anti-rollback, OS hooks. Signatures are checked when present. Diagnostics off. |
-| `secure` | **Secure boot: signed images only**. Only images signed with your keys start (set KEYS: mbtool keygen). Hash on every boot, anti-rollback, no raw/RAM images, no diagnostics, the bootloader's RAM is wiped before the handover. |
+| `secure` | **Secure boot: signed images only**. Only images signed with your keys start (set KEYS: mbtool keygen). Hash on every boot, anti-rollback, no raw/RAM images, no diagnostics, the bootloader's RAM is wiped before the handover. Where the chip can (nRF), the bootloader's flash is locked before an image starts and the rollback floors are kept in the locked region. The debug port is left alone: close it (DEBUG_LOCK, or mbtool provision) once the product is final. |
 
 `python mimiconf.py preset <name>` (or Presets in the TUI): every option back to its default, then the preset's values. On small chips a preset doesn't turn back on what the chip's defaults trim to fit.
 
@@ -177,6 +177,38 @@ C macro: `MB_REQUIRE_SIGNATURE`
 default ****; needs `SIGNATURES`. (full core)
 
 A text file with one Ed25519 public key per line (64 hex digits): mbtool keygen writes keys/mimiboot.pub. Enter a path; quotes are fine.
+
+### `BOOT_LOCK`: Lock the bootloader's flash before starting an image
+
+default **off**. (full core; builds: STM32/nRF/SAMD)
+
+Right before it jumps, the bootloader write-protects its own region until the next reset (nRF51: MPU PROTENSET, nRF52805/810/811/832: BPROT, nRF52820/833/840: ACL). The started image can't erase or rewrite the bootloader or its keys; it can still write its slots, the boot log and the config.
+
+Protection also holds while a debugger is attached (DISABLEINDEBUG cleared); flashing with a debugger still works because it resets the chip first.
+
+Other chips lock their bootloader with persistent fuses or option bytes instead: mbtool provision prints the commands.
+
+C macro: `MB_FEAT_BOOT_LOCK`
+
+### `PROTECTED_FLOOR`: Keep the rollback floors in the locked region
+
+default **off**; needs `BOOT_LOCK`. (full core; builds: STM32/nRF/SAMD)
+
+The anti-rollback floor and the newest golden version are kept in the last 4 KB of the bootloader region as well as in the boot log. The log is ordinary flash an app can rewrite; the copy in the locked region isn't, so a compromised app can't lower the floor and reinstall an old signed image.
+
+Costs one 4 KB page of the bootloader region (room for 256 raises).
+
+C macro: `MB_FEAT_PROTECTED_FLOOR`
+
+### `DEBUG_LOCK`: Keep the debug port closed
+
+default **off**. (full core; builds: STM32/nRF/SAMD)
+
+On nRF52 parts with the newer APPROTECT (most built since 2021), debug access is closed at reset and firmware opens it only if UICR says so. On: the bootloader never opens it and forces it closed until the next reset (APPROTECT.FORCEPROTECT), so neither it nor the app it starts can be debugged. Off: the bootloader opens it when UICR.APPROTECT is 0x5A, as Nordic's startup code does.
+
+Recovering a locked chip takes a full erase (nrfjprog --recover), which also removes the bootloader. Older nRF52 silicon and the nRF51 are locked with UICR alone: mbtool provision prints the command.
+
+C macro: `MB_FEAT_DEBUG_LOCK`
 
 ## Console, menu and upload
 

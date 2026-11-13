@@ -186,7 +186,7 @@ class QemuSerial:
 
 
 def build_nrf_app(work: Path, name: str, origin: int, ram_base: int, ram_end: int, probe: int,
-                  check: tuple | None = None) -> Path:
+                  check: tuple | None = None, floor_at: int | None = None) -> Path:
     ld = work / f"{name}.ld"
     ld.write_text(f"""MEMORY {{ FLASH (rx) : ORIGIN = 0x{origin:08x}, LENGTH = 32K
          RAM (rwx) : ORIGIN = 0x{ram_base:08x}, LENGTH = 0x{ram_end - ram_base:x} }}
@@ -199,7 +199,8 @@ SECTIONS {{ .isr_vector : {{ KEEP(*(.isr_vector)) }} > FLASH
     elf = work / f"{name}.elf"
     run([GCC, "-mcpu=cortex-m0", "-mthumb", "-Os", "-nostdlib", "-ffreestanding", f'-DNAME="{name}"',
          f"-DPROBE=0x{probe:08x}u", f"-I{ROOT / 'include'}", ROOT / "tests/qemu/nrf_app.c", f"-T{ld}", "-o", elf,
-         *([f"-DCHECK_LO=0x{check[0]:08x}u", f"-DCHECK_HI=0x{check[1]:08x}u"] if check else [])])
+         *([f"-DCHECK_LO=0x{check[0]:08x}u", f"-DCHECK_HI=0x{check[1]:08x}u"] if check else []),
+         *([f"-DFLOOR_AT=0x{floor_at:08x}u"] if floor_at is not None else [])])
     return elf
 
 
@@ -301,6 +302,28 @@ def nrf51_tests(work: Path, db, check):
     o = s.close()
     check(f"{board}: menu-only console: no command line offered or opened",
           "up/down + enter" in o and "c  command line" not in o and "command line. 'help'" not in o, o[-1500:])
+
+    # 5. BOOT_LOCK + PROTECTED_FLOOR: booting a golden image records its version in the
+    #    floor store at the end of the bootloader region, through the real NVMC driver.
+    #    (QEMU doesn't model the MPU block protection, so the lock itself isn't tested here.)
+    cfg3 = Config(db, board)
+    cfg3.set("LAYOUT", "ab+golden")
+    for k in ("BOOT_LOCK", "PROTECTED_FLOOR"):
+        cfg3.set(k, True)
+    out3 = work / f"{board}-floor"
+    info3 = mubuild.build(cfg3, out3, log=lambda *a: None)
+    lay3 = json.loads((out3 / "layout.json").read_text())
+    fl = lay3["floor"]
+    print(f"{board} (lock + floor): bootloader {info3['flash_used']} B of {info3['flash_region']} B, floors at 0x{fl['offset']:x}")
+    g3 = next(s for s in lay3["slots"] if s["name"] == "g")
+    elf = build_nrf_app(work, "nrf-floor", g3["link_native"], ram_lo, ram_hi, probe, floor_at=fl["offset"])
+    fimg = work / "nrf-floor.mimg"
+    mbtool("pack", str(elf), "--target", lay3["target"], "-o", str(fimg), "--golden", "--version", "1.2.3")
+    o = boot(machine, flash_image(work, "nrf-floor", flash, out3 / "mimiboot.bin", g3["offset"], fimg.read_bytes()))
+    ver = (1 << 24) | (2 << 16) | 3
+    want = f"floor=3146424d,{ver:08x},{(~ver) & 0xFFFFFFFF:08x},{(~0x3146424d) & 0xFFFFFFFF:08x}"
+    check(f"{board}: PROTECTED_FLOOR: golden 1.2.3 recorded in the floor store ({want})",
+          "MU-APP nrf-floor" in o and want in o, o)
 
 def main():
     if not GCC:

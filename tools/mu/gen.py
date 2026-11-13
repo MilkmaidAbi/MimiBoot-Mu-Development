@@ -193,6 +193,7 @@ def nrf_macros(cfg: Config) -> list[str]:
         f"#define MB_NRF_BAUD 0x{nrf_baud(baud, uarte):08x}u",
         f"#define MB_NRF_PAGE {t.get('page')}u",
         f"#define MB_NRF_APPROTECT {1 if t.get('approtect_sw') else 0}",
+        f"#define MB_NRF_LOCK_{str(t.get('flash_lock', 'bprot')).upper()} 1",
         f"#define MB_UART_TX_PORT {tx[0]}", f"#define MB_UART_TX_PIN {tx[1]}",
         f"#define MB_UART_RX_PORT {rx[0]}", f"#define MB_UART_RX_PIN {rx[1]}",
     ]
@@ -229,6 +230,27 @@ def samd_macros(cfg: Config) -> list[str]:
 
 VENDOR_MACROS = {"stm32": stm32_macros, "nrf": nrf_macros, "samd": samd_macros}
 
+# bytes per protected-floor entry: 16, or the chip's smallest write unit if it's bigger
+FLOOR_ENTRY = {"stm32": 16, "nrf": 16, "samd": 16}
+
+
+def floor_region(cfg: Config, lay: Layout) -> tuple[int, int] | None:
+    """(offset, size) of the protected floor store: the last erase unit of the
+    bootloader region, which the bootloader's code must leave free"""
+    if not cfg.effective("PROTECTED_FLOOR"):
+        return None
+    end = lay.boot.offset + lay.boot.size
+    for off, size in lay.sectors:
+        if off + size == end:
+            return off, size
+    raise ValueError("bootloader region doesn't end on a sector boundary")
+
+
+def code_room(cfg: Config, lay: Layout) -> int:
+    """how much of the bootloader region its code may use"""
+    fr = floor_region(cfg, lay)
+    return lay.boot.size - (fr[1] if fr else 0)
+
 
 def mcu_header(cfg: Config, lay: Layout, loader_ram: int) -> str:
     t = cfg.t
@@ -263,6 +285,13 @@ def mcu_header(cfg: Config, lay: Layout, loader_ram: int) -> str:
         lines += [f"#define MB_RAM2_BASE 0x{r2[0]:08x}u", f"#define MB_RAM2_SIZE 0x{r2[1]:x}u"]
     groups = ",".join(f"{{0x{a:x},0x{s:x},{n}}}" for a, s, n in sector_groups(lay.sectors))
     lines.append(f"#define MB_SECTOR_GROUPS {{{groups}}}")
+    fr = floor_region(cfg, lay)
+    if fr:
+        entry = FLOOR_ENTRY[t.get("vendor")]
+        if t.get("vendor") == "samd" and t.get("series") == 21:
+            entry = 64                          # a SAM D21 page is written once per erase
+        lines += [f"#define MB_FLOOR_OFF 0x{fr[0]:x}u", f"#define MB_FLOOR_SIZE 0x{fr[1]:x}u",
+                  f"#define MB_FLOOR_ENTRY {entry}u"]
     lines += VENDOR_MACROS[t.get("vendor")](cfg)
     lines += ["", "/* flash layout (offsets from MB_FLASH_BASE) */", layout_init(lay), "", "#endif", ""]
     return "\n".join(lines)
@@ -298,8 +327,9 @@ SECTIONS {{
   _sidata = LOADADDR(.data);
   .data : {{ _sdata = .; *(.data*) . = ALIGN(4); _edata = .; }} > RAM AT > FLASH
   .bss (NOLOAD) : {{ _sbss = .; *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; }} > RAM
-  end = _ebss; _end = end;
-  ASSERT(_ebss + _stack_size <= _estack, "MimiBoot: RAM too small for data + stack: turn features off")
+  .noinit (NOLOAD) : {{ *(.noinit*) . = ALIGN(4); _enoinit = .; }} > RAM
+  end = _enoinit; _end = end;
+  ASSERT(_enoinit + _stack_size <= _estack, "MimiBoot: RAM too small for data + stack: turn features off")
 }}
 """
 
@@ -319,6 +349,7 @@ def mcu_outputs(cfg: Config, lay: Layout, out: Path):
     doc = {"board": t.name, "target": t.chip_name[:15], "flash_base": fb, "flash_size": lay.flash_size,
            "ram_base": rb, "ram_reserved": resv, "mcuboot_header": mh,
            "boot": {"offset": lay.boot.offset, "size": lay.boot.size},
+           "floor": ({"offset": floor_region(cfg, lay)[0], "size": floor_region(cfg, lay)[1]} if floor_region(cfg, lay) else None),
            "log": [{"offset": r.offset, "size": r.size} for r in lay.log],
            "cfg": [{"offset": r.offset, "size": r.size} for r in lay.cfg], "slots": slots, "notes": lay.notes}
     (out / "layout.json").write_text(json.dumps(doc, indent=2) + "\n")
@@ -327,6 +358,9 @@ def mcu_outputs(cfg: Config, lay: Layout, out: Path):
     for r in lay.regions():
         role = ROLE_NAMES.get(r.role, "") if r in lay.slots else ""
         rows.append(f"  {r.name:8} 0x{fb + r.offset:08x} {r.size // 1024:>6} K  {role}")
+    fr = floor_region(cfg, lay)
+    if fr:
+        rows.append(f"  (rollback floors: 0x{fb + fr[0]:08x}, {fr[1] // 1024} K at the end of the boot region, locked with it)")
     rows += ["", "Link your firmware for a slot at:",
              "  MimiBoot image (mbtool pack)   slot address + 0x1000   (vector table there)",
              f"  Zephyr / MCUboot image         slot address + 0x{mh:x}    "

@@ -750,18 +750,6 @@ void mb_main(const mb_port_t *p) {
     // The CPU faulted while checking a slot last time (an ECC error or bus
     // fault on damaged flash): that image is bad, so the next pass falls back
     int faulted = p->fault_slot ? p->fault_slot() : -1;
-    if (faulted >= 0 && faulted < p->layout->n_slots) {
-        static mb_bcl_t flog;
-        mb_bcl_load(&flog, p);
-        mb_bcl_rec_t r = flog.cur;
-        // the check never finished, so the log may not know this image yet:
-        // name it, or the next reconcile would treat it as a new one
-        static mb_slot_info_t fi;
-        if (mb_image_read_header(p, faulted, &fi) == MB_OK)
-            r.slot[faulted].image_id = mb_image_id(&fi.hdr);
-        mark_bad(&r, faulted, MB_BAD_FAULT);
-        mb_bcl_commit(&flog, &r);
-    }
     for (;;) {
         static mb_bcl_t log;
         static mb_config_t cfg;
@@ -769,6 +757,16 @@ void mb_main(const mb_port_t *p) {
         static mb_plan_t plan;
         mb_boot_progress(2);
         mb_bcl_load(&log, p);
+        if (faulted >= 0 && faulted < p->layout->n_slots) {
+            mb_bcl_rec_t r = log.cur;
+            // the check never finished, so the log may not know this image yet:
+            // name it, or the next reconcile would treat it as a new one
+            if (mb_image_read_header(p, faulted, &info[faulted]) == MB_OK)
+                r.slot[faulted].image_id = mb_image_id(&info[faulted].hdr);
+            mark_bad(&r, faulted, MB_BAD_FAULT);
+            mb_bcl_commit(&log, &r);
+            faulted = -1;
+        }
 #ifdef MB_BOOT_DIAGNOSTICS
         if(log.cur.request==MB_REQ_NONE)flags|=MB_F_MENU;
         else if(log.cur.request==MB_REQ_BOOT_ONCE||log.cur.request==MB_REQ_ENTRY_ONCE||log.cur.request==MB_REQ_NIGHT)flags&=~MB_F_MENU;

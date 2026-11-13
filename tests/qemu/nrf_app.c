@@ -81,6 +81,11 @@ void reset(void) {
     } else {
         puts_(" no-handoff");
     }
+#ifdef FLOOR_AT
+    // the bootloader's protected floor store: the first entry [tag][value][~value][~tag]
+    puts_(" floor=");
+    for (int i = 0; i < 4; i++) { hex(R(FLOOR_AT + 4u * (uint32_t)i)); putc_(i < 3 ? ',' : ' '); }
+#endif
     if (R(PROBE) == 0xFFFFFFFFu) {          // the emulator's NVMC must ignore writes without WEN
         R(0x4001E504) = 0;                  // CONFIG = read-only
         R(PROBE) = 0;

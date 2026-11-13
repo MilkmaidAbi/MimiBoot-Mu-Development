@@ -894,6 +894,8 @@ static void test_console(void) {
     CHECK(strstr(sim.out, "d75a980182b1"), "keys lists the trusted key");
     CHECK(strstr(sim.out, "unknown command 'bogus'"), "unknown");
     CHECK(strstr(sim.out, "g -> BAD"), "reject golden");
+    CHECK(strstr(sim.out, "\033[33msecurity: unsigned images ALLOWED, hash every boot, rollback floors in locked flash"),
+          "menu's security line: optional signatures shown as a warning");
     sim.button = false;
     sim.console = false;
     CHECK(log_now().slot[MB_SLOT_GOLDEN].state == MB_ST_BAD, "rejection stored");

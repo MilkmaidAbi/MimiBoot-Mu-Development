@@ -17,10 +17,22 @@
  * Watchdog: can't be stopped, and keeps running through a soft reset. A
  * watchdog the app left running is fed from the first instruction on.
  *
- * Debug access (nRF52 with the newer APPROTECT): when UICR.APPROTECT says
- * "HwDisabled", firmware has to open the debug port again on every boot, as
- * Nordic's SystemInit does. The bootloader does the same so a board sitting
- * in the menu stays debuggable. It never writes UICR.
+ * Debug access (nRF52 with the newer APPROTECT, "configuration 249" in
+ * Nordic's errata header): debug is closed at reset and firmware opens it
+ * by copying UICR.APPROTECT into APPROTECT.DISABLE, as Nordic's SystemInit
+ * (nrf52_handle_approtect) does; a board sitting in the menu stays
+ * debuggable. With MB_FEAT_DEBUG_LOCK it is never opened and FORCEPROTECT
+ * keeps it shut until the next reset, whatever UICR says or the app tries.
+ * Older silicon has no such registers (they're left alone): there UICR
+ * alone decides. The bootloader never writes UICR.
+ *
+ * Flash lock (MB_FEAT_BOOT_LOCK), before an image starts, until reset:
+ *   nRF51                     MPU.PROTENSET0/1, 4 KB blocks (PROTBLOCKSIZE = 0)
+ *   nRF52805/810/811/832      BPROT.CONFIG0..3, 4 KB blocks
+ *   nRF52820/833/840          ACL: one region, write and erase blocked
+ * Register layouts from Nordic's MDK (nrf51.h, nrf52.h, nrf52840.h); the
+ * same mechanism as the nRF Connect SDK's fprotect (fprotect_bprot.c,
+ * fprotect_acl.c). Written from those, compile-checked; not yet run on a chip.
  */
 #include "core/mimiboot.h"
 #include "port/cortexm/mcu.h"
@@ -31,8 +43,23 @@
 #define CLOCK_HFSTARTED     0x40000100u
 #define POWER_RESETREAS     0x40000400u
 #define UICR_APPROTECT      0x10001208u
-#define APPROTECT_DISABLE   0x40000558u
-#define APPROTECT_SW_OPEN   0x5Au
+#define APPROTECT_FORCE     0x40000550u     /* APPROTECT.FORCEPROTECT: write 0 = closed until reset (write-once) */
+#define APPROTECT_DISABLE   0x40000558u     /* APPROTECT.DISABLE: 0x5A = open */
+#define FICR_VAR1           0x10000130u     /* the words nrf52_configuration_249() reads */
+#define FICR_VAR2           0x10000134u
+
+#define PROT_CONFIG0        0x40000600u     /* BPROT.CONFIG0 / nRF51 MPU.PROTENSET0 */
+#define PROT_CONFIG1        0x40000604u
+#define PROT_DISABLEINDEBUG 0x40000608u     /* 0: protection holds in debug interface mode too */
+#define MPU_PROTBLOCKSIZE   0x4000060Cu     /* nRF51: 0 = 4 KB blocks */
+#define BPROT_CONFIG2       0x40000610u
+#define BPROT_CONFIG3       0x40000614u
+#define ACL_ADDR(n)         (0x4001E800u + 16u * (n))
+#define ACL_SIZE(n)         (ACL_ADDR(n) + 4u)
+#define ACL_PERM(n)         (ACL_ADDR(n) + 8u)
+#define ACL_PERM_NO_WRITE   (1u << 1)       /* WRITE = Disable: write and erase blocked, reads allowed */
+#define ACL_REGIONS         8u
+#define PROT_BLOCK          4096u
 
 #define TIMER               0x40008000u     /* TIMER0 */
 #define T_START             (TIMER + 0x000)
@@ -105,9 +132,34 @@ uint32_t mcu_reset_flags_take(void) {
 /* ---- clock + time ------------------------------------------------------------- */
 static uint32_t last_us, rem_us, now;
 
+#if MB_NRF_SERIES == 52
+/* Silicon with the firmware-controlled APPROTECT branch: Nordic's
+ * nrf52_configuration_249(), per part (FICR word 0x130) from this revision
+ * (word 0x134) on. Unknown parts: no (leave the registers alone). */
+static bool approtect_in_firmware(void) {
+    uint32_t part = REG32(FICR_VAR1), rev = REG32(FICR_VAR2);
+    switch (part) {
+        case 0x06: return rev >= 0x07;              /* nRF52832 */
+        case 0x08: return rev >= 0x05;              /* nRF52840 */
+        case 0x0A: return rev >= 0x02;              /* nRF52810 */
+        case 0x0D: return rev >= 0x01;              /* nRF52833 */
+        case 0x0E: return rev >= 0x01;              /* nRF52811 */
+        case 0x0F: return rev >= 0x01;              /* nRF52805 */
+        case 0x10: return rev >= 0x03;              /* nRF52820 */
+        default:   return false;
+    }
+}
+#endif
+
 void mcu_init(void) {
-#if MB_NRF_SERIES == 52 && MB_NRF_APPROTECT
-    if ((REG32(UICR_APPROTECT) & 0xFFu) == APPROTECT_SW_OPEN) REG32(APPROTECT_DISABLE) = APPROTECT_SW_OPEN;
+#if MB_NRF_SERIES == 52
+    if (approtect_in_firmware()) {
+#if MB_FEAT_DEBUG_LOCK
+        REG32(APPROTECT_FORCE) = 0;                         // shut until reset; DISABLE writes are ignored after this
+#elif MB_NRF_APPROTECT
+        REG32(APPROTECT_DISABLE) = REG32(UICR_APPROTECT);   // open only if UICR says so (0x5A)
+#endif
+    }
 #endif
     REG32(CLOCK_HFSTARTED) = 0;
     REG32(CLOCK_HFCLKSTART) = 1;
@@ -283,3 +335,40 @@ void mcu_wdt_start(uint32_t ms) {
 }
 
 void mcu_wdt_disarm(void) { mcu_wdt_feed(); }             // can't stop it: give the most time we can
+
+/* ---- flash lock until reset (MB_FEAT_BOOT_LOCK) ------------------------------------- */
+#if MB_FEAT_BOOT_LOCK
+int mcu_flash_lock(uint32_t off, uint32_t len) {
+    if (!len || off % PROT_BLOCK || len % PROT_BLOCK || off >= MB_FLASH_SIZE || len > MB_FLASH_SIZE - off) return MB_E_BADARG;
+#if MB_NRF_LOCK_ACL
+    // The first free region (all zero) takes it; ADDR/SIZE/PERM are write-once until reset.
+    for (uint32_t n = 0; n < ACL_REGIONS; n++) {
+        if (REG32(ACL_PERM(n)) || REG32(ACL_SIZE(n))) continue;
+        REG32(ACL_ADDR(n)) = off;
+        REG32(ACL_SIZE(n)) = len;
+        REG32(ACL_PERM(n)) = ACL_PERM_NO_WRITE;
+        __asm volatile("dsb" ::: "memory");
+        return REG32(ACL_ADDR(n)) == off && REG32(ACL_SIZE(n)) == len && REG32(ACL_PERM(n)) == ACL_PERM_NO_WRITE ? MB_OK : MB_E_IO;
+    }
+    return MB_E_NOSPACE;
+#else
+    // BPROT (and the nRF51 MPU, laid out the same): one bit per 4 KB block,
+    // write-1-to-set, cleared only by a reset
+    uint32_t mask[4] = { 0, 0, 0, 0 };
+    for (uint32_t b = off / PROT_BLOCK; b < (off + len) / PROT_BLOCK; b++) mask[b / 32] |= 1u << (b % 32);
+#if MB_NRF_LOCK_MPU
+    REG32(MPU_PROTBLOCKSIZE) = 0;                           // 4 KB blocks
+#endif
+    REG32(PROT_DISABLEINDEBUG) = 0;                         // and while a debugger is attached
+    if (mask[0]) REG32(PROT_CONFIG0) = mask[0];
+    if (mask[1]) REG32(PROT_CONFIG1) = mask[1];
+#if MB_NRF_LOCK_BPROT
+    if (mask[2]) REG32(BPROT_CONFIG2) = mask[2];            // only the nRF52832 has 512 KB to cover
+    if (mask[3]) REG32(BPROT_CONFIG3) = mask[3];
+#endif
+    __asm volatile("dsb" ::: "memory");
+    if ((REG32(PROT_CONFIG0) & mask[0]) != mask[0] || (REG32(PROT_CONFIG1) & mask[1]) != mask[1]) return MB_E_IO;
+    return MB_OK;
+#endif
+}
+#endif

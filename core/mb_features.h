@@ -85,6 +85,15 @@
 #define MB_BOOT_VERIFY_NEVER    2
 
 /* ---- port-level switches (ports that can't honour one ignore it) -------------------- */
+#ifndef MB_FEAT_BOOT_LOCK
+#define MB_FEAT_BOOT_LOCK       0   /* write-protect the bootloader region until reset before starting an image */
+#endif
+#ifndef MB_FEAT_PROTECTED_FLOOR
+#define MB_FEAT_PROTECTED_FLOOR 0   /* rollback floors also kept in the (locked) bootloader region */
+#endif
+#ifndef MB_FEAT_DEBUG_LOCK
+#define MB_FEAT_DEBUG_LOCK      0   /* never open the debug port; force it closed until reset where the chip can */
+#endif
 #ifndef MB_FEAT_SCRUB_RAM
 #define MB_FEAT_SCRUB_RAM       0   /* wipe the bootloader's own RAM (data, stack) before starting an image */
 #endif
@@ -127,6 +136,12 @@
 #endif
 #if defined(MB_REQUIRE_SIGNATURE) && MB_REQUIRE_SIGNATURE && MB_BOOT_VERIFY != MB_BOOT_VERIFY_EVERY
 #error "required signatures need the payload hash on every boot (MB_BOOT_VERIFY 0): a signed header says nothing about a payload nobody hashed"
+#endif
+#if MB_FEAT_PROTECTED_FLOOR && !MB_FEAT_BOOT_LOCK
+#error "MB_FEAT_PROTECTED_FLOOR needs MB_FEAT_BOOT_LOCK: an unlocked copy protects nothing"
+#endif
+#if defined(MB_BOOT_DIAGNOSTICS) && defined(MB_REQUIRE_SIGNATURE) && MB_REQUIRE_SIGNATURE
+#error "MB_BOOT_DIAGNOSTICS is a bench-only build (it adds raw register dumps): not with required signatures"
 #endif
 #if MB_MENU_SECS < 1 || MB_MENU_SECS > 600
 #error "MB_MENU_SECS must be 1..600"

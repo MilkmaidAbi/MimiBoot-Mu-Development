@@ -702,6 +702,17 @@ def cmd_layout(a):
         print("%-5s 0x%06x  %6d KB   XIP 0x%08x" % (k, off, size // 1024, XIP_BASE + off))
 
 
+def cmd_provision(a):
+    from pathlib import Path
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from mu.provision import ProvisionError, steps
+    try:
+        print("\n".join(steps(Path(a.build_dir))))
+    except ProvisionError as e:
+        die(str(e))
+    print("\nNothing was changed: these are the steps to run yourself.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="MimiBoot host tool", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--layout", default="4m", choices=LAYOUTS)
@@ -734,6 +745,8 @@ def main():
     p = sub.add_parser("cmd"); p.add_argument("commands", nargs="+"); p.add_argument("--port"); p.add_argument("--timeout", type=float, default=10)
     p.set_defaults(fn=cmd_cmd)
     p = sub.add_parser("layout"); p.set_defaults(fn=cmd_layout)
+    p = sub.add_parser("provision", help="print the steps to lock a board for production (runs nothing)")
+    p.add_argument("build_dir", help="a mimiconf build directory (has build-info.json)"); p.set_defaults(fn=cmd_provision)
     a = ap.parse_args()
     if a.cmd == "cfg" and a.action == "push" and not a.file:
         die("cfg push <file>")

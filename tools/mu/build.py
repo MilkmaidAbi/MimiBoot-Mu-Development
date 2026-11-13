@@ -175,17 +175,24 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
                          "turn off SIGNATURES (smaller stack), CONSOLE/RECV or CFG_FILE")
     loader_ram = min(ram, ((need_ram + 1023) // 1024) * 1024)
     # pass 2: final layout
-    lay = gen.mcu_layout(cfg, boot_bytes=need_flash if auto else None)
-    if need_flash > lay.boot.size:
-        raise BuildError(f"the bootloader is {need_flash} bytes but its region is {lay.boot.size}: "
+    floor = 0
+    if cfg.effective("PROTECTED_FLOOR"):
+        # the floor store takes the region's last erase unit: in auto mode, size for code + that unit
+        lay = gen.mcu_layout(cfg, boot_bytes=need_flash if auto else None)
+        floor = gen.floor_region(cfg, lay)[1]
+    lay = gen.mcu_layout(cfg, boot_bytes=need_flash + floor if auto else None)
+    room = gen.code_room(cfg, lay)
+    if need_flash > room:
+        extra = f" (the last {lay.boot.size - room} bytes of it hold the rollback floors)" if room < lay.boot.size else ""
+        raise BuildError(f"the bootloader is {need_flash} bytes but its region has room for {room}{extra}: "
                          "turn features off (SIGNATURES ~7 KB, CONSOLE ~9 KB, RECV, CONTROL) or set BOOT_SIZE")
-    elf = one_pass(lay, loader_ram, "final")
+    elf = one_pass(lay, loader_ram, "final", flash_len=room)
     sz = _sizes(gcc, elf)
     objcopy = _tool(gcc, "objcopy")
     _run([objcopy, "-O", "binary", elf, out / "mimiboot.bin"])
     _run([objcopy, "-O", "ihex", elf, out / "mimiboot.hex"])
     gen.mcu_outputs(cfg, lay, out)
-    info = {"board": t.name, "core": "night", "build": "mcu", "vendor": t.get("vendor"), "flash_used": sz["flash"], "flash_region": lay.boot.size,
+    info = {"board": t.name, "core": "night", "build": "mcu", "vendor": t.get("vendor"), "flash_used": sz["flash"], "flash_region": room,
             "ram_used": sz["ram"], "ram_region": loader_ram, "stack": stack,
             "features": {o.id: cfg.effective(o.id) for o in cfg.options()},
             "files": ["mimiboot.elf", "mimiboot.bin", "mimiboot.hex", "layout.txt", "layout.json",

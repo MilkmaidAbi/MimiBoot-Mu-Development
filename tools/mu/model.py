@@ -62,6 +62,7 @@ class Option:
     macro: str = ""
     cores: list = field(default_factory=lambda: ["night", "lite"])
     builds: list | None = None
+    vendors: list | None = None
     default_for: dict = field(default_factory=dict)
     depends: list = field(default_factory=list)
     range: list | None = None
@@ -236,7 +237,8 @@ class Config:
 
     # ---- which options exist for this board ----
     def applies(self, o: Option) -> bool:
-        return self.t.core in o.cores and (o.builds is None or self.t.build in o.builds)
+        return (self.t.core in o.cores and (o.builds is None or self.t.build in o.builds)
+                and (o.vendors is None or self.t.get("vendor") in o.vendors))
 
     def options(self, menu: str | None = None) -> list[Option]:
         return [o for o in self.db.options.values() if self.applies(o) and (menu is None or o.menu == menu)]

@@ -79,11 +79,36 @@ void Reset_Handler(void) {
     for (;;) {}
 }
 
+/* A fault (HardFault, NMI: a flash ECC error, a bus error reading a damaged
+ * slot, a bug) used to spin here until someone power-cycled the board. Now it
+ * leaves a note in RAM that survives the reset (.noinit, checked with a magic
+ * and a complement) saying which slot was being checked, and resets; the next
+ * boot marks that slot bad and falls back (mb_main). */
+#define CRUMB_MAGIC 0x4D424654u                     /* "MBFT" */
+__attribute__((section(".noinit"))) static volatile uint32_t crumb[3];
+
+void mb_cm_fault(void) {
+    uint32_t s = mb_checking_slot;
+    crumb[0] = CRUMB_MAGIC;
+    crumb[1] = s;
+    crumb[2] = ~s;
+    __asm volatile("dsb" ::: "memory");
+    REG32(SCB_AIRCR) = 0x05FA0004u;                 // SYSRESETREQ
+    for (;;) {}
+}
+
+static int fault_slot(void) {
+    int s = -1;
+    if (crumb[0] == CRUMB_MAGIC && crumb[2] == ~crumb[1] && crumb[1] < MB_SLOT_NONE) s = (int)crumb[1];
+    crumb[0] = 0;
+    return s;
+}
+
 #if MB_VECTORS == MB_VECTORS_RELAY
 /* Forward exception n to entry n of the table at *MB_RELAY_ADDR. r0/r1 are
  * already stacked by the exception entry and lr holds EXC_RETURN, so the
  * image's handler runs exactly as if the hardware had called it. While the
- * bootloader runs (word = 0) a fault just stops here. */
+ * bootloader runs (word = 0) a fault goes to mb_cm_fault. */
 __attribute__((naked)) static void relay(void) {
     __asm volatile(
         ".syntax unified\n"
@@ -95,14 +120,16 @@ __attribute__((naked)) static void relay(void) {
         "lsls r1, r1, #2\n"
         "ldr  r0, [r0, r1]\n"
         "bx   r0\n"
-        "2: b 2b\n"
+        "2: ldr r0, 3f\n"
+        "bx   r0\n"
         ".align 2\n"
-        "1: .word " STR(MB_RELAY_ADDR) "\n");
+        "1: .word " STR(MB_RELAY_ADDR) "\n"
+        "3: .word mb_cm_fault\n");
 }
 #define H(x) ((const void*)relay)
 #define N_VECTORS (16 + MB_IRQS)
 #else
-static void Fault_Handler(void) { for (;;) {} }
+#define Fault_Handler mb_cm_fault
 #define H(x) ((const void*)(x))
 #define N_VECTORS 16
 #endif
@@ -110,7 +137,7 @@ static void Fault_Handler(void) { for (;;) {} }
 #if MB_TIME_SYSTICK
 void SysTick_Handler(void) { ticks++; }
 #else
-#define SysTick_Handler Fault_Handler
+#define SysTick_Handler mb_cm_fault
 #endif
 
 __attribute__((section(".isr_vector"), used)) const void* const mb_vectors[N_VECTORS] = {
@@ -137,6 +164,25 @@ static int f_program(uint32_t off, const void* b, size_t n) {
     if (off < layout.boot.size) return MB_E_REFUSED;
     return mcu_flash_program(off, b, n);
 }
+
+/* The rollback floors' store: the last erase unit of the bootloader region
+ * (the linker keeps code out of it). Only the bootloader writes it, and only
+ * before the region is locked; the app side reads it. */
+#if MB_FEAT_PROTECTED_FLOOR
+#ifndef MB_CM_CLIENT
+static int floor_program(uint32_t off, const void* b, size_t n) {
+    if (off < MB_FLOOR_OFF || n > MB_FLOOR_SIZE || off - MB_FLOOR_OFF > MB_FLOOR_SIZE - n) return MB_E_BADARG;
+    return mcu_flash_program(off, b, n);
+}
+#define FLOOR_PROGRAM floor_program
+#else
+#define FLOOR_PROGRAM NULL
+#endif
+static const mb_floor_store_t floor_store = { MB_FLOOR_OFF, MB_FLOOR_SIZE, MB_FLOOR_ENTRY, f_read, FLOOR_PROGRAM };
+#define FLOOR (&floor_store)
+#else
+#define FLOOR NULL
+#endif
 
 #ifdef MB_CM_CLIENT
 /* ---- the app side: what client/mb_client.c needs (flash + layout + reboot) ------------ */
@@ -167,7 +213,7 @@ const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
     .keys = KEYRING, .require_signature = MB_REQUIRE_SIGNATURE,
     .flash_read = f_read, .flash_erase = f_erase, .flash_program = f_program, .reboot = client_reboot,
-    .self_slot = client_self_slot,
+    .self_slot = client_self_slot, .floor = FLOOR,
 };
 #else
 
@@ -231,6 +277,13 @@ static int start(uint32_t vectors, uint32_t lo, uint32_t hi) {
     if (vectors & (MB_VTOR_ALIGN - 1)) return MB_E_CORRUPT;  // VTOR can't point there
     uint32_t sp = REG32(vectors), pc = REG32(vectors + 4);
     if (!sp_ok(sp) || !(pc & 1) || (pc & ~1u) < lo || (pc & ~1u) >= hi) return MB_E_CORRUPT;
+#if MB_FEAT_BOOT_LOCK
+    // The image gets the chip with the bootloader (code, keys, rollback floors)
+    // write-protected until the next reset. Every bootloader write is done by
+    // now. A lock that doesn't take is not a reason to stop booting: the board
+    // would be bricked by its own protection.
+    (void)mcu_flash_lock(layout.boot.offset, layout.boot.size);
+#endif
     quiesce();
 #if MB_VECTORS == MB_VECTORS_REMAP
     mcu_remap_vectors(vectors);
@@ -316,6 +369,22 @@ static bool button(void) {
 }
 static uint32_t caps(void) { return MB_CAP_CONTROL | MB_CAP_CONFIG | MB_CAP_RAM | MB_CAP_ARM | MB_CAP_XIP; }
 
+/* for the console's security line: what this port does to protect the bootloader */
+#if MB_FEAT_BOOT_LOCK
+#define LOCK_TXT "bootloader flash locked at handoff"
+#elif defined(MB_VENDOR_NRF)
+#define LOCK_TXT "bootloader flash NOT locked (BOOT_LOCK off)"
+#else
+#define LOCK_TXT "bootloader flash: lock with option bytes/fuses (mbtool provision)"
+#endif
+#if defined(MB_VENDOR_NRF) && MB_FEAT_DEBUG_LOCK
+#define DEBUG_TXT ", debug forced shut"
+#elif defined(MB_VENDOR_NRF)
+#define DEBUG_TXT ", debug as UICR says"
+#else
+#define DEBUG_TXT ""
+#endif
+
 const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
     .keys = KEYRING, .require_signature = MB_REQUIRE_SIGNATURE,
@@ -324,7 +393,7 @@ const mb_port_t mb_mcu_port = {
     .time_ms = time_ms, .watchdog_arm = wd_arm, .watchdog_disarm = wd_off, .button = button,
     .console_open = console_open, .getc = getc_port, .write = write_port,
     .reboot = reboot, .reboot_rom = REBOOT_ROM, .reset_cause = cause, .reset_reason = reason,
-    .capabilities = caps,
+    .capabilities = caps, .floor = FLOOR, .fault_slot = fault_slot, .lockdown = LOCK_TXT DEBUG_TXT,
 };
 
 int main(void) {

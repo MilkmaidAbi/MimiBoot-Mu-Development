@@ -78,5 +78,11 @@ void mcu_pins_release(void);             /* LED / button pins back to reset stat
 #if MB_VECTORS == MB_VECTORS_REMAP
 void mcu_remap_vectors(uint32_t vectors);
 #endif
+#if defined(MB_FEAT_BOOT_LOCK) && MB_FEAT_BOOT_LOCK
+/* Write/erase-protect [off, off+len) until the next reset, also against a
+ * debugger-driven CPU. Called right before an image starts, after the
+ * bootloader's last flash write. MB_OK, or an error if the lock didn't take. */
+int  mcu_flash_lock(uint32_t off, uint32_t len);
+#endif
 
 #endif

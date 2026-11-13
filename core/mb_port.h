@@ -108,6 +108,11 @@ typedef struct mb_port {
     /* optional: protected copies of the rollback floors (NULL: the log only) */
     const mb_floor_store_t* floor;
 
+    /* optional: what the port does to protect itself, for the console's
+     * security line, e.g. "flash locked at handoff, debug forced shut".
+     * A text containing "NOT" is shown as a warning. */
+    const char* lockdown;
+
     /* optional: the slot whose check was running when the CPU faulted before
      * the last reset (the fault handler leaves a note and resets), or -1.
      * Reading it clears it. The core marks that slot bad. */

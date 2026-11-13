@@ -671,6 +671,7 @@ clock_hz = 64000000
 time = "timer"
 page = 4096
 approtect_sw = true
+flash_lock = "bprot"            # BPROT on 805/810/811/832; the chips below with ACL override it
 nvic_words = 2
 vtor_align = 256
 
@@ -685,6 +686,7 @@ flash_base = 0x00000000
 clock_hz = 16000000
 time = "timer"
 page = 1024
+flash_lock = "mpu"              # MPU PROTENSET0/1, 4 KB blocks
 vectors = "relay"
 irqs = 32
 nvic_words = 1
@@ -698,12 +700,14 @@ sectors = "128x4K"
 boot = "48K"
 [chip.nrf52833]
 family = "nrf52"
+flash_lock = "acl"
 flash = "512K"
 ram = "128K"
 sectors = "128x4K"
 boot = "48K"
 [chip.nrf52840]
 family = "nrf52"
+flash_lock = "acl"
 flash = "1M"
 ram = "256K"
 sectors = "256x4K"
@@ -726,6 +730,7 @@ nrf_uart = "uarte"
 defaults = { SIGNATURES = false }
 [chip.nrf52820]
 family = "nrf52"
+flash_lock = "acl"
 flash = "256K"
 ram = "32K"
 sectors = "64x4K"
