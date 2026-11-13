@@ -57,6 +57,9 @@ typedef struct {
 
 /* foreign formats (core/mb_formats.c); out->hdr is synthesized */
 int mb_mcuboot_probe(const mb_port_t* p, int slot, mb_slot_info_t* out);
+/* MCUboot direct-xip confirmation: the slot's image trailer has a valid magic
+ * and image_ok set (Zephyr's boot_write_img_confirmed(), imgtool --confirm) */
+bool mb_mcuboot_confirmed(const mb_port_t* p, int slot);
 int mb_raw_probe(const mb_port_t* p, int slot, mb_slot_info_t* out);
 
 int  mb_image_read_header(const mb_port_t* p, int slot, mb_slot_info_t* out);

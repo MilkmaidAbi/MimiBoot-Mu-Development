@@ -51,6 +51,29 @@ static void put_mcuboot(int slot, uint32_t seed) {
     mb_sha256_t s; mb_sha256_init(&s); mb_sha256_update(&s, img, hs + isz); mb_sha256_final(&s, t + 8);
     memset(sim_flash + off, 0xFF, 0x2000);
     memcpy(sim_flash + off, img, sizeof img);
+    uint32_t end = off + sim_port.layout->slot[slot].size;
+    memset(sim_flash + end - 0x100, 0xFF, 0x100);   // a clean trailer area
+}
+
+// MCUboot's image trailer at the end of the slot (bootutil_misc.h): magic in the
+// last 16 bytes, image_ok at ALIGN_DOWN(size - 16 - align, align). align 8 has
+// its own 16-byte magic; other values put the align in the first two bytes.
+static void put_trailer(int slot, uint32_t align, int image_ok) {
+    static const uint8_t magic8[16] = { 0x77, 0xc2, 0x95, 0xf3, 0x60, 0xd2, 0xef, 0x7f,
+                                        0x35, 0x52, 0x50, 0x0f, 0x2c, 0xb6, 0x79, 0x80 };
+    static const uint8_t magic14[14] = { 0x2d, 0xe1, 0x5d, 0x29, 0x41, 0x0b, 0x8d, 0x77, 0x67, 0x9c, 0x11, 0x0f, 0x1f, 0x8a };
+    uint32_t off = sim_port.layout->slot[slot].offset, size = sim_port.layout->slot[slot].size;
+    uint8_t* m = sim_flash + off + size - 16;
+    if (align == 8) memcpy(m, magic8, 16);
+    else { m[0] = (uint8_t)align; m[1] = (uint8_t)(align >> 8); memcpy(m + 2, magic14, 14); }
+    uint32_t ok_off = (size - 16 - align) / align * align;
+    sim_flash[off + ok_off] = (uint8_t)image_ok;
+}
+
+static int state_of(int slot) {
+    mb_bcl_t lg;
+    mb_bcl_load(&lg, &sim_port);
+    return lg.cur.slot[slot].state;
 }
 #endif
 
@@ -117,6 +140,38 @@ int main(void) {
 #else
     CHECK(o == SIM_BOOTED && sim.booted_slot == MB_SLOT_A, "hash checked once: known mcuboot image boots on its header");
 #endif
+
+    // direct-xip confirmation: a Zephyr app's boot_write_img_confirmed() (or
+    // imgtool --confirm) sets image_ok in the trailer; that confirms the image
+    // like mb_client_confirm() would
+    sim_reset();
+    put_mcuboot(MB_SLOT_A, 4);
+    CHECK(sim_power_on() == SIM_BOOTED && sim.booted_slot == MB_SLOT_A, "mcuboot in A boots");
+    CHECK(state_of(MB_SLOT_A) == (MB_FEAT_AB_TRIAL ? MB_ST_TRIAL : MB_ST_GOOD), "first boot: %s",
+          MB_FEAT_AB_TRIAL ? "a trial" : "trusted (no trials)");
+    put_trailer(MB_SLOT_A, 8, 0xFF);                // magic, image_ok not set yet
+    sim_power_on();
+    CHECK(state_of(MB_SLOT_A) == (MB_FEAT_AB_TRIAL ? MB_ST_TRIAL : MB_ST_GOOD), "trailer without image_ok: still a trial");
+    put_trailer(MB_SLOT_A, 8, 0x01);                // the app confirmed itself
+    CHECK(sim_power_on() == SIM_BOOTED && sim.booted_slot == MB_SLOT_A, "boots");
+    CHECK(state_of(MB_SLOT_A) == MB_ST_GOOD, "image_ok in the trailer: confirmed (state %d)", state_of(MB_SLOT_A));
+    for (int i = 0; i < MB_DEFAULT_TRIES + 1; i++) sim_power_on();
+    CHECK(sim.outcome == SIM_BOOTED && sim.booted_slot == MB_SLOT_A, "and it stays (no rollback)");
+
+    // BOOT_MAX_ALIGN 32: the other magic layout, image_ok further down
+    sim_reset();
+    put_mcuboot(MB_SLOT_B, 5);
+    put_trailer(MB_SLOT_B, 32, 0x01);               // confirmed before its first boot (a permanent upgrade)
+    CHECK(sim_power_on() == SIM_BOOTED && sim.booted_slot == MB_SLOT_B, "align-32 trailer image boots");
+    CHECK(state_of(MB_SLOT_B) == MB_ST_GOOD, "align-32 trailer: confirmed (state %d)", state_of(MB_SLOT_B));
+
+    // anything that isn't a trailer magic is ignored
+    sim_reset();
+    put_mcuboot(MB_SLOT_A, 6);
+    put_trailer(MB_SLOT_A, 8, 0x01);
+    sim_flash[sim_port.layout->slot[MB_SLOT_A].offset + sim_port.layout->slot[MB_SLOT_A].size - 3] ^= 0x40;
+    sim_power_on();
+    CHECK(state_of(MB_SLOT_A) == (MB_FEAT_AB_TRIAL ? MB_ST_TRIAL : MB_ST_GOOD), "damaged magic: no confirmation");
 #endif
 
 #if MB_FEAT_IMG_RAW

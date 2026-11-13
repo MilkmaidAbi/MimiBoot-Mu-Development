@@ -6,8 +6,9 @@ neither has run on a board, and no real Zephyr application has been built here.
 
 ## Zephyr (MCUboot image format)
 
-Enable **Zephyr / MCUboot images** (`IMG_MCUBOOT=y`). For apps that won't call
-MimiBoot's confirm, also turn off **Updates must confirm** (`AB_TRIAL=n`).
+Enable **Zephyr / MCUboot images** (`IMG_MCUBOOT=y`). For apps that don't confirm
+themselves at all (neither MCUboot's way nor MimiBoot's, see below), also turn off
+**Updates must confirm** (`AB_TRIAL=n`).
 
 1. Build MimiBoot. `build/<board>/zephyr-partitions.overlay` puts Zephyr's
    `boot_partition`/`slot0_partition` where MimiBoot's bootloader and slot A are.
@@ -50,9 +51,31 @@ digest), the security counter TLV for anti-rollback. Refused: encrypted images a
 "pure" signatures. RSA/ECDSA signatures aren't checked: such an image counts as
 unsigned, so it boots only while signatures are optional.
 
-Not supported: MCUboot's swap trailer. Zephyr's `boot_write_img_confirmed()` and
-mcumgr image upload talk to MCUboot's trailer, which MimiBoot doesn't read. Use
-`AB_TRIAL=n`, or call MimiBoot's client to confirm.
+### Confirming from Zephyr
+
+MimiBoot runs each image from the slot it was written to, which is what MCUboot
+calls direct-xip. A Zephyr app built that way confirms itself the MCUboot way:
+
+```
+#include <zephyr/dfu/mcuboot.h>
+if (!boot_is_img_confirmed()) boot_write_img_confirmed();
+```
+
+That sets `image_ok` in the image trailer at the end of the app's slot, and
+MimiBoot reads it: an image on trial whose trailer says `image_ok` is confirmed
+exactly as if it had called `mb_client_confirm()` (it becomes the active image and
+its security counter raises the rollback floor). An image signed with
+`imgtool sign --confirm` is confirmed from its first boot. Both magic layouts are
+understood (the default `BOOT_MAX_ALIGN` of 8, and the `{align, 14-byte}` form).
+
+For this the image needs a trailer: sign with `--pad` (and `--slot-size`), which
+imgtool needs anyway for `--confirm`. When MimiBoot itself installs an image into a
+slot, it erases the slot's last sector too, so an old image's trailer can't confirm
+the new one.
+
+Not supported yet: MCUboot's swap modes (images move between slots) and mcumgr's
+image upload protocol (SMP). Upload with mbtool, or write the slot from the app with
+MimiBoot's client library.
 
 ## FreeRTOS, bare metal, Arduino-STM32
 

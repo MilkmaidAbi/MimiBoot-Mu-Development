@@ -336,6 +336,32 @@ void mcu_wdt_start(uint32_t ms) {
 
 void mcu_wdt_disarm(void) { mcu_wdt_feed(); }             // can't stop it: give the most time we can
 
+/* ---- hardware random numbers (RNG, bias correction on), for console unlock nonces ---- */
+#define RNG                 0x4000D000u
+#define RNG_START           (RNG + 0x000)
+#define RNG_STOP            (RNG + 0x004)
+#define RNG_VALRDY          (RNG + 0x100)
+#define RNG_CONFIG          (RNG + 0x504)
+#define RNG_VALUE           (RNG + 0x508)
+
+int mcu_random(void* buf, size_t len) {
+    uint8_t* b = buf;
+    int rc = MB_OK;
+    REG32(RNG_CONFIG) = 1;                                  // DERCEN: bias correction (slower, uniform)
+    REG32(RNG_VALRDY) = 0;
+    REG32(RNG_START) = 1;
+    for (size_t i = 0; i < len && rc == MB_OK; i++) {
+        uint32_t n = 0;
+        while (!REG32(RNG_VALRDY))
+            if (++n > SPIN) { rc = MB_E_TIMEOUT; break; }
+        b[i] = (uint8_t)REG32(RNG_VALUE);
+        REG32(RNG_VALRDY) = 0;
+    }
+    REG32(RNG_STOP) = 1;
+    REG32(RNG_CONFIG) = 0;                                  // back to its reset state for the app
+    return rc;
+}
+
 /* ---- flash lock until reset (MB_FEAT_BOOT_LOCK) ------------------------------------- */
 #if MB_FEAT_BOOT_LOCK
 int mcu_flash_lock(uint32_t off, uint32_t len) {

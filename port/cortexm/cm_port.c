@@ -38,6 +38,18 @@ static const mb_keyring_t keyring = { MB_TRUSTED_KEY_COUNT, trusted };
 #ifndef MB_REQUIRE_SIGNATURE
 #define MB_REQUIRE_SIGNATURE 0
 #endif
+#if defined(MB_UNLOCK_KEY_COUNT) && !defined(MB_CM_CLIENT)
+static const uint8_t unlock_trusted[MB_UNLOCK_KEY_COUNT][32] = MB_UNLOCK_KEYS;
+static const mb_keyring_t unlock_ring = { MB_UNLOCK_KEY_COUNT, unlock_trusted };
+#define UNLOCK_RING (&unlock_ring)
+#else
+#define UNLOCK_RING NULL
+#endif
+#if defined(MB_VENDOR_NRF) && MB_FEAT_CONSOLE_AUTH && !defined(MB_CM_CLIENT)
+#define RANDOM mcu_random
+#else
+#define RANDOM NULL
+#endif
 #ifndef MB_BREAK_IN_MS
 #define MB_BREAK_IN_MS 300
 #endif
@@ -387,7 +399,7 @@ static uint32_t caps(void) { return MB_CAP_CONTROL | MB_CAP_CONFIG | MB_CAP_RAM 
 
 const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
-    .keys = KEYRING, .require_signature = MB_REQUIRE_SIGNATURE,
+    .keys = KEYRING, .require_signature = MB_REQUIRE_SIGNATURE, .unlock_keys = UNLOCK_RING, .random = RANDOM,
     .flash_read = f_read, .flash_erase = f_erase, .flash_program = f_program,
     .can_start = can_start, .launch = launch, .ram_ptr = ram_ptr, .launch_ram = launch_ram,
     .time_ms = time_ms, .watchdog_arm = wd_arm, .watchdog_disarm = wd_off, .button = button,

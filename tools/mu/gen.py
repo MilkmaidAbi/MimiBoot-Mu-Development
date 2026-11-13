@@ -57,8 +57,13 @@ def key_macros(cfg: Config) -> list[str]:
     if not path or not cfg.effective("SIGNATURES"):
         return []
     keys = read_keys(path)
-    return [f"#define MB_TRUSTED_KEY_COUNT {len(keys)}",
-            "#define MB_TRUSTED_KEYS {" + ",".join(_c_bytes(k) for k in keys) + "}"]
+    out = [f"#define MB_TRUSTED_KEY_COUNT {len(keys)}",
+           "#define MB_TRUSTED_KEYS {" + ",".join(_c_bytes(k) for k in keys) + "}"]
+    if cfg.effective("CONSOLE_AUTH"):
+        ukeys = read_keys(cfg.effective("UNLOCK_KEYS")) if cfg.effective("UNLOCK_KEYS") else keys
+        out += [f"#define MB_UNLOCK_KEY_COUNT {len(ukeys)}",
+                "#define MB_UNLOCK_KEYS {" + ",".join(_c_bytes(k) for k in ukeys) + "}"]
+    return out
 
 
 # ---------------------------------------------------------------------------

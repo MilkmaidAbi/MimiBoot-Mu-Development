@@ -100,6 +100,20 @@ static void reconcile(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[M
         s->state = MB_ST_NEW;
         s->tries_left = MB_DEFAULT_TRIES;
     }
+    // Zephyr apps confirm themselves in MCUboot's trailer, not through the
+    // MimiBoot client: honour that like a client confirm (it can only be
+    // written by the same app that could call mb_client_confirm())
+    for (int i = 0; i < p->layout->n_slots && i < MB_MAX_SLOTS; i++) {
+        mb_slot_rec_t *s = &r->slot[i];
+        if (info[i].fmt != MB_FMT_MCUBOOT || mb_slot_role(p, i) != MB_ROLE_AB ||
+            (s->state != MB_ST_NEW && s->state != MB_ST_TRIAL) || !mb_mcuboot_confirmed(p, i))
+            continue;
+        s->state = MB_ST_GOOD;
+        s->tries_left = 0;
+        r->active = (uint8_t)i;
+        if (info[i].hdr.security_version > r->min_security)
+            r->min_security = info[i].hdr.security_version;
+    }
 }
 
 static bool verify(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[MB_MAX_SLOTS], int slot);

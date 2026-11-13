@@ -54,6 +54,11 @@ On the 32-bit chips (the "full" core):
   other slot once").
 - Wipe its own RAM before jumping, so the app starts with nothing of the bootloader left.
 - A crash-loop guard and a watchdog during trial boots.
+- Lock things down where the chip allows it: on nRF it write-protects its own flash
+  before the app starts, keeps the rollback floors in that locked flash, and can keep
+  the debug port shut. A console lock makes uploads and changes wait for a signed
+  unlock. `mbtool provision` prints the fuse / option-byte steps for the other chips.
+  What holds against whom is in [docs/SECURITY.md](docs/SECURITY.md).
 
 On AVR (the "lite" core, 1 to 2 KB):
 
@@ -133,7 +138,7 @@ core/               the full core
 port/               RP2040/RP2350 (Pico SDK), Cortex-M, and the STM32 / nRF / SAMD parts
 lite/               the AVR core
 client/             libraries for apps
-docs/               test status, option reference, Zephyr / FreeRTOS notes
+docs/               test status, security, option reference, Zephyr / FreeRTOS notes
 ```
 
 ## License

@@ -553,8 +553,101 @@ static const char* help =
 #if MB_FEAT_SHELL_DIAG
     "  md <off> [len]          dump flash        sha <off> <len>   hash a flash range\n"
 #endif
-    "  menu | reboot | bootsel | exit\n";
+    "  menu | reboot | bootsel | exit\n"
+#if MB_FEAT_CONSOLE_AUTH
+    "  unlock                  answer a signed challenge (mbtool does it); until then only\n"
+    "                          looking and booting an entry as configured are allowed\n"
+#endif
+    ;
 
+// ---------------------------------------------------------------------------
+// Console unlock (MB_FEAT_CONSOLE_AUTH): a challenge signed with a key from
+// the build's UNLOCK_KEYS. Until then only commands that change nothing run.
+// ---------------------------------------------------------------------------
+#endif /* MB_FEAT_SHELL */
+
+#if MB_FEAT_CONSOLE_AUTH
+#define UNLOCK_DOMAIN       "MimiBoot console unlock v1"    /* + NUL: never a valid image header prefix */
+#define UNLOCK_MAX_FAILS    5
+static bool unlocked;
+static uint8_t unlock_fails;
+
+static bool console_locked(void) { return !unlocked; }
+
+// 32 bytes that never repeat: hardware randomness where the port has it, mixed
+// with the boot count, a per-session counter and the clock. (Without a
+// hardware RNG this is only as good as those: docs/SECURITY.md.)
+static void make_nonce(const mb_port_t* p, const mb_bcl_t* log, uint8_t out[32]) {
+    static uint32_t session;
+    uint8_t rnd[32];
+    memset(rnd, 0, sizeof rnd);
+    if (p->random) p->random(rnd, sizeof rnd);
+    uint32_t extra[3] = { log->cur.boot_count, ++session, p->time_ms ? p->time_ms() : 0 };
+    mb_sha256_t s;
+    mb_sha256_init(&s);
+    mb_sha256_update(&s, rnd, sizeof rnd);
+    mb_sha256_update(&s, extra, sizeof extra);
+    mb_sha256_update(&s, p->target, strlen(p->target));
+    mb_sha256_final(&s, out);
+    memset(rnd, 0, sizeof rnd);
+}
+
+static int hexval(int c) {
+    return c >= '0' && c <= '9' ? c - '0' : (c | 0x20) >= 'a' && (c | 0x20) <= 'f' ? (c | 0x20) - 'a' + 10 : -1;
+}
+
+static void cmd_unlock(const mb_port_t* p, const mb_bcl_t* log) {
+    if (unlocked) { put(p, "MB UNLOCKED (already)\n"); return; }
+    if (unlock_fails >= UNLOCK_MAX_FAILS) { put(p, "MB ERR locked out until reset\n"); return; }
+    if (!p->unlock_keys || !p->unlock_keys->count) { put(p, "MB ERR this build has no unlock keys\n"); return; }
+    struct { char domain[sizeof UNLOCK_DOMAIN]; char target[16]; uint8_t nonce[32]; } msg;
+    memset(&msg, 0, sizeof msg);
+    memcpy(msg.domain, UNLOCK_DOMAIN, sizeof UNLOCK_DOMAIN);
+    strncpy(msg.target, p->target, sizeof msg.target);
+    make_nonce(p, log, msg.nonce);
+    mb_printf(p, "MB CHALLENGE %.16s ", p->target);
+    for (int i = 0; i < 32; i++) mb_printf(p, "%02x", msg.nonce[i]);
+    put(p, "\n");
+    char line[160];
+    int n = read_line(p, line, sizeof line, NULL);
+    uint8_t sig[64];
+    bool ok = n == 128;
+    for (int i = 0; ok && i < 64; i++) {
+        int hi = hexval(line[2 * i]), lo = hexval(line[2 * i + 1]);
+        ok = hi >= 0 && lo >= 0;
+        sig[i] = (uint8_t)(hi << 4 | lo);
+    }
+    bool good = false;
+    for (int k = 0; ok && !good && k < p->unlock_keys->count; k++)
+        good = mb_ed25519_verify(sig, &msg, sizeof msg, p->unlock_keys->keys[k]);
+    memset(&msg, 0, sizeof msg);            // a nonce is used once
+    if (good) {
+        unlocked = true;
+        put(p, "MB UNLOCKED\n");
+        return;
+    }
+    unlock_fails++;
+    // each failure costs more time; after UNLOCK_MAX_FAILS, nothing until a reset
+    if (p->time_ms) {
+        uint32_t t0 = p->time_ms();
+        while (p->time_ms() - t0 < 1000u * unlock_fails) {}
+    }
+    mb_printf(p, "MB ERR bad response (%u of %u)\n", unlock_fails, UNLOCK_MAX_FAILS);
+}
+
+// What a locked console may still do: look, and boot an entry as configured
+static bool allowed_locked(const char* cmd, int argc) {
+    static const char* const open_cmds[] = { "help", "?", "ls", "entries", "info", "verify", "version", "capabilities",
+                                             "menu", "exit", "reboot", "keys", "log", "layout", "unlock" };
+    for (unsigned i = 0; i < sizeof open_cmds / sizeof open_cmds[0]; i++)
+        if (!strcmp(cmd, open_cmds[i])) return true;
+    return !strcmp(cmd, "boot") && argc == 2;           // no args, no force
+}
+#else
+static bool console_locked(void) { return false; }
+#endif
+
+#if MB_FEAT_SHELL
 // returns true for "exit" (boot normally), false for "menu"
 static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_info_t* info) {
     put(p, "\nMimiBoot-Night command line. 'help' for commands.\n");
@@ -578,6 +671,13 @@ static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_i
             put(p, ")\n");
             continue;
         }
+#if MB_FEAT_CONSOLE_AUTH
+        if (!strcmp(cmd, "unlock")) { cmd_unlock(p, log); continue; }
+        if (console_locked() && !allowed_locked(cmd, argc)) {
+            put(p, "locked: 'unlock' first (mbtool --unlock-key <key>)\n");
+            continue;
+        }
+#endif
         refresh_headers(p, info);
         if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) put(p, help);
         else if (!strcmp(cmd, "ls")) cmd_ls(p, log, info);
@@ -716,6 +816,7 @@ void mb_console(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_inf
                 getc_wait(p, 60000);
                 break;
             case MENU_EDIT: {
+                if (console_locked()) { put(p, "locked: editing args needs 'unlock' in the command line\n"); getc_wait(p, 3000); break; }
                 char args[MB_ARGS_MAX];
                 mb_printf(p, "args for %s (enter boots, esc cancels):\n> ", cfg->e[pick].name);
                 if (read_line(p, args, sizeof(args), cfg->e[pick].args) >= 0) {
@@ -734,6 +835,8 @@ void mb_console(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_inf
                 if (p->reboot) p->reboot();
                 return;
             case MENU_ROM:
+                // the chip's ROM loader can read and write flash: as much as the console itself
+                if (console_locked()) { put(p, "locked: the ROM loader needs 'unlock' in the command line\n"); getc_wait(p, 3000); break; }
                 if (p->reboot_rom) p->reboot_rom();
                 return;
         }

@@ -121,8 +121,32 @@ int mb_mcuboot_probe(const mb_port_t* p, int slot, mb_slot_info_t* out) {
     return MB_OK;
 }
 
+/* The image trailer at the end of the slot (MCUboot bootutil_misc.h):
+ *   magic     the last 16 bytes: with BOOT_MAX_ALIGN 8 a fixed 16-byte value,
+ *             otherwise {u16 align, 14 fixed bytes}
+ *   image_ok  at ALIGN_DOWN(slot_size - 16 - align, align): 0x01 = confirmed
+ * In direct-xip mode (what MimiBoot's in-place A/B slots are) a Zephyr app
+ * confirms itself by setting image_ok in its own slot. */
+bool mb_mcuboot_confirmed(const mb_port_t* p, int slot) {
+    static const uint8_t magic8[16] = { 0x77, 0xc2, 0x95, 0xf3, 0x60, 0xd2, 0xef, 0x7f,
+                                        0x35, 0x52, 0x50, 0x0f, 0x2c, 0xb6, 0x79, 0x80 };
+    static const uint8_t magic14[14] = { 0x2d, 0xe1, 0x5d, 0x29, 0x41, 0x0b, 0x8d, 0x77, 0x67, 0x9c, 0x11, 0x0f, 0x1f, 0x8a };
+    if (slot < 0 || slot >= p->layout->n_slots) return false;
+    const mb_slot_def_t* r = &p->layout->slot[slot];
+    uint8_t m[16], ok;
+    if (r->size < 64 || p->flash_read(r->offset + r->size - 16, m, 16) != MB_OK) return false;
+    uint32_t align;
+    if (!memcmp(m, magic8, 16)) align = 8;
+    else if (!memcmp(m + 2, magic14, 14)) align = le16(m);
+    else return false;
+    if (align < 1 || align > 512 || (align & (align - 1))) return false;    // a power of two, or not a trailer
+    uint32_t ok_off = (r->size - 16 - align) / align * align;
+    return p->flash_read(r->offset + ok_off, &ok, 1) == MB_OK && ok == 0x01;
+}
+
 #else
 int mb_mcuboot_probe(const mb_port_t* p, int slot, mb_slot_info_t* out) { (void)p; (void)slot; (void)out; return MB_E_UNSUPP; }
+bool mb_mcuboot_confirmed(const mb_port_t* p, int slot) { (void)p; (void)slot; return false; }
 #endif
 
 #if MB_FEAT_IMG_RAW

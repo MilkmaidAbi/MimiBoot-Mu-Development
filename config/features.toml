@@ -179,7 +179,7 @@ title = "Zephyr / MCUboot images (imgtool, west sign)"
 help = """Boot images in MCUboot format: what Zephyr builds with CONFIG_BOOTLOADER_MCUBOOT=y and signs with imgtool / west sign.
 The SHA-256 TLV is checked like any image hash; an ED25519 TLV is checked against the build's keys (sign with: imgtool keygen -t ed25519).
 mimiconf writes a devicetree overlay (zephyr-partitions.overlay) so the Zephyr app links at the right slot.
-Not supported: encrypted images, 'pure' signatures, MCUboot swap trailers (use the MimiBoot client to confirm, or turn off 'Updates must confirm')."""
+A Zephyr app confirms itself MCUboot's way (boot_write_img_confirmed(), the image_ok flag in the slot's trailer): MimiBoot honours that. Not supported: encrypted images, 'pure' signatures, MCUboot swap modes, mcumgr uploads."""
 
 [[option]]
 id = "IMG_RAW"
@@ -250,6 +250,42 @@ depends = ["SIGNATURES"]
 menu = "security"
 title = "Trusted public keys file"
 help = "A text file with one Ed25519 public key per line (64 hex digits): mbtool keygen writes keys/mimiboot.pub. Enter a path; quotes are fine."
+
+[[option]]
+id = "FAULT_HARDENING"
+macro = "MB_FEAT_FAULT_HARDENING"
+kind = "bool"
+default = true
+cores = ["night"]
+menu = "security"
+title = "Harden the boot decision against glitches"
+help = """Makes a voltage or clock glitch that skips one instruction much less likely to start an image that failed its checks. The hash and the final signature comparison run in constant time and twice; each check leaves a multi-bit token only when it really passes; right before jumping, the tokens and the rollback floor are checked again, from a different place in the code. A glitch now has to hit two independent spots.
+It doesn't make the chip glitch-proof (that takes hardware countermeasures), and costs a few hundred bytes."""
+
+[[option]]
+id = "CONSOLE_AUTH"
+macro = "MB_FEAT_CONSOLE_AUTH"
+kind = "bool"
+default = false
+cores = ["night"]
+builds = ["mcu"]
+depends = ["SHELL", "SIGNATURES"]
+menu = "security"
+title = "Console commands that change things need a signed unlock"
+help = """Until someone answers the 'unlock' challenge with a key from UNLOCK_KEYS, the console only lets you look (ls, info, verify, log...) and boot an entry as configured. Uploads, confirm/reject/erase, config changes, 'boot ... force', edited args, requests and the ROM loader all need the unlock. mbtool does it for you with --unlock-key.
+Five wrong answers lock the console until the next reset. On nRF the challenge comes from the hardware RNG; on other chips it is derived from the boot count and the clock (weaker: see docs/SECURITY.md)."""
+
+[[option]]
+id = "UNLOCK_KEYS"
+macro = ""
+kind = "string"
+default = ""
+cores = ["night"]
+builds = ["mcu"]
+depends = ["CONSOLE_AUTH"]
+menu = "security"
+title = "Console unlock keys file"
+help = "Public keys (one per line, 64 hex digits; mbtool keygen) allowed to unlock the console. Empty: the image keys (KEYS). A separate key is better: whoever holds it can install images over the console, but not sign them."
 
 [[option]]
 id = "BOOT_LOCK"
@@ -652,6 +688,6 @@ values = { LAYOUT = "ab+golden", AB_TRIAL = true, TRIAL_WATCHDOG = true, CRASH_G
 [[preset]]
 id = "secure"
 title = "Secure boot: signed images only"
-help = "Only images signed with your keys start (set KEYS: mbtool keygen). Hash on every boot, anti-rollback, no raw/RAM images, no diagnostics, the bootloader's RAM is wiped before the handover. Where the chip can (nRF), the bootloader's flash is locked before an image starts and the rollback floors are kept in the locked region. The debug port is left alone: close it (DEBUG_LOCK, or mbtool provision) once the product is final."
+help = "Only images signed with your keys start (set KEYS: mbtool keygen). Hash on every boot, anti-rollback, no raw/RAM images, no diagnostics, the bootloader's RAM is wiped before the handover. Where the chip can (nRF), the bootloader's flash is locked before an image starts and the rollback floors are kept in the locked region. Console commands that change anything need a signed unlock (mbtool --unlock-key). The debug port is left alone: close it (DEBUG_LOCK, or mbtool provision) once the product is final."
 cores = ["night"]
-values = { SIGNATURES = true, REQUIRE_SIGNATURE = true, BOOT_VERIFY = "every-boot", ANTI_ROLLBACK = true, IMG_RAW = false, RAM_IMAGES = false, SHELL_DIAG = false, SCRUB_RAM = true, LAYOUT = "ab+golden", AB_TRIAL = true, CRASH_GUARD = true, BOOT_LOCK = true, PROTECTED_FLOOR = true }
+values = { SIGNATURES = true, REQUIRE_SIGNATURE = true, BOOT_VERIFY = "every-boot", ANTI_ROLLBACK = true, IMG_RAW = false, RAM_IMAGES = false, SHELL_DIAG = false, SCRUB_RAM = true, LAYOUT = "ab+golden", AB_TRIAL = true, CRASH_GUARD = true, BOOT_LOCK = true, PROTECTED_FLOOR = true, CONSOLE_AUTH = true }

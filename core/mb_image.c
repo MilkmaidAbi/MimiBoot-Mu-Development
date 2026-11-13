@@ -158,6 +158,11 @@ int mb_slot_erase(const mb_port_t* p, int slot, uint32_t bytes) {
     if (len > r->size) return MB_E_NOSPACE;
     int rc = p->flash_erase(r->offset, ss);
     if (rc == MB_OK && len > ss) rc = p->flash_erase(r->offset + ss, len - ss);
+#if MB_FEAT_IMG_MCUBOOT
+    // an MCUboot trailer left at the end of the slot by an earlier image would
+    // confirm the next one before it ever ran (mb_mcuboot_confirmed)
+    if (rc == MB_OK && len < r->size) rc = p->flash_erase(r->offset + r->size - ss, ss);
+#endif
     return rc;
 }
 

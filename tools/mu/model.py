@@ -389,6 +389,15 @@ class Config:
                     p = Path.cwd() / p
                 if not p.exists():
                     out.append(("error", f"KEYS file not found: {p}"))
+            if e("CONSOLE_AUTH") and not e("KEYS"):
+                out.append(("error", "'Console commands need a signed unlock' needs KEYS (or UNLOCK_KEYS) to know who may unlock"))
+            if e("CONSOLE_AUTH") and e("UNLOCK_KEYS"):
+                p = Path(str(e("UNLOCK_KEYS")))
+                if not (p if p.is_absolute() else Path.cwd() / p).exists():
+                    out.append(("error", f"UNLOCK_KEYS file not found: {p}"))
+            if e("CONSOLE_AUTH") and not e("UNLOCK_KEYS"):
+                out.append(("warn", "console unlock uses the image signing keys: a separate UNLOCK_KEYS file keeps "
+                                    "the image key off the bench"))
             if e("LAYOUT") == "single" and e("AB_TRIAL"):
                 out.append(("warn", "one slot + 'Updates must confirm': an app that never confirms stops booting after "
                                     f"{e('TRIES')} tries (nothing to roll back to)"))

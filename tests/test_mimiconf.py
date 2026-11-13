@@ -259,8 +259,43 @@ def main():
                 cc.apply_preset(pid)
                 errs = [m for lvl, m in cc.problems() if lvl == "error" and "KEYS" not in m]
                 check(not errs, f"preset {pid} on {board}: {errs}")
+    provision_checks(db)
     print(f"mimiconf: {checks} checks, {fails} failed")
     return fails
+
+
+def provision_checks(db):
+    """mbtool provision: the printed steps for each vendor, from a fabricated build dir"""
+    import json as _json
+    from mu.provision import ProvisionError, steps
+
+    def run(board, boot_off, boot_size, features=None, core="night"):
+        d = Path(tempfile.mkdtemp(prefix="mu-prov-"))
+        t = db.target(board)
+        (d / "build-info.json").write_text(_json.dumps({"board": board, "core": core, "features": features or {},
+                                                        "flash_region": boot_size}))
+        if core == "night":
+            (d / "layout.json").write_text(_json.dumps({"flash_base": t.get("flash_base", 0x08000000),
+                                                        "boot": {"offset": boot_off, "size": boot_size}}))
+        try:
+            return "\n".join(steps(d))
+        except ProvisionError as e:
+            return "REFUSED " + str(e)
+
+    o = run("nucleo-f411re", 0, 48 * 1024)
+    check("nWRP0=0 nWRP1=0 nWRP2=0" in o and "RDP=0xBB" in o, "provision F4: sectors 0..2, RDP level 1")
+    o = run("nucleo-l476rg", 0, 64 * 1024)
+    check("WRP1A_STRT=0 WRP1A_END=31" in o, "provision L4: pages 0..31")
+    o = run("arduino-zero", 0, 48 * 1024)
+    check(o.startswith("REFUSED") and "32 KB" in o, "provision SAM D21: refuses a region BOOTPROT can't cover exactly")
+    o = run("arduino-zero", 0, 16 * 1024)
+    check("at91samd bootloader 16384" in o, "provision SAM D21: BOOTPROT for 16 KB")
+    o = run("nrf52840dk", 0, 48 * 1024, {"BOOT_LOCK": True})
+    check("ACL" in o and "nrfjprog --rbp ALL" in o and "BOOT_LOCK is on" in o, "provision nRF52840: ACL at run time, UICR")
+    o = run("nrf52dk", 0, 48 * 1024, {"BOOT_LOCK": False})
+    check("BOOT_LOCK is OFF" in o and "BPROT" in o, "provision nRF52832: says the lock is off")
+    o = run("uno", 0, 512, core="lite")
+    check("lock:w:0x2F:m" in o, "provision AVR: BLB1 lock bits")
 
 
 def build_all():

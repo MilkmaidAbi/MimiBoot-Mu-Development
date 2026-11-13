@@ -505,8 +505,39 @@ def read_until(s, pattern, timeout):
     return buf.decode("utf-8", "replace"), None
 
 
+UNLOCK_KEY = os.environ.get("MB_UNLOCK_KEY")       # set by --unlock-key
+UNLOCK_DOMAIN = b"MimiBoot console unlock v1\0"
+
+
+def unlock_message(target: bytes, nonce: bytes) -> bytes:
+    """what the device's 'unlock' checks the signature against (core/mb_console.c)"""
+    return UNLOCK_DOMAIN + target[:16].ljust(16, b"\0") + nonce
+
+
+def unlock(s, key_path):
+    """Answer the console's unlock challenge with an Ed25519 key (CONSOLE_AUTH builds)."""
+    s.write(b"unlock\r")
+    out, m = read_until(s, r"MB CHALLENGE (\S+) ([0-9a-f]{64})\r?\n|MB ERR[^\r\n]*|MB UNLOCKED|unknown command", 5)
+    if not m:
+        die("no unlock challenge; output was:\n" + ANSI.sub("", out)[-300:])
+    if m.group(0).startswith("unknown command"):
+        return                                          # this build has no console lock
+    if m.group(0).startswith("MB UNLOCKED"):
+        read_until(s, PROMPT, 3)
+        return
+    if m.group(0).startswith("MB ERR"):
+        die("unlock: " + m.group(0))
+    sig = ed25519.sign(read_key(key_path), unlock_message(m.group(1).encode(), bytes.fromhex(m.group(2))))
+    s.write(sig.hex().encode() + b"\r")
+    out, m = read_until(s, r"MB UNLOCKED|MB ERR[^\r\n]*", 15)
+    if not m or not m.group(0).startswith("MB UNLOCKED"):
+        die("unlock refused: " + (m.group(0) if m else ANSI.sub("", out)[-200:]))
+    read_until(s, PROMPT, 3)
+
+
 def to_shell(s):
-    """Menu or shell -> shell prompt. Never Enter first: in the menu it boots the selection."""
+    """Menu or shell -> shell prompt. Never Enter first: in the menu it boots the selection.
+    With an unlock key (--unlock-key / MB_UNLOCK_KEY) the console is unlocked too."""
     s.write(b"c")
     out, m = read_until(s, PROMPT, 3)
     if not m:
@@ -514,6 +545,8 @@ def to_shell(s):
         out, m = read_until(s, PROMPT, 3)
     if not m:
         die("no MimiBoot prompt; output was:\n" + out[-500:])
+    if UNLOCK_KEY:
+        unlock(s, UNLOCK_KEY)
 
 
 def send_image(s, img, payload, ready_timeout=10):
@@ -716,6 +749,8 @@ def cmd_provision(a):
 def main():
     ap = argparse.ArgumentParser(description="MimiBoot host tool", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--layout", default="4m", choices=LAYOUTS)
+    ap.add_argument("--unlock-key", help="secret key that answers the console's unlock challenge "
+                                         "(CONSOLE_AUTH builds; or set MB_UNLOCK_KEY)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("pack"); p.add_argument("input"); p.add_argument("-o", "--output")
     p.add_argument("--name"); p.add_argument("--version", default="0.0.1"); p.add_argument("--secver", type=int, default=0)
@@ -748,6 +783,9 @@ def main():
     p = sub.add_parser("provision", help="print the steps to lock a board for production (runs nothing)")
     p.add_argument("build_dir", help="a mimiconf build directory (has build-info.json)"); p.set_defaults(fn=cmd_provision)
     a = ap.parse_args()
+    if a.unlock_key:
+        global UNLOCK_KEY
+        UNLOCK_KEY = a.unlock_key
     if a.cmd == "cfg" and a.action == "push" and not a.file:
         die("cfg push <file>")
     sys.exit(a.fn(a) or 0)

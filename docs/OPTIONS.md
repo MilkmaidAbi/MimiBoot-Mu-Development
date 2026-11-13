@@ -12,7 +12,7 @@ Set options in the TUI (`python mimiconf.py`) or with `python mimiconf.py set ID
 | `minimal` | **Minimal: just boot the app**. The smallest bootloader that still checks what it starts. No console, no uploads, one slot, no OS hooks. Flash it, link your firmware for the slot, done. |
 | `hobby` | **Hobby: console, uploads, no ceremony**. Everything handy on the bench: boot menu, command line with diagnostics, uploads over the console, A/B slots without trials (new images just boot), Zephyr and raw firmware accepted. No signatures. |
 | `product` | **Product: safe field updates**. A/B + golden recovery, updates must confirm or roll back, watchdog on trial boots, crash-loop guard, anti-rollback, OS hooks. Signatures are checked when present. Diagnostics off. |
-| `secure` | **Secure boot: signed images only**. Only images signed with your keys start (set KEYS: mbtool keygen). Hash on every boot, anti-rollback, no raw/RAM images, no diagnostics, the bootloader's RAM is wiped before the handover. Where the chip can (nRF), the bootloader's flash is locked before an image starts and the rollback floors are kept in the locked region. The debug port is left alone: close it (DEBUG_LOCK, or mbtool provision) once the product is final. |
+| `secure` | **Secure boot: signed images only**. Only images signed with your keys start (set KEYS: mbtool keygen). Hash on every boot, anti-rollback, no raw/RAM images, no diagnostics, the bootloader's RAM is wiped before the handover. Where the chip can (nRF), the bootloader's flash is locked before an image starts and the rollback floors are kept in the locked region. Console commands that change anything need a signed unlock (mbtool --unlock-key). The debug port is left alone: close it (DEBUG_LOCK, or mbtool provision) once the product is final. |
 
 `python mimiconf.py preset <name>` (or Presets in the TUI): every option back to its default, then the preset's values. On small chips a preset doesn't turn back on what the chip's defaults trim to fit.
 
@@ -114,7 +114,7 @@ The SHA-256 TLV is checked like any image hash; an ED25519 TLV is checked agains
 
 mimiconf writes a devicetree overlay (zephyr-partitions.overlay) so the Zephyr app links at the right slot.
 
-Not supported: encrypted images, 'pure' signatures, MCUboot swap trailers (use the MimiBoot client to confirm, or turn off 'Updates must confirm').
+A Zephyr app confirms itself MCUboot's way (boot_write_img_confirmed(), the image_ok flag in the slot's trailer): MimiBoot honours that. Not supported: encrypted images, 'pure' signatures, MCUboot swap modes, mcumgr uploads.
 
 C macro: `MB_FEAT_IMG_MCUBOOT`
 
@@ -177,6 +177,22 @@ C macro: `MB_REQUIRE_SIGNATURE`
 default ****; needs `SIGNATURES`. (full core)
 
 A text file with one Ed25519 public key per line (64 hex digits): mbtool keygen writes keys/mimiboot.pub. Enter a path; quotes are fine.
+
+### `CONSOLE_AUTH`: Console commands that change things need a signed unlock
+
+default **off**; needs `SHELL`, `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)
+
+Until someone answers the 'unlock' challenge with a key from UNLOCK_KEYS, the console only lets you look (ls, info, verify, log...) and boot an entry as configured. Uploads, confirm/reject/erase, config changes, 'boot ... force', edited args, requests and the ROM loader all need the unlock. mbtool does it for you with --unlock-key.
+
+Five wrong answers lock the console until the next reset. On nRF the challenge comes from the hardware RNG; on other chips it is derived from the boot count and the clock (weaker: see docs/SECURITY.md).
+
+C macro: `MB_FEAT_CONSOLE_AUTH`
+
+### `UNLOCK_KEYS`: Console unlock keys file
+
+default ****; needs `CONSOLE_AUTH`. (full core; builds: STM32/nRF/SAMD)
+
+Public keys (one per line, 64 hex digits; mbtool keygen) allowed to unlock the console. Empty: the image keys (KEYS). A separate key is better: whoever holds it can install images over the console, but not sign them.
 
 ### `BOOT_LOCK`: Lock the bootloader's flash before starting an image
 

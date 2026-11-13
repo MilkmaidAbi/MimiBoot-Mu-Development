@@ -91,6 +91,9 @@
 #ifndef MB_FEAT_PROTECTED_FLOOR
 #define MB_FEAT_PROTECTED_FLOOR 0   /* rollback floors also kept in the (locked) bootloader region */
 #endif
+#ifndef MB_FEAT_CONSOLE_AUTH
+#define MB_FEAT_CONSOLE_AUTH    0   /* state-changing console commands need a signed challenge ('unlock') */
+#endif
 #ifndef MB_FEAT_DEBUG_LOCK
 #define MB_FEAT_DEBUG_LOCK      0   /* never open the debug port; force it closed until reset where the chip can */
 #endif
@@ -136,6 +139,9 @@
 #endif
 #if defined(MB_REQUIRE_SIGNATURE) && MB_REQUIRE_SIGNATURE && MB_BOOT_VERIFY != MB_BOOT_VERIFY_EVERY
 #error "required signatures need the payload hash on every boot (MB_BOOT_VERIFY 0): a signed header says nothing about a payload nobody hashed"
+#endif
+#if MB_FEAT_CONSOLE_AUTH && (!MB_FEAT_SHELL || !MB_FEAT_SIGNATURES)
+#error "MB_FEAT_CONSOLE_AUTH needs MB_FEAT_SHELL (the 'unlock' command) and MB_FEAT_SIGNATURES (Ed25519)"
 #endif
 #if MB_FEAT_PROTECTED_FLOOR && !MB_FEAT_BOOT_LOCK
 #error "MB_FEAT_PROTECTED_FLOOR needs MB_FEAT_BOOT_LOCK: an unlocked copy protects nothing"

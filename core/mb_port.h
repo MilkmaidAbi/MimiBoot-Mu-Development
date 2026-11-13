@@ -59,6 +59,7 @@ typedef struct mb_port {
     /* security policy: build-time constants */
     const mb_keyring_t* keys;   /* NULL: no keys, signatures can't be checked */
     bool require_signature;     /* refuse unsigned images */
+    const mb_keyring_t* unlock_keys;    /* MB_FEAT_CONSOLE_AUTH: who may unlock the console */
 
     /* flash: offsets from the start of flash. erase/program take whole
      * sectors / pages (the core aligns); read takes anything. */
@@ -87,6 +88,9 @@ typedef struct mb_port {
      * in the log). Doesn't return on success. With it, can_start may accept
      * XIP images for either architecture. */
     void (*switch_arch)(uint8_t arch);
+
+    /* optional: hardware random bytes (MB_OK), for console unlock challenges */
+    int (*random)(void* buf, size_t len);
 
     /* optional */
     uint32_t (*time_ms)(void);

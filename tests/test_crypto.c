@@ -4,6 +4,7 @@
  * verifier has to get right. Called from test_mimiboot.c.
  */
 #include "core/mimiboot.h"
+#include "tests/wycheproof_ed25519.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -76,4 +77,20 @@ void test_crypto(void) {
         for (int k = 0; k < 32; k++) { unsigned t = bad[32 + k] + L[k] + carry; bad[32 + k] = (uint8_t)t; carry = t >> 8; }
         CK(!mb_ed25519_verify(bad, m, mlen, pk), "vector %u: S + L (malleable) refused", i + 1);
     }
+
+    // Wycheproof: every "valid" vector verifies, every "invalid" one doesn't.
+    // "acceptable" ones (small-order and mixed-order keys, which RFC 8032 leaves
+    // open) are counted, not judged: MimiBoot's keys are its own, never an
+    // attacker's choice. Signatures that aren't 64 bytes never reach the
+    // verifier (the image header has exactly 64), so they count as refused.
+    printf("Ed25519 (Wycheproof, %u vectors)\n", (unsigned)(sizeof wp_ed25519 / sizeof wp_ed25519[0]));
+    unsigned acc_yes = 0, acc_no = 0;
+    for (unsigned i = 0; i < sizeof wp_ed25519 / sizeof wp_ed25519[0]; i++) {
+        const wp_ed25519_t* t = &wp_ed25519[i];
+        bool ok = t->sig_len == 64 && mb_ed25519_verify((const uint8_t*)t->sig, t->msg, t->msg_len, (const uint8_t*)t->pub);
+        if (t->result == 2) { ok ? acc_yes++ : acc_no++; continue; }
+        CK(ok == (t->result == 1), "Wycheproof tcId %d: expected %s, got %s", t->id, t->result ? "valid" : "invalid",
+           ok ? "accepted" : "refused");
+    }
+    printf("  'acceptable' vectors: %u accepted, %u refused\n", acc_yes, acc_no);
 }

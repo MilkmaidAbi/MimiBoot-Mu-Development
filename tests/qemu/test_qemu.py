@@ -325,6 +325,55 @@ def nrf51_tests(work: Path, db, check):
     check(f"{board}: PROTECTED_FLOOR: golden 1.2.3 recorded in the floor store ({want})",
           "MU-APP nrf-floor" in o and want in o, o)
 
+    # 6. CONSOLE_AUTH: a locked console refuses changes; mbtool answers the challenge
+    #    (nonce from the emulated nRF RNG) with the unlock key; a stranger's key is refused
+    mbtool("keygen", "--out", str(work / "unlock"))
+    cfg4 = Config(db, board)
+    cfg4.set("LAYOUT", "ab+golden")
+    cfg4.set("KEYS", str(work / "trusted.pub"))
+    cfg4.set("CONSOLE_AUTH", True)
+    cfg4.set("UNLOCK_KEYS", str(work / "unlock.pub"))
+    out4 = work / f"{board}-auth"
+    info4 = mubuild.build(cfg4, out4, log=lambda *a: None)
+    print(f"{board} (console lock): bootloader {info4['flash_used']} B flash")
+    gimg = flash_image(work, "nrf-auth", flash, out4 / "mimiboot.bin", g["offset"], b"")    # empty: the menu stays up
+    prompt = r"mimiboot(?:\x1b\[0m)?> $"
+
+    def session(steps):
+        s = QemuSerial(machine, gimg, seconds=40)
+        note = ""
+        try:
+            mbt.read_until(s, r"up/down \+ enter|booting \S+ in", 10)
+            for _ in range(3):
+                s.write(b"c")
+                if mbt.read_until(s, prompt, 6)[1]:
+                    break
+            s.write(b"\x15\r")
+            mbt.read_until(s, prompt, 3)
+            steps(s)
+        except SystemExit as e:
+            note = f"mbtool: {e}"
+        return s.close(), note
+
+    def locked_then_unlocked(s):
+        s.write(b"reject g\r")
+        mbt.read_until(s, prompt, 5)
+        mbt.unlock(s, str(work / "unlock.key"))
+        s.write(b"reject g\r")
+        mbt.read_until(s, r"g -> BAD", 5)
+
+    o, note = session(locked_then_unlocked)
+    check(f"{board}: CONSOLE_AUTH: 'reject' refused while locked", "locked: 'unlock' first" in o, note + o[-1500:])
+    check(f"{board}: CONSOLE_AUTH: mbtool answers the challenge, the console unlocks", "MB UNLOCKED" in o, note + o[-1500:])
+    check(f"{board}: CONSOLE_AUTH: after the unlock 'reject' runs", "g -> BAD" in o, note + o[-1500:])
+
+    def wrong_key(s):
+        mbt.unlock(s, str(work / "stranger.key"))
+
+    o, note = session(wrong_key)
+    check(f"{board}: CONSOLE_AUTH: a key not in UNLOCK_KEYS is refused",
+          "MB ERR bad response (1 of 5)" in o and "MB UNLOCKED" not in o, note + o[-1500:])
+
 def main():
     if not GCC:
         raise SystemExit("arm-none-eabi-gcc not found")

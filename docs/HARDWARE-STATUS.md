@@ -11,8 +11,10 @@ Read this before flashing a board. Labels mean exactly this:
 | **host** | the logic is covered by host tests (simulated flash), not on any chip |
 
 The core logic (boot policy, A/B trials, rollback, boot log, power cuts at every
-flash operation, signatures, config) is host-tested for every target: 312 checks
-in `tests/run.py`, plus every feature profile in `tests/test_profiles.py`.
+flash operation, signatures, config, rollback floors, the console lock) is
+host-tested for every target: the checks in `tests/run.py` (two test programs:
+one built with the console lock), plus every feature profile in
+`tests/test_profiles.py`.
 `tests/test_mimiconf.py --build-all` compiles every board, and every chip has a board.
 
 ## MimiBoot-Mu targets (13 November 2026)
@@ -45,6 +47,20 @@ Mini build have not run anywhere.
 | menuconfig (TUI) | Linux only: `tests/tui_smoke.py` drives it in a pseudo-terminal at 120 and 80 columns (picker, menus, toggles, save), and its screens were rendered and read through a terminal emulator. Not run on Windows (windows-curses: `pip install windows-curses`); it falls back to ASCII when the terminal isn't UTF-8 |
 | presets, output folder, source export | `tests/test_mimiconf.py`; every preset builds on STM32F411, SAM D21, nRF52840, nRF51, the Uno, Pico and Pico 2 (minimal and hobby). The exported Makefiles for nucleo-f411re and arduino-zero build with GNU make in WSL (Ubuntu's arm-none-eabi-gcc makes a 36.9 / 37.1 KB image where the Windows Arm toolchain makes 34.1 / 35.0 KB: a different compiler version). The AVR export's Makefile commands (`make -n`) run with the Arduino avr-gcc give the identical hex. The RP2040 export's BUILD.txt command builds the same-size image (58,904 B) through the Pico SDK. Every preset also built for pico and pico2 (RP2350 universal) |
 
+### Security features (added 14 November 2026)
+
+| feature | evidence |
+|---|---|
+| protected rollback floors (core) | host: `test_protected_floors` in `tests/run.py`: a forged log floor, a wiped log, `boot force`, `ramboot`, an older golden after a log wipe, a full store, a power cut in the middle of a raise, a store that can't be written, a port without one |
+| `PROTECTED_FLOOR` on nRF | emulator (nRF51): booting golden 1.2.3 writes the floor entry through the real NVMC driver and it reads back as expected. Not run on nRF52 |
+| `BOOT_LOCK` (MPU PROTENSET / BPROT / ACL) | built: every nRF board compiles with it; the register addresses were checked in the disassembly against Nordic's MDK. QEMU doesn't model block protection, so the lock itself has never been seen to hold |
+| `DEBUG_LOCK` (APPROTECT.FORCEPROTECT) | built only |
+| `CONSOLE_AUTH` | host: `tests/test_auth.c` (what a locked console refuses and allows, menu keys, bad answers, the lockout). Emulator (nRF51): mbtool answers a challenge from the emulated hardware RNG with the unlock key, a locked `reject` is refused before and runs after, a stranger's key is refused. The nRF52 RNG path has not run |
+| fault reset + breadcrumb | host: a reported fault marks the slot bad and the next one boots. The Cortex-M handler and its `.noinit` note have not been triggered on a chip or in QEMU |
+| MCUboot trailer confirmation (direct-xip `image_ok`) | host: `tests/test_profile.c` in the MCUboot profiles: a trial confirmed by its trailer, an unset `image_ok`, the align-32 magic, a damaged magic. Not run with a real Zephyr app |
+| Ed25519 against Wycheproof | host: all 210 vectors (`tests/test_crypto.c`) |
+| `mbtool provision` | prints steps (run for nRF52840, nRF51, STM32F411, STM32L476, SAM D21, Uno); none of the printed commands has been run by us |
+
 ### Not done / not claimed
 
 - **No STM32 flash write has ever run.** QEMU has no STM32 flash controller, so the
@@ -61,7 +77,8 @@ Mini build have not run anywhere.
 - nRF52: nothing has run on silicon or in an emulator (QEMU has no nRF52). The UARTE
   one-byte DMA receive (52810/811/820) follows Zephyr's poll_in; its behaviour at 115200
   with mbtool's 1 KB frames is untested. Debug access on new-APPROTECT silicon is
-  re-opened only when UICR.APPROTECT reads HwDisabled, like Nordic's SystemInit.
+  re-opened only when UICR.APPROTECT reads HwDisabled, like Nordic's SystemInit, and
+  only on parts Nordic's errata header lists as having those registers.
 - SAMD: the D21 OSC8M / D51 DFLL are internal oscillators (about +-2 %); fine for
   115200 on the bench, not checked over temperature. The D21 watchdog uses generic clock
   generator 2 (set to OSCULP32K / 32) during trials.
@@ -69,10 +86,10 @@ Mini build have not run anywhere.
   no SoftDevice on nRF52 (see the README).
 - STM32 app side (client library): status and handoff ran in QEMU; confirm, requests and
   A/B install write flash, so they have not run (see the first point).
-- MCUboot compatibility covers booting and verifying imgtool images. MCUboot's
-  swap/trailer protocol (Zephyr's `boot_write_img_confirmed()`, mcumgr DFU) is not
-  implemented. A real Zephyr application has not been built against the generated
-  overlay (no Zephyr SDK here).
+- MCUboot compatibility covers booting and verifying imgtool images and the
+  direct-xip confirm flag in the trailer (`boot_write_img_confirmed()`). MCUboot's
+  swap modes and mcumgr DFU (SMP) are not implemented. A real Zephyr application has
+  not been built against the generated overlay (no Zephyr SDK here).
 - AVR: fuse values are computed from the datasheets; writing them needs an ISP
   programmer and has not been done. The flash service isn't available on >128 KB
   parts (ATmega2560: the call needs EIND). ATmega32u4 (USB) isn't supported.
