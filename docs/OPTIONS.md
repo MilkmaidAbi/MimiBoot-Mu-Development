@@ -178,6 +178,16 @@ default ****; needs `SIGNATURES`. (full core)
 
 A text file with one Ed25519 public key per line (64 hex digits): mbtool keygen writes keys/mimiboot.pub. Enter a path; quotes are fine.
 
+### `CFG_SIGNED`: Only use a boot config signed with your keys
+
+default **off**; needs `CFG_FILE`, `SIGNATURES`. (full core)
+
+The boot config decides what boots and with which arguments, so on a locked-down product it shouldn't be something anyone with flash access can rewrite. With this on, a config counts only if it carries an Ed25519 signature from one of KEYS over its text, the target and a version number; anything else is ignored and the built-in entries apply. mbtool cfg push <file> --key <secret> signs it (version: the current time unless --cfg-version).
+
+On chips with the protected floor store (nRF, PROTECTED_FLOOR) an older signed config can't come back once a newer one was used. The console's 'default' command and the app library can't change a signed config; 'cfg reset' goes back to the built-in entries.
+
+C macro: `MB_FEAT_CFG_SIGNED`
+
 ### `FAULT_HARDENING`: Harden the boot decision against glitches
 
 default **on**. (full core)

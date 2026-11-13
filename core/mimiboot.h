@@ -141,6 +141,7 @@ typedef struct {
     int timeout_s;              /* -1: not set (port default) */
     bool from_flash;            /* false: built-in */
     uint32_t seq;
+    uint32_t version;           /* MB_FEAT_CFG_SIGNED: the signed version (rollback floor) */
     int errors;                 /* lines that didn't parse */
 } mb_config_t;
 
@@ -148,7 +149,12 @@ void mb_config_builtin(const mb_port_t* p, mb_config_t* c);
 int  mb_config_parse(const mb_port_t* p, const char* text, size_t len, mb_config_t* c, char* err, size_t errcap);
 int  mb_config_load(const mb_port_t* p, mb_config_t* c);
 int  mb_config_read_text(const mb_port_t* p, char* buf, size_t cap, uint32_t* seq);  /* length, or <0 */
-int  mb_config_save(const mb_port_t* p, const char* text, size_t len);               /* atomic */
+int  mb_config_save(const mb_port_t* p, const char* text, size_t len);               /* atomic; MB_E_REFUSED with CFG_SIGNED */
+/* MB_FEAT_CFG_SIGNED: Ed25519 (a key from p->keys) over
+ *   "MimiBoot config v1\0" || target[16] || version (u32 LE) || len (u32 LE) || SHA-256(text)
+ * Refused unless the signature checks and version isn't below the config floor. */
+int  mb_config_save_signed(const mb_port_t* p, const char* text, size_t len, uint32_t version, const uint8_t sig[64]);
+int  mb_config_erase(const mb_port_t* p);                                            /* back to the built-in config */
 int mb_config_set_default(const mb_port_t*,const char*);
 int mb_config_validate_save(const mb_port_t*,const char*,size_t,char*,size_t);
 int mb_grub_translate(const char*,size_t,char*,size_t,char*,size_t);

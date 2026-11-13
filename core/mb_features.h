@@ -32,6 +32,9 @@
 #ifndef MB_FEAT_CFG_FILE
 #define MB_FEAT_CFG_FILE        1   /* boot config text kept in flash (else: built-in entries) */
 #endif
+#ifndef MB_FEAT_CFG_SIGNED
+#define MB_FEAT_CFG_SIGNED      0   /* only a config signed with a trusted key is used */
+#endif
 #ifndef MB_FEAT_GRUB
 #define MB_FEAT_GRUB            1   /* GRUB-style menuentry syntax in the config */
 #endif
@@ -154,6 +157,9 @@
 #endif
 #if MB_MENU_SECS < 1 || MB_MENU_SECS > 600
 #error "MB_MENU_SECS must be 1..600"
+#endif
+#if MB_FEAT_CFG_SIGNED && (!MB_FEAT_CFG_FILE || !MB_FEAT_SIGNATURES)
+#error "MB_FEAT_CFG_SIGNED needs MB_FEAT_CFG_FILE and MB_FEAT_SIGNATURES"
 #endif
 #if MB_FEAT_GRUB && !MB_FEAT_CFG_FILE
 #error "MB_FEAT_GRUB needs MB_FEAT_CFG_FILE"

@@ -11,5 +11,5 @@ subprocess.run([str(exe)],cwd=ROOT,check=True)
 # the console lock: the same core built with MB_FEAT_CONSOLE_AUTH
 exe2=out/('mimiboot_auth.exe' if os.name=='nt' else 'mimiboot_auth')
 src2=[s for s in src if not s.startswith('tests/test_') and s!='client/mb_client.c']+['tests/test_auth.c']
-subprocess.run([cc,'-std=c11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-D_CRT_SECURE_NO_WARNINGS','-DMB_FEAT_CONSOLE_AUTH=1','-I.','-Iinclude',*src2,'-o',str(exe2)],cwd=ROOT,check=True)
+subprocess.run([cc,'-std=c11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-D_CRT_SECURE_NO_WARNINGS','-DMB_FEAT_CONSOLE_AUTH=1','-DMB_FEAT_CFG_SIGNED=1','-I.','-Iinclude',*src2,'-o',str(exe2)],cwd=ROOT,check=True)
 subprocess.run([str(exe2)],cwd=ROOT,check=True)

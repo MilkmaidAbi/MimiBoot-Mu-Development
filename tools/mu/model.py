@@ -389,6 +389,8 @@ class Config:
                     p = Path.cwd() / p
                 if not p.exists():
                     out.append(("error", f"KEYS file not found: {p}"))
+            if e("CFG_SIGNED") and not e("KEYS"):
+                out.append(("error", "'Only use a signed boot config' needs KEYS"))
             if e("CONSOLE_AUTH") and not e("KEYS"):
                 out.append(("error", "'Console commands need a signed unlock' needs KEYS (or UNLOCK_KEYS) to know who may unlock"))
             if e("CONSOLE_AUTH") and e("UNLOCK_KEYS"):

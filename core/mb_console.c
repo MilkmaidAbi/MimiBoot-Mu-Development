@@ -404,7 +404,8 @@ static char cfg_text[MB_CFG_MAX + 1];
 // config text upload: "MB CFG READY <max>\n", then u16 length + text + u32 crc
 static void cmd_cfg_recv(const mb_port_t* p, mb_config_t* cfg) {
     char* text = cfg_text;
-    mb_printf(p, "MB CFG READY %d\n", MB_CFG_MAX);
+    // the target and whether a signature must follow, for mbtool
+    mb_printf(p, "MB CFG READY %d %.16s %s\n", MB_CFG_MAX, p->target, MB_FEAT_CFG_SIGNED ? "signed" : "plain");
     uint8_t h[2], t[4];
     for (int i = 0; i < 2; i++) { int c = getc_wait(p, 5000); if (c < 0) { put(p, "MB ERR timeout\n"); return; } h[i] = (uint8_t)c; }
     size_t len = (size_t)h[0] | (size_t)h[1] << 8;
@@ -413,11 +414,25 @@ static void cmd_cfg_recv(const mb_port_t* p, mb_config_t* cfg) {
     for (int i = 0; i < 4; i++) { int c = getc_wait(p, 2000); if (c < 0) { put(p, "MB ERR timeout\n"); return; } t[i] = (uint8_t)c; }
     uint32_t crc = (uint32_t)t[0] | (uint32_t)t[1] << 8 | (uint32_t)t[2] << 16 | (uint32_t)t[3] << 24;
     if (mb_crc32(0, text, len) != crc) { put(p, "MB ERR crc\n"); return; }
+#if MB_FEAT_CFG_SIGNED
+    // then u32 version + the 64-byte signature
+    uint8_t vs[68];
+    for (int i = 0; i < 68; i++) { int c = getc_wait(p, 2000); if (c < 0) { put(p, "MB ERR timeout\n"); return; } vs[i] = (uint8_t)c; }
+    uint32_t version = (uint32_t)vs[0] | (uint32_t)vs[1] << 8 | (uint32_t)vs[2] << 16 | (uint32_t)vs[3] << 24;
+#endif
     mb_config_t c;
     char err[64];
     if (mb_config_parse(p, text, len, &c, err, sizeof(err)) != MB_OK) { mb_printf(p, "MB ERR %s\n", err); return; }
     if (c.errors) {mb_printf(p,"MB ERR config: %s\n",err);return;}
+#if MB_FEAT_CFG_SIGNED
+    int rc = mb_config_save_signed(p, text, len, version, vs + 4);
+    if (rc != MB_OK) {
+        put(p, rc == MB_E_SIGNATURE ? "MB ERR signature\n" : rc == MB_E_REFUSED ? "MB ERR older than the config in force\n" : "MB ERR flash\n");
+        return;
+    }
+#else
     if (mb_config_validate_save(p, text, len,err,sizeof err) != MB_OK) { put(p, "MB ERR flash\n"); return; }
+#endif
     mb_config_load(p, cfg);
     put(p, "MB DONE\n");
 }
@@ -435,7 +450,9 @@ static void cmd_cfg(const mb_port_t* p, mb_config_t* cfg, int argc, char** argv)
     } else if (!strcmp(sub, "recv")) {
         cmd_cfg_recv(p, cfg);
     } else if (!strcmp(sub, "reset")) {
-        int rc = mb_config_save(p, "# built-in\n", 11);         // no entries: the built-in ones apply
+        // no entries: the built-in ones apply (a signed-config build can't write
+        // an unsigned one, so it erases both copies)
+        int rc = MB_FEAT_CFG_SIGNED ? mb_config_erase(p) : mb_config_save(p, "# built-in\n", 11);
         mb_config_load(p, cfg);
         mb_printf(p, "%s\n", rc == MB_OK ? "config reset to built-in" : "flash write FAILED");
     } else {

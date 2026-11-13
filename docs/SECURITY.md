@@ -185,8 +185,13 @@ needs a hardware RNG: not yet).
   in it is fixed only with a debug probe. (A two-stage design is planned.)
 - **Untested on hardware.** The nRF locks, the debug lock and the RNG have run
   only in the emulator (RNG, flash) or not at all (BPROT, ACL, APPROTECT).
-- **The boot config** (boot order, arguments) is protected by a CRC, not a
-  signature. Keep `CFG_FILE` off on a locked product, or lock the console.
+- **The boot config** (boot order, arguments) is protected by a CRC only,
+  unless `CFG_SIGNED` is on (it is in the `secure` preset): then a config counts
+  only with an Ed25519 signature from one of `KEYS` over its text, the target
+  and a version, and anything else is ignored in favour of the built-in
+  entries. An older signed config can't come back where the protected floor
+  store exists (nRF); elsewhere a replayed older signed config would still be
+  accepted.
 - **No encryption.** Images are stored in the clear.
 - **No measured boot or attestation.**
 

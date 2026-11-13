@@ -717,6 +717,9 @@ int mb_boot(const mb_port_t *p, mb_bcl_t *log, const mb_config_t *cfg, mb_slot_i
         if (role == MB_ROLE_GOLDEN && hdr->version > hw_floor[MB_FLOOR_GOLDEN])
             mb_floor_raise(p, MB_FLOOR_GOLDEN, hdr->version);
     }
+    // a signed config in force: an older signed one may not come back
+    if (MB_FEAT_CFG_SIGNED && cfg && cfg->from_flash && cfg->version > hw_floor[MB_FLOOR_CONFIG])
+        mb_floor_raise(p, MB_FLOOR_CONFIG, cfg->version);
     uint32_t wd = hdr->trial_timeout_ms ? hdr->trial_timeout_ms : MB_DEFAULT_TRIAL_MS;
     int rc;
     if (!launch_checks(p, &plan->boot, &info[slot], slot)) {

@@ -252,6 +252,18 @@ title = "Trusted public keys file"
 help = "A text file with one Ed25519 public key per line (64 hex digits): mbtool keygen writes keys/mimiboot.pub. Enter a path; quotes are fine."
 
 [[option]]
+id = "CFG_SIGNED"
+macro = "MB_FEAT_CFG_SIGNED"
+kind = "bool"
+default = false
+cores = ["night"]
+depends = ["CFG_FILE", "SIGNATURES"]
+menu = "security"
+title = "Only use a boot config signed with your keys"
+help = """The boot config decides what boots and with which arguments, so on a locked-down product it shouldn't be something anyone with flash access can rewrite. With this on, a config counts only if it carries an Ed25519 signature from one of KEYS over its text, the target and a version number; anything else is ignored and the built-in entries apply. mbtool cfg push <file> --key <secret> signs it (version: the current time unless --cfg-version).
+On chips with the protected floor store (nRF, PROTECTED_FLOOR) an older signed config can't come back once a newer one was used. The console's 'default' command and the app library can't change a signed config; 'cfg reset' goes back to the built-in entries."""
+
+[[option]]
 id = "FAULT_HARDENING"
 macro = "MB_FEAT_FAULT_HARDENING"
 kind = "bool"
@@ -690,4 +702,4 @@ id = "secure"
 title = "Secure boot: signed images only"
 help = "Only images signed with your keys start (set KEYS: mbtool keygen). Hash on every boot, anti-rollback, no raw/RAM images, no diagnostics, the bootloader's RAM is wiped before the handover. Where the chip can (nRF), the bootloader's flash is locked before an image starts and the rollback floors are kept in the locked region. Console commands that change anything need a signed unlock (mbtool --unlock-key). The debug port is left alone: close it (DEBUG_LOCK, or mbtool provision) once the product is final."
 cores = ["night"]
-values = { SIGNATURES = true, REQUIRE_SIGNATURE = true, BOOT_VERIFY = "every-boot", ANTI_ROLLBACK = true, IMG_RAW = false, RAM_IMAGES = false, SHELL_DIAG = false, SCRUB_RAM = true, LAYOUT = "ab+golden", AB_TRIAL = true, CRASH_GUARD = true, BOOT_LOCK = true, PROTECTED_FLOOR = true, CONSOLE_AUTH = true }
+values = { SIGNATURES = true, REQUIRE_SIGNATURE = true, BOOT_VERIFY = "every-boot", ANTI_ROLLBACK = true, IMG_RAW = false, RAM_IMAGES = false, SHELL_DIAG = false, SCRUB_RAM = true, LAYOUT = "ab+golden", AB_TRIAL = true, CRASH_GUARD = true, BOOT_LOCK = true, PROTECTED_FLOOR = true, CONSOLE_AUTH = true, CFG_SIGNED = true }

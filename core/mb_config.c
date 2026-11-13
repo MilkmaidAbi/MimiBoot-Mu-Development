@@ -24,13 +24,55 @@ static char cfg_source[MB_CFG_MAX + 1], cfg_translated[MB_CFG_MAX + 1];
 #define CFG_MAGIC 0x4643424Du /* "MBCF" */
 #define CFG_HDR 256
 
+#define CFG_F_SIGNED 0x00000001u
+
 typedef struct {
     uint32_t magic, seq, len, text_crc;
-    uint8_t reserved[CFG_HDR - 20];
+    uint32_t version;           /* signed configs: chosen by the signer, never goes down */
+    uint32_t flags;             /* CFG_F_SIGNED */
+    uint8_t sig[64];            /* Ed25519, see mb_config_save_signed() */
+    uint8_t reserved[CFG_HDR - 24 - 64 - 4];
     uint32_t crc;
 } cfg_hdr_t;
 
 _Static_assert(sizeof(cfg_hdr_t) == CFG_HDR, "config header must be one page");
+
+#if MB_FEAT_CFG_FILE
+#define CFG_DOMAIN "MimiBoot config v1"
+typedef struct {
+    char domain[sizeof CFG_DOMAIN];
+    char target[16];
+    uint8_t version[4], len[4];
+    uint8_t digest[32];
+} cfg_msg_t;
+
+static void put_le32(uint8_t *b, uint32_t v) {
+    b[0] = (uint8_t)v; b[1] = (uint8_t)(v >> 8); b[2] = (uint8_t)(v >> 16); b[3] = (uint8_t)(v >> 24);
+}
+
+// Does a trusted key sign this config (version, length, SHA-256 of its text)?
+static bool cfg_sig_ok(const mb_port_t *p, uint32_t version, uint32_t len, const uint8_t digest[32], const uint8_t sig[64]) {
+    if (!p->keys || !p->keys->count)
+        return false;
+    cfg_msg_t m;
+    memset(&m, 0, sizeof m);
+    memcpy(m.domain, CFG_DOMAIN, sizeof CFG_DOMAIN);
+    strncpy(m.target, p->target, sizeof m.target);
+    put_le32(m.version, version);
+    put_le32(m.len, len);
+    memcpy(m.digest, digest, 32);
+    for (int k = 0; k < p->keys->count; k++)
+        if (mb_ed25519_verify(sig, &m, sizeof m, p->keys->keys[k]))
+            return true;
+    return false;
+}
+
+static uint32_t config_floor(const mb_port_t *p) {
+    uint32_t f[MB_FLOOR_COUNT];
+    mb_floor_get(p, f);
+    return f[MB_FLOOR_CONFIG];
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Built-in
@@ -105,6 +147,11 @@ int mb_config_validate_save(const mb_port_t *p, const char *t, size_t len, char 
     return MB_E_UNSUPP;
 }
 int mb_config_set_default(const mb_port_t *p, const char *name) { (void)p; (void)name; return MB_E_UNSUPP; }
+int mb_config_save_signed(const mb_port_t *p, const char *text, size_t len, uint32_t version, const uint8_t sig[64]) {
+    (void)p; (void)text; (void)len; (void)version; (void)sig;
+    return MB_E_UNSUPP;
+}
+int mb_config_erase(const mb_port_t *p) { (void)p; return MB_E_UNSUPP; }
 #else
 
 static void note(int line, const char *what, char *err, size_t cap, int *errors) {
@@ -297,17 +344,29 @@ static bool read_copy(const mb_port_t *p, int i, cfg_hdr_t *h) {
         return false;
     if (h->len > r->size - CFG_HDR || h->len > MB_CFG_MAX)
         return false;
-    // the text must match its CRC
+    // the text must match its CRC (and, for a signed config, its signature)
     uint32_t crc = 0;
     uint8_t buf[128];
+    mb_sha256_t s;
+    mb_sha256_init(&s);
     for (uint32_t done = 0; done < h->len;) {
         uint32_t n = h->len - done < sizeof(buf) ? h->len - done : (uint32_t)sizeof(buf);
         if (p->flash_read(r->offset + CFG_HDR + done, buf, n) != MB_OK)
             return false;
         crc = mb_crc32(crc, buf, n);
+        if (MB_FEAT_CFG_SIGNED) mb_sha256_update(&s, buf, n);
         done += n;
     }
-    return crc == h->text_crc;
+    if (crc != h->text_crc)
+        return false;
+#if MB_FEAT_CFG_SIGNED
+    // only a config a trusted key signed, and not older than one already used
+    uint8_t digest[32];
+    mb_sha256_final(&s, digest);
+    if (!(h->flags & CFG_F_SIGNED) || h->version < config_floor(p) || !cfg_sig_ok(p, h->version, h->len, digest, h->sig))
+        return false;
+#endif
+    return true;
 }
 
 static int newest(const mb_port_t *p, cfg_hdr_t *h) {
@@ -355,10 +414,14 @@ int mb_config_load(const mb_port_t *p, mb_config_t *c) {
     mb_config_parse(p, text, (size_t)n, c, NULL, 0);
     c->from_flash = true;
     c->seq = seq;
+    cfg_hdr_t h;
+    c->version = newest(p, &h) >= 0 ? h.version : 0;
     return MB_OK;
 }
 
-int mb_config_save(const mb_port_t *p, const char *text, size_t len) {
+// Write the text, then the header that makes it count, into the older copy
+static int write_copy(const mb_port_t *p, const char *text, size_t len, uint32_t version, uint32_t flags,
+                      const uint8_t sig[64]) {
     if (len > MB_CFG_MAX)
         return MB_E_NOSPACE;
     cfg_hdr_t cur;
@@ -389,8 +452,41 @@ int mb_config_save(const mb_port_t *p, const char *text, size_t len) {
     h.seq = have < 0 ? 1 : cur.seq + 1;
     h.len = (uint32_t)len;
     h.text_crc = mb_crc32(0, text, len);
+    h.version = version;
+    h.flags = flags;
+    if (sig)
+        memcpy(h.sig, sig, 64);
     h.crc = mb_crc32(0, &h, offsetof(cfg_hdr_t, crc));
     return p->flash_program(r->offset, &h, sizeof(h));
+}
+
+int mb_config_save(const mb_port_t *p, const char *text, size_t len) {
+    if (MB_FEAT_CFG_SIGNED)
+        return MB_E_REFUSED;    // it wouldn't be used: only signed configs count in this build
+    return write_copy(p, text, len, 0, 0, NULL);
+}
+
+int mb_config_save_signed(const mb_port_t *p, const char *text, size_t len, uint32_t version, const uint8_t sig[64]) {
+    if (len > MB_CFG_MAX)
+        return MB_E_NOSPACE;
+    uint8_t digest[32];
+    mb_sha256_t s;
+    mb_sha256_init(&s);
+    mb_sha256_update(&s, text, len);
+    mb_sha256_final(&s, digest);
+    if (!cfg_sig_ok(p, version, (uint32_t)len, digest, sig))
+        return MB_E_SIGNATURE;
+    if (version < config_floor(p))
+        return MB_E_REFUSED;    // older than a config already in force: a rollback
+    return write_copy(p, text, len, version, CFG_F_SIGNED, sig);
+}
+
+int mb_config_erase(const mb_port_t *p) {
+    int rc = MB_OK;
+    for (int i = 0; i < 2 && rc == MB_OK; i++)
+        if (p->layout->cfg[i].size)
+            rc = p->flash_erase(p->layout->cfg[i].offset, p->layout->cfg[i].size);
+    return rc;
 }
 
 int mb_config_parse(const mb_port_t *p, const char *text, size_t len, mb_config_t *c, char *err, size_t cap) {

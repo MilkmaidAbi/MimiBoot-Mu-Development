@@ -59,6 +59,7 @@ Mini build have not run anywhere.
 | fault reset + breadcrumb | host: a reported fault marks the slot bad and the next one boots. The Cortex-M handler and its `.noinit` note have not been triggered on a chip or in QEMU |
 | MCUboot trailer confirmation (direct-xip `image_ok`) | host: `tests/test_profile.c` in the MCUboot profiles: a trial confirmed by its trailer, an unset `image_ok`, the align-32 magic, a damaged magic. Not run with a real Zephyr app |
 | `FAULT_HARDENING` (proof tokens, launch recheck) | host: a real boot decision with one token removed (hash, signature), a token with a bit flipped, an image below the floor, and an "unsigned" token with required signatures: all refused at launch; every feature profile still boots. No glitching hardware here: whether it holds against a real glitch is untested |
+| `CFG_SIGNED` (signed boot config) | host (`tests/test_auth.c`, built with it): unsigned writes refused, a bad signature, another key, a changed version, the config in force and booted by, the version recorded as the floor, an older signed config refused, tampered text ignored, `default` can't rewrite it, reset to built-in. Signatures made by mbtool's own code |
 | Ed25519 against Wycheproof | host: all 210 vectors (`tests/test_crypto.c`) |
 | `mbtool provision` | prints steps (run for nRF52840, nRF51, STM32F411, STM32L476, SAM D21, Uno); none of the printed commands has been run by us |
 

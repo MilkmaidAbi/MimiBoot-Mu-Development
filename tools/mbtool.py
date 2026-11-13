@@ -514,6 +514,16 @@ def unlock_message(target: bytes, nonce: bytes) -> bytes:
     return UNLOCK_DOMAIN + target[:16].ljust(16, b"\0") + nonce
 
 
+CONFIG_DOMAIN = b"MimiBoot config v1\0"
+
+
+def config_signature(secret: bytes, target: bytes, version: int, text: bytes) -> bytes:
+    """what a CFG_SIGNED board checks (core/mb_config.c cfg_sig_ok)"""
+    msg = CONFIG_DOMAIN + target[:16].ljust(16, b"\0") + struct.pack("<II", version, len(text)) \
+        + hashlib.sha256(text).digest()
+    return ed25519.sign(secret, msg)
+
+
 def unlock(s, key_path):
     """Answer the console's unlock challenge with an Ed25519 key (CONSOLE_AUTH builds)."""
     s.write(b"unlock\r")
@@ -704,10 +714,18 @@ def cmd_cfg(a):
     if len(text) > 3840:
         die("config is %d bytes, the limit is 3840" % len(text))
     s.write(b"cfg recv\r")
-    out, m = read_until(s, r"MB CFG READY", 5)
+    out, m = read_until(s, r"MB CFG READY \d+(?: (\S+) (signed|plain))?", 5)
     if not m:
         die("no CFG READY: " + out[-200:])
-    s.write(struct.pack("<H", len(text)) + text + struct.pack("<I", zlib.crc32(text) & 0xFFFFFFFF))
+    blob = struct.pack("<H", len(text)) + text + struct.pack("<I", zlib.crc32(text) & 0xFFFFFFFF)
+    if m.group(2) == "signed":
+        if not a.key:
+            s.write(b"X")
+            die("this board only takes signed configs: cfg push <file> --key <secret key>")
+        version = a.cfg_version if a.cfg_version is not None else int(time.time())
+        blob += struct.pack("<I", version) + config_signature(read_key(a.key), m.group(1).encode(), version, text)
+        print("signed config version %d" % version)
+    s.write(blob)
     out, m = read_until(s, r"MB (DONE|ERR[^\r\n]*)", 20)
     print(ANSI.sub("", out).strip())
     if not m or m.group(1) != "DONE":
@@ -776,7 +794,9 @@ def main():
     p = sub.add_parser("ota"); p.add_argument("image"); p.add_argument("--slot"); p.add_argument("--port"); p.set_defaults(fn=cmd_ota)
     p = sub.add_parser("deploy"); p.add_argument("image"); p.add_argument("--slot"); p.add_argument("--port"); p.set_defaults(fn=cmd_deploy)
     p = sub.add_parser("cfg"); p.add_argument("action", choices=["push", "show"]); p.add_argument("file", nargs="?")
-    p.add_argument("--port"); p.set_defaults(fn=cmd_cfg)
+    p.add_argument("--port"); p.add_argument("--key", help="sign the config (boards built with CFG_SIGNED)")
+    p.add_argument("--cfg-version", type=int, help="signed config version (default: the current Unix time)")
+    p.set_defaults(fn=cmd_cfg)
     p = sub.add_parser("cmd"); p.add_argument("commands", nargs="+"); p.add_argument("--port"); p.add_argument("--timeout", type=float, default=10)
     p.set_defaults(fn=cmd_cmd)
     p = sub.add_parser("layout"); p.set_defaults(fn=cmd_layout)

@@ -29,7 +29,7 @@ def payload(seed, size):
 
 def c_array(name, data):
     rows = ", ".join("0x%02x" % b for b in data)
-    return "static const uint8_t %s[%d] = { %s };\n" % (name, len(data), rows)
+    return "__attribute__((unused)) static const uint8_t %s[%d] = { %s };\n" % (name, len(data), rows)
 
 
 cases = [
@@ -43,3 +43,11 @@ for name, seed, size, secret, version, secver in cases:
     assert ed.verify(ed.public_key(secret), hdr[:mbtool.SIGNED_BYTES], hdr[mbtool.SIGNED_BYTES:mbtool.SIGNED_BYTES + 64])
     print("#define %s_SEED %d\n#define %s_SIZE %d" % (name.upper(), seed, name.upper(), size))
     print(c_array(name + "_hdr", hdr))
+
+# signed boot configs (CFG_SIGNED), with mbtool's config_signature()
+CFG_TEXT = b"default rescue\nentry rescue\n title Signed rescue\n slot g\n args signed=1\n"
+for name, version, secret in (("cfg_v5", 5, RFC1_SECRET), ("cfg_v3", 3, RFC1_SECRET), ("cfg_other_key", 9, OTHER_SECRET)):
+    sig = mbtool.config_signature(secret, b"sim", version, CFG_TEXT)
+    print("#define %s_VERSION %d" % (name.upper(), version))
+    print(c_array(name + "_sig", sig))
+print(c_array("cfg_text", CFG_TEXT))

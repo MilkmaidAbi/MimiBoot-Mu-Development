@@ -42,7 +42,8 @@ typedef struct {
  * program is NULL on the app side: apps may read the floors, not raise them. */
 #define MB_FLOOR_SECURITY   0       /* anti-rollback floor for A/B images */
 #define MB_FLOOR_GOLDEN     1       /* newest golden version accepted */
-#define MB_FLOOR_COUNT      2
+#define MB_FLOOR_CONFIG     2       /* newest signed config version accepted (MB_FEAT_CFG_SIGNED) */
+#define MB_FLOOR_COUNT      3
 typedef struct mb_floor_store {
     uint32_t off, size;         /* flash offset and size of the store (one erase unit) */
     uint32_t entry;             /* bytes per entry: 16, or the chip's program unit if larger */

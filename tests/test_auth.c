@@ -5,6 +5,7 @@
  * end to end with mbtool's own signing code.
  */
 #include "tests/sim_port.h"
+#include "tests/gen_signed.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -95,6 +96,46 @@ int main(void) {
     CHECK(!strstr(sim.out, "erase slot g?"), "still locked");
     console("c\runlock\r");
     CHECK(strstr(sim.out, "MB ERR locked out until reset") != NULL, "lockout holds for the session (no reset in the sim)");
+
+#if MB_FEAT_CFG_SIGNED
+    printf("signed boot config\n");
+    sim_reset();
+    sim_port.unlock_keys = &unlock_ring;
+    put_golden();
+    size_t tl = sizeof cfg_text;
+    CHECK(mb_config_save(&sim_port, "default g\n", 10) == MB_E_REFUSED, "an unsigned config can't be written");
+    uint8_t bad[64];
+    memcpy(bad, cfg_v5_sig, 64);
+    bad[10] ^= 1;
+    CHECK(mb_config_save_signed(&sim_port, (const char*)cfg_text, tl, CFG_V5_VERSION, bad) == MB_E_SIGNATURE, "bad signature refused");
+    CHECK(mb_config_save_signed(&sim_port, (const char*)cfg_text, tl, CFG_OTHER_KEY_VERSION, cfg_other_key_sig) == MB_E_SIGNATURE,
+          "signed by an untrusted key: refused");
+    CHECK(mb_config_save_signed(&sim_port, (const char*)cfg_text, tl, CFG_V5_VERSION + 1, cfg_v5_sig) == MB_E_SIGNATURE,
+          "version changed after signing: refused");
+    CHECK(mb_config_save_signed(&sim_port, (const char*)cfg_text, tl, CFG_V5_VERSION, cfg_v5_sig) == MB_OK, "signed config saved");
+    mb_config_t cfg;
+    mb_config_load(&sim_port, &cfg);
+    CHECK(cfg.from_flash && cfg.version == CFG_V5_VERSION && !strcmp(cfg.e[cfg.def].name, "rescue"), "signed config in force (v%u)",
+          (unsigned)cfg.version);
+    CHECK(sim_power_on() == SIM_BOOTED && sim.booted_slot == MB_SLOT_GOLDEN, "boots by it");
+    uint32_t fl[MB_FLOOR_COUNT];
+    mb_floor_get(&sim_port, fl);
+    CHECK(fl[MB_FLOOR_CONFIG] == CFG_V5_VERSION, "boot recorded its version as the config floor (%u)", (unsigned)fl[MB_FLOOR_CONFIG]);
+    CHECK(mb_config_save_signed(&sim_port, (const char*)cfg_text, tl, CFG_V3_VERSION, cfg_v3_sig) == MB_E_REFUSED,
+          "an older signed config is refused");
+    // tamper with the text in flash: the copy no longer counts, the built-in config applies
+    const mb_region_t* r0 = &sim_port.layout->cfg[0];
+    const mb_region_t* r1 = &sim_port.layout->cfg[1];
+    for (int i = 0; i < 2; i++) sim_flash[(i ? r1 : r0)->offset + 256 + 3] ^= 0x20;
+    mb_config_load(&sim_port, &cfg);
+    CHECK(!cfg.from_flash, "tampered config ignored: built-in entries");
+    // console: 'default' can't change it, 'cfg reset' erases it
+    CHECK(mb_config_save_signed(&sim_port, (const char*)cfg_text, tl, CFG_V5_VERSION, cfg_v5_sig) == MB_OK, "signed again");
+    CHECK(mb_config_set_default(&sim_port, "a") != MB_OK, "'default' can't rewrite a signed config");
+    CHECK(mb_config_erase(&sim_port) == MB_OK, "cfg reset (erase)");
+    mb_config_load(&sim_port, &cfg);
+    CHECK(!cfg.from_flash, "after reset: built-in entries");
+#endif
 
     printf("\n%d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
