@@ -19,8 +19,8 @@ jobs:
     name: core logic (host)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: core tests (simulated flash, power cuts, crypto vectors, console lock)
@@ -36,8 +36,8 @@ jobs:
     name: configurator + every board compiles
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Arm GNU Toolchain (same release as development)
@@ -55,8 +55,8 @@ jobs:
     name: STM32 + nRF51 in QEMU
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Arm GNU Toolchain
@@ -76,8 +76,8 @@ jobs:
     name: AVR Lite core in simavr with avrdude
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: avr-gcc, simavr, avrdude

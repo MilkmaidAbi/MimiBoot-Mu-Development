@@ -58,6 +58,7 @@ Mini build have not run anywhere.
 | `CONSOLE_AUTH` | host: `tests/test_auth.c` (what a locked console refuses and allows, menu keys, bad answers, the lockout). Emulator (nRF51): mbtool answers a challenge from the emulated hardware RNG with the unlock key, a locked `reject` is refused before and runs after, a stranger's key is refused. The nRF52 RNG path has not run |
 | fault reset + breadcrumb | host: a reported fault marks the slot bad and the next one boots. The Cortex-M handler and its `.noinit` note have not been triggered on a chip or in QEMU |
 | MCUboot trailer confirmation (direct-xip `image_ok`) | host: `tests/test_profile.c` in the MCUboot profiles: a trial confirmed by its trailer, an unset `image_ok`, the align-32 magic, a damaged magic. Not run with a real Zephyr app |
+| `FAULT_HARDENING` (proof tokens, launch recheck) | host: a real boot decision with one token removed (hash, signature), a token with a bit flipped, an image below the floor, and an "unsigned" token with required signatures: all refused at launch; every feature profile still boots. No glitching hardware here: whether it holds against a real glitch is untested |
 | Ed25519 against Wycheproof | host: all 210 vectors (`tests/test_crypto.c`) |
 | `mbtool provision` | prints steps (run for nRF52840, nRF51, STM32F411, STM32L476, SAM D21, Uno); none of the printed commands has been run by us |
 

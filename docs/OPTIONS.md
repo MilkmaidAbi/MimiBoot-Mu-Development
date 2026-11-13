@@ -178,6 +178,16 @@ default ****; needs `SIGNATURES`. (full core)
 
 A text file with one Ed25519 public key per line (64 hex digits): mbtool keygen writes keys/mimiboot.pub. Enter a path; quotes are fine.
 
+### `FAULT_HARDENING`: Harden the boot decision against glitches
+
+default **on**. (full core)
+
+Makes a voltage or clock glitch that skips one instruction much less likely to start an image that failed its checks. The hash and the final signature comparison run in constant time and twice; each check leaves a multi-bit token only when it really passes; right before jumping, the tokens and the rollback floor are checked again, from a different place in the code. A glitch now has to hit two independent spots.
+
+It doesn't make the chip glitch-proof (that takes hardware countermeasures), and costs a few hundred bytes.
+
+C macro: `MB_FEAT_FAULT_HARDENING`
+
 ### `CONSOLE_AUTH`: Console commands that change things need a signed unlock
 
 default **off**; needs `SHELL`, `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)

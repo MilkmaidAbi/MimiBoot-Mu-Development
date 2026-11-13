@@ -46,10 +46,22 @@ int  mb_slot_role(const mb_port_t* p, int slot);
 #define MB_FMT_MCUBOOT  2       /* MCUboot header + image + TLVs (Zephyr) */
 #define MB_FMT_RAW      3       /* bare vector table, no metadata: no digest */
 
+/* Proof tokens (MB_FEAT_FAULT_HARDENING): written only on the code path where
+ * a check really passed, and checked again right before an image starts. They
+ * are multi-bit values, not booleans, so a skipped instruction or a flipped bit
+ * doesn't produce one. */
+#define MB_PROOF_SIG        0x6C1E5A93u     /* signature verified against a trusted key */
+#define MB_PROOF_UNSIGNED   0x1B7C30E6u     /* no signature, and this build allows that */
+#define MB_PROOF_HASH       0x3B97C42Du     /* payload SHA-256 matched (or a raw image: nothing to hash) */
+
+/* 0 when the n bytes are equal; no early exit (time doesn't depend on where they differ) */
+uint32_t mb_ct_diff(const void* a, const void* b, size_t n);
+
 typedef struct {
     bool header_ok;             /* magic, version, CRC, sizes */
     int  hash_state;            /* 0 not checked, 1 good, -1 bad */
     int  sig_state;             /* 0 not checked, 1 good, -1 bad / missing when required */
+    uint32_t proof_sig, proof_hash;   /* MB_PROOF_* when the check passed this boot, else 0 */
     uint8_t fmt;                /* MB_FMT_* */
     uint32_t hash_off, hash_len;/* digest coverage, from the slot start */
     mb_image_hdr_t hdr;

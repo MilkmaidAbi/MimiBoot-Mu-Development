@@ -372,7 +372,9 @@ bool mb_ed25519_verify(const uint8_t sig[64], const void* msg, size_t len, const
     scalarbase(q, sig + 32);                    // S*B
     add(p, q);
     pack(t, p);
-    return memcmp(sig, t, 32) == 0;             // == R ?
+    // == R ? In constant time, twice: a single skipped branch can't pass a forgery
+    if (mb_ct_diff(sig, t, 32) != 0) return false;
+    return mb_ct_diff(t, sig, 32) == 0;
 }
 
 #else /* !MB_FEAT_SIGNATURES: nothing verifies, so nothing passes */

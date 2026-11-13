@@ -92,11 +92,20 @@ static int hash_flash(const mb_port_t* p, uint32_t off, uint32_t len, uint8_t ou
     return MB_OK;
 }
 
+uint32_t mb_ct_diff(const void* a, const void* b, size_t n) {
+    const volatile uint8_t* x = a;
+    const volatile uint8_t* y = b;
+    volatile uint32_t d = 0;
+    for (size_t i = 0; i < n; i++) d |= (uint32_t)(x[i] ^ y[i]);
+    return d;
+}
+
 int mb_image_verify(const mb_port_t* p, int slot, mb_slot_info_t* info) {
     if (!info->header_ok) return MB_E_CORRUPT;
     if (info->hash_state) return info->hash_state > 0 ? MB_OK : MB_E_CORRUPT;
     if (info->fmt == MB_FMT_RAW) {              // nothing to check against: bootable as it is
         info->hash_state = 1;
+        info->proof_hash = MB_PROOF_HASH;
         return MB_OK;
     }
     const mb_slot_def_t* r = &p->layout->slot[slot];
@@ -104,7 +113,13 @@ int mb_image_verify(const mb_port_t* p, int slot, mb_slot_info_t* info) {
     if (info->fmt == MB_FMT_MCUBOOT) { off = info->hash_off; len = info->hash_len; }
     uint8_t got[32];
     if (hash_flash(p, r->offset + off, len, got) != MB_OK) return MB_E_IO;
-    info->hash_state = memcmp(got, info->hdr.sha256, 32) ? -1 : 1;
+    info->hash_state = -1;
+    // compared twice, independently: one skipped branch doesn't pass a wrong hash
+    if (mb_ct_diff(got, info->hdr.sha256, 32) != 0) return MB_E_CORRUPT;
+    if (mb_ct_diff(info->hdr.sha256, got, 32) == 0) {
+        info->hash_state = 1;
+        info->proof_hash = MB_PROOF_HASH;
+    }
     return info->hash_state > 0 ? MB_OK : MB_E_CORRUPT;
 }
 
@@ -118,11 +133,16 @@ int mb_image_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
     const mb_image_hdr_t* h = &info->hdr;
     info->sig_state = -1;
     if (!(h->flags & MB_IMG_F_SIGNED)) {
-        if (!p->require_signature) info->sig_state = 1;
+        if (!p->require_signature) { info->sig_state = 1; info->proof_sig = MB_PROOF_UNSIGNED; }
         return info->sig_state > 0 ? MB_OK : MB_E_SIGNATURE;
     }
 #if MB_FEAT_SIGNATURES
-    if (!p->keys) return p->require_signature ? MB_E_SIGNATURE : (info->sig_state = 1, MB_OK);
+    if (!p->keys) {
+        if (p->require_signature) return MB_E_SIGNATURE;
+        info->sig_state = 1;
+        info->proof_sig = MB_PROOF_UNSIGNED;      // nothing to check it against: counts as unsigned
+        return MB_OK;
+    }
     for (int k = 0; k < p->keys->count; k++) {
         const uint8_t* key = p->keys->keys[k];
         bool ok;
@@ -133,12 +153,12 @@ int mb_image_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
             if (id != h->key_id) continue;
             ok = mb_ed25519_verify(h->signature, h, MB_IMG_SIGNED_BYTES, key);
         }
-        if (ok) { info->sig_state = 1; return MB_OK; }
+        if (ok) { info->sig_state = 1; info->proof_sig = MB_PROOF_SIG; return MB_OK; }
     }
     return MB_E_SIGNATURE;
 #else
     // Built without signature support: a signed image counts as unsigned.
-    if (!p->require_signature) info->sig_state = 1;
+    if (!p->require_signature) { info->sig_state = 1; info->proof_sig = MB_PROOF_UNSIGNED; }
     return info->sig_state > 0 ? MB_OK : MB_E_SIGNATURE;
 #endif
 }

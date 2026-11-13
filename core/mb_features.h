@@ -91,6 +91,9 @@
 #ifndef MB_FEAT_PROTECTED_FLOOR
 #define MB_FEAT_PROTECTED_FLOOR 0   /* rollback floors also kept in the (locked) bootloader region */
 #endif
+#ifndef MB_FEAT_FAULT_HARDENING
+#define MB_FEAT_FAULT_HARDENING 1   /* constant-time double compares, proof tokens, recheck before the jump */
+#endif
 #ifndef MB_FEAT_CONSOLE_AUTH
 #define MB_FEAT_CONSOLE_AUTH    0   /* state-changing console commands need a signed challenge ('unlock') */
 #endif

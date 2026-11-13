@@ -158,10 +158,29 @@ planned.
 
 The AVR Lite core does no cryptography at all.
 
+## Glitches (fault injection)
+
+With `FAULT_HARDENING` (on by default):
+
+- The payload hash and the last step of the signature check are compared in
+  constant time, twice, the second time with the arguments swapped.
+- Each check that passes leaves a token in the slot's state: a fixed 32-bit
+  value for "signature verified", another for "unsigned and allowed", another
+  for "hash matched". A skipped branch leaves no token; a flipped bit leaves a
+  wrong one.
+- Right before the jump, `mb_boot()` looks at the tokens again (required
+  signatures need the "verified" token, every-boot hashing needs the hash
+  token) and re-checks the rollback floor, each condition twice. Console RAM
+  uploads get the same treatment.
+
+So skipping one check is no longer enough: the glitch has to land twice, at
+two places in the code. That raises the bar; it isn't glitch-proof. Real
+resistance needs the chip's own countermeasures (and a random delay, which
+needs a hardware RNG: not yet).
+
 ## Known gaps
 
-- **Fault injection.** The boot decision comes down to single branches. A
-  glitch at the right moment could skip a check.
+- **Fault injection.** See above: hardened, not immune.
 - **No self-update.** The bootloader can't replace itself in the field: a bug
   in it is fixed only with a debug probe. (A two-stage design is planned.)
 - **Untested on hardware.** The nRF locks, the debug lock and the RNG have run

@@ -156,6 +156,8 @@ static bool verify(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[MB_M
         }
         if (info[slot].hdr.flags & MB_IMG_F_SIGNED)
             s->flags |= MB_SF_SIG_OK; // the hash still runs every boot
+    } else {
+        info[slot].proof_sig = MB_PROOF_UNSIGNED; // optional signatures, checked on an earlier boot: not now
     }
 #if MB_BOOT_VERIFY == MB_BOOT_VERIFY_NEVER
     (void)0;    // header checks only: installs were hashed as they arrived
@@ -604,7 +606,9 @@ static int stage_ram(const mb_port_t *p, int slot, const mb_image_hdr_t *hdr) {
         return MB_E_IO;
     uint8_t got[32];
     hash_ram(p, dst, hdr->payload_size, got);
-    return memcmp(got, hdr->sha256, 32) ? MB_E_CORRUPT : MB_OK;
+    if (mb_ct_diff(got, hdr->sha256, 32) != 0)
+        return MB_E_CORRUPT;
+    return mb_ct_diff(hdr->sha256, got, 32) == 0 ? MB_OK : MB_E_CORRUPT;
 }
 
 // An XIP image for the other architecture: don't do its bookkeeping here.
@@ -629,6 +633,35 @@ static int switch_for(const mb_port_t *p, mb_bcl_t *log, const mb_plan_t *plan, 
         return MB_E_IO;
     p->switch_arch(arch);
     return MB_E_UNSUPP; // still here: the switch didn't happen
+}
+
+// The last look before the jump (MB_FEAT_FAULT_HARDENING), from a different
+// place in the code than admit(): the checks must have left their proof
+// tokens, and the image must still be at or above the rollback floor. A glitch
+// that skipped a branch in admit() now has to skip this one too. Each
+// condition is tested twice, the second time the other way round.
+static bool launch_checks(const mb_port_t *p, const mb_bcl_rec_t *r, const mb_slot_info_t *in, int slot) {
+#if MB_FEAT_FAULT_HARDENING
+    volatile uint32_t sig = in->proof_sig, hash = in->proof_hash;
+    volatile bool ok = true;
+    if (sig != MB_PROOF_SIG && sig != MB_PROOF_UNSIGNED)
+        ok = false;
+    if (p->require_signature && sig != MB_PROOF_SIG)
+        ok = false;
+    if (MB_BOOT_VERIFY == MB_BOOT_VERIFY_EVERY && hash != MB_PROOF_HASH)
+        ok = false;
+    if (MB_FEAT_ANTI_ROLLBACK && mb_slot_role(p, slot) == MB_ROLE_AB && in->hdr.security_version < security_floor(r))
+        ok = false;
+    volatile uint32_t sig_x = in->proof_sig ^ MB_PROOF_SIG, hash_x = in->proof_hash ^ MB_PROOF_HASH;
+    if (p->require_signature && sig_x != 0)
+        ok = false;
+    if (MB_BOOT_VERIFY == MB_BOOT_VERIFY_EVERY && hash_x != 0)
+        ok = false;
+    return ok;
+#else
+    (void)p; (void)r; (void)in; (void)slot;
+    return true;
+#endif
 }
 
 int mb_boot(const mb_port_t *p, mb_bcl_t *log, const mb_config_t *cfg, mb_slot_info_t info[MB_MAX_SLOTS],
@@ -686,7 +719,9 @@ int mb_boot(const mb_port_t *p, mb_bcl_t *log, const mb_config_t *cfg, mb_slot_i
     }
     uint32_t wd = hdr->trial_timeout_ms ? hdr->trial_timeout_ms : MB_DEFAULT_TRIAL_MS;
     int rc;
-    if (hdr->load_type == MB_LOAD_RAM) {
+    if (!launch_checks(p, &plan->boot, &info[slot], slot)) {
+        rc = MB_E_REFUSED;                      // a check that "passed" without its proof: glitch or bug
+    } else if (hdr->load_type == MB_LOAD_RAM) {
         rc = stage_ram(p, slot, hdr);
         if (rc == MB_OK) {
             if (MB_FEAT_TRIAL_WATCHDOG && plan->choice.trial && p->watchdog_arm)
@@ -734,8 +769,12 @@ int mb_boot_ram(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg,
         return MB_E_REFUSED;
     uint8_t got[32];
     hash_ram(p, mem, hdr->payload_size, got);
-    if (memcmp(got, hdr->sha256, 32))
+    if (mb_ct_diff(got, hdr->sha256, 32) != 0)
         return MB_E_CORRUPT;
+    if (mb_ct_diff(hdr->sha256, got, 32) == 0)
+        tmp.proof_hash = MB_PROOF_HASH;
+    if (!launch_checks(p, &log->cur, &tmp, -1))
+        return MB_E_REFUSED;
     mb_choice_t c;
     memset(&c, 0, sizeof(c));
     c.slot = 0xFF;

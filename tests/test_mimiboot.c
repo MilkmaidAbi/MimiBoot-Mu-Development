@@ -442,6 +442,55 @@ static void test_protected_floors(void) {
     sim_reset();
 }
 
+// ---------------------------------------------------------------------------
+// fault hardening: a check that "passed" without leaving its proof is refused
+// at launch (what a skipped branch in admit() would look like)
+// ---------------------------------------------------------------------------
+
+static void put_signed(int slot, const uint8_t* hdr, uint32_t seed, uint32_t size);
+
+typedef struct { mb_slot_info_t info[MB_MAX_SLOTS]; mb_plan_t plan; mb_bcl_t log; mb_config_t cfg; int rc; } glitch_t;
+static void glitch_boot(void* ctx) {
+    glitch_t* g = ctx;
+    g->rc = mb_boot(&sim_port, &g->log, &g->cfg, g->info, &g->plan);
+}
+
+static sim_outcome_t decide_and_boot(glitch_t* g, void (*tamper)(glitch_t*)) {
+    mb_bcl_load(&g->log, &sim_port);
+    mb_config_builtin(&sim_port, &g->cfg);
+    mb_decide(&sim_port, &g->log, &g->cfg, g->info, 0, &g->plan);
+    if (tamper) tamper(g);
+    g->rc = 1;
+    return sim_guard(glitch_boot, g);
+}
+
+static void no_hash_proof(glitch_t* g) { g->info[g->plan.choice.slot].proof_hash = 0; }
+static void no_sig_proof(glitch_t* g) { g->info[g->plan.choice.slot].proof_sig = 0; }
+static void unsigned_proof(glitch_t* g) { g->info[g->plan.choice.slot].proof_sig = MB_PROOF_UNSIGNED; }
+static void sig_proof_bitflip(glitch_t* g) { g->info[g->plan.choice.slot].proof_sig ^= 0x00010000u; }
+static void below_floor(glitch_t* g) { g->info[g->plan.choice.slot].hdr.security_version = 0; }
+
+static void test_fault_hardening(void) {
+    printf("fault hardening: launch refuses a check without its proof\n");
+    static glitch_t g;
+    good_a();
+    CHECK(decide_and_boot(&g, NULL) == SIM_BOOTED && sim.booted_slot == MB_SLOT_A, "untouched: boots");
+    CHECK(decide_and_boot(&g, no_hash_proof) != SIM_BOOTED && g.rc == MB_E_REFUSED, "hash check skipped: refused (%d)", g.rc);
+    good_a();
+    CHECK(decide_and_boot(&g, no_sig_proof) != SIM_BOOTED && g.rc == MB_E_REFUSED, "signature check skipped: refused");
+    good_a();
+    CHECK(decide_and_boot(&g, sig_proof_bitflip) != SIM_BOOTED, "a token with one bit flipped: refused");
+    good_a();
+    CHECK(decide_and_boot(&g, below_floor) != SIM_BOOTED, "rollback check skipped (image below the floor): refused");
+    // required signatures: an "allowed unsigned" token isn't enough
+    sim_reset();
+    put_signed(MB_SLOT_A, signed_good_hdr, SIGNED_GOOD_SEED, SIGNED_GOOD_SIZE);
+    sim_port.require_signature = true;
+    CHECK(decide_and_boot(&g, NULL) == SIM_BOOTED, "signed image, signatures required: boots");
+    CHECK(decide_and_boot(&g, unsigned_proof) != SIM_BOOTED, "required signatures + 'unsigned' token: refused");
+    sim_port.require_signature = false;
+}
+
 static void test_requests(void) {
     printf("requests\n");
     good_a();
@@ -1246,6 +1295,7 @@ int main(int argc, char** argv) {
     test_antirollback();
     test_golden();
     test_protected_floors();
+    test_fault_hardening();
     test_requests();
     test_flash_mode();
     test_log_wear();

@@ -121,8 +121,10 @@ def boot(machine: str, flash: Path, seconds=3.0, keys: bytes | None = None) -> s
     cmd = q + ["-M", machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-kernel", conv(flash)]
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if keys:
-        time.sleep(0.3)                      # spam a key through the 300 ms break-in window
-        for _ in range(30):
+        # Spam a key from the start through the 300 ms break-in window. No delay
+        # first: QEMU holds serial input until the UART reads it, and on a fast
+        # host the window can be over before a fixed delay ends (seen on CI).
+        for _ in range(50):
             try:
                 p.stdin.write(keys)
                 p.stdin.flush()
