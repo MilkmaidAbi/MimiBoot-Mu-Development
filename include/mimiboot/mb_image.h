@@ -73,7 +73,8 @@ typedef struct {
     uint8_t  _pad[3];
     uint32_t handoff_addr;      /* RAM address for the boot handoff (0 = none); see mb_handoff.h */
     uint32_t key_id;            /* which trusted key signed it (first 4 bytes of the key, LE) */
-    uint8_t  reserved[48];      /* zero */
+    uint32_t record_addr;       /* RAM address for a boot record (0 = none); see mb_record.h */
+    uint8_t  reserved[44];      /* zero */
     uint8_t  signature[64];     /* Ed25519 over bytes [0, MB_IMG_SIGNED_BYTES) */
     uint32_t hdr_crc;           /* CRC-32 of the 252 bytes before it */
 } mb_image_hdr_t;

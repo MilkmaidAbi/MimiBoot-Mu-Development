@@ -290,6 +290,17 @@ help = """Images can travel encrypted: 'mbtool pack --encrypt <board.pub>' (or i
 The decryption key is compiled in (ENC_KEY): every board built from the binary shares it, and it is only as safe as the bootloader's flash. Lock the debug port (DEBUG_LOCK on nRF, read protection from 'mbtool provision' elsewhere), and don't leave the 'md' memory dump open to anyone (SHELL_DIAG needs CONSOLE_AUTH here). On a Cortex-M3 (STM32F1/F2) the key check's timing depends on the key (its multiplies end early on small numbers), so there CONSOLE_AUTH is required. About 3.5 KB of code (AES, X25519, HMAC/HKDF), 0.5 KB of RAM."""
 
 [[option]]
+id = "BOOT_RECORD"
+macro = "MB_FEAT_BOOT_RECORD"
+kind = "bool"
+default = false
+cores = ["night"]
+builds = ["mcu"]
+menu = "security"
+title = "Boot record for the app (measured boot)"
+help = """Right before starting an image that asks for it (an MB_BOOT_RECORD_BUFFER in its RAM, see mimiboot/mb_record.h), MimiBoot writes what held on this boot: signature verified and with which key, payload hashed, trial or not, the rollback floor, the payload hash, the SHA-256 of the bootloader's own image and a measurement binding the two with the image header. A server that knows both builds can recompute the measurement. It is a report the image can pass on, not attestation: nothing in it is signed by the device. Costs about 0.4 KB, and hashing the bootloader takes a few milliseconds on each boot of an image that asks."""
+
+[[option]]
 id = "ENC_KEY"
 macro = ""
 kind = "string"

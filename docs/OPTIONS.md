@@ -204,6 +204,14 @@ The decryption key is compiled in (ENC_KEY): every board built from the binary s
 
 C macro: `MB_FEAT_ENC`
 
+### `BOOT_RECORD`: Boot record for the app (measured boot)
+
+default **off**. (full core; builds: STM32/nRF/SAMD)
+
+Right before starting an image that asks for it (an MB_BOOT_RECORD_BUFFER in its RAM, see mimiboot/mb_record.h), MimiBoot writes what held on this boot: signature verified and with which key, payload hashed, trial or not, the rollback floor, the payload hash, the SHA-256 of the bootloader's own image and a measurement binding the two with the image header. A server that knows both builds can recompute the measurement. It is a report the image can pass on, not attestation: nothing in it is signed by the device. Costs about 0.4 KB, and hashing the bootloader takes a few milliseconds on each boot of an image that asks.
+
+C macro: `MB_FEAT_BOOT_RECORD`
+
 ### `ENC_KEY`: Decryption key file (mbtool keygen --type x25519)
 
 default ****; needs `ENCRYPTED_IMAGES`. (full core; builds: STM32/nRF/SAMD)

@@ -60,6 +60,7 @@ ARCH_ANY, ARCH_ARM, ARCH_RISCV = 0, 1, 2
 ARCH_NAMES = {ARCH_ANY: "any", ARCH_ARM: "arm", ARCH_RISCV: "riscv"}
 F_GOLDEN, F_SIGNED, F_ECDSA, F_STAGE1, F_ENCRYPTED = 0x1, 0x2, 0x4, 0x8, 0x10
 TARGET = "rp2350"
+RECORD_ADDR = 0             # set by read_input(): the image's mb_boot_record buffer
 XIP_BASE = 0x10000000
 SRAM_BASE, SRAM_END = 0x20000000, 0x20082000
 # offset, size (bytes) - keep in sync with include/mimiboot/mb_layout.h
@@ -83,10 +84,10 @@ UF2_FAMILY_RP2350_RISCV = 0xE48BFF5A
 UF2_EXT_RP2_IGNORE_BLOCK = 0x9957E3
 
 # mb_image_hdr_t (include/mimiboot/mb_image.h), everything but hdr_crc
-HDR_FMT = "<IHHIIII32sIIIIII32s16sB3sII48s64s"
+HDR_FMT = "<IHHIIII32sIIIIII32s16sB3sIII44s64s"
 HDR_FIELDS = ["magic", "hdr_version", "hdr_size", "flags", "load_type", "payload_offset", "payload_size", "sha256",
               "version", "security_version", "build_time", "load_addr", "entry", "trial_timeout_ms", "name", "target",
-              "arch", "pad", "handoff_addr", "key_id", "reserved", "signature"]
+              "arch", "pad", "handoff_addr", "key_id", "record_addr", "reserved", "signature"]
 assert struct.calcsize(HDR_FMT) == HDR_SIZE - 4
 assert struct.calcsize(HDR_FMT[:HDR_FMT.index("64s")]) == SIGNED_BYTES
 
@@ -219,6 +220,8 @@ def read_input(path, load_addr=None, target=TARGET):
         arch = cpu if arch is None else arch
     if arch is None:
         arch = ARCH_ARM
+    global RECORD_ADDR
+    RECORD_ADDR = syms.get("mb_boot_record", 0)            # a MB_BOOT_RECORD_BUFFER, if the image has one
     return payload, base, arch, syms.get("mb_handoff", 0), syms.get("__vectors", base)
 
 
@@ -228,7 +231,7 @@ def read_input(path, load_addr=None, target=TARGET):
 
 def build_header(payload, name, version, secver=0, golden=False, trial_ms=0, target=TARGET, arch=ARCH_ARM,
                  load_type=LOAD_CHAIN, load_addr=0, handoff_addr=0, secret=None, build_time=None, entry=None,
-                 stage1=False, encrypted=False):
+                 stage1=False, encrypted=False, record_addr=0):
     """stage1: a two-stage build's stage 1 (entry = the flash offset of its vector table).
     encrypted: the file will carry the payload encrypted (the header still describes the plaintext)"""
     flags = (F_GOLDEN if golden else 0) | (F_STAGE1 if stage1 else 0) | (F_ENCRYPTED if encrypted else 0)
@@ -241,7 +244,7 @@ def build_header(payload, name, version, secver=0, golden=False, trial_ms=0, tar
     fields = [MAGIC, HDR_VERSION, HDR_SIZE, flags, load_type, PAYLOAD_OFF, len(payload), hashlib.sha256(payload).digest(),
               version, secver, int(time.time() if build_time is None else build_time), load_addr, load_addr if entry is None else entry, trial_ms,
               name.encode()[:31].ljust(32, b"\0"), target.encode()[:15].ljust(16, b"\0"), arch, b"\0" * 3,
-              handoff_addr, key_id, b"\0" * 48, b"\0" * 64]
+              handoff_addr, key_id, record_addr, b"\0" * 44, b"\0" * 64]
     body = struct.pack(HDR_FMT, *fields)
     if secret:
         body = body[:SIGNED_BYTES] + secret.sign(body[:SIGNED_BYTES])
@@ -430,7 +433,8 @@ def cmd_pack(a):
         entry = base - lo
     encrypt = getattr(a, "encrypt", None)
     hdr = build_header(payload, name, parse_version(a.version), a.secver, a.golden, a.trial_ms, a.target, arch,
-                       load_type, load_addr, handoff, secret, entry=entry, stage1=stage1, encrypted=bool(encrypt))
+                       load_type, load_addr, handoff, secret, entry=entry, stage1=stage1, encrypted=bool(encrypt),
+                       record_addr=RECORD_ADDR)
     plain_sha = hashlib.sha256(payload).hexdigest()
     env = b""
     if encrypt:
@@ -460,6 +464,8 @@ def cmd_info(a):
     print("sha256    %s" % h["sha256"].hex())
     if h["handoff_addr"]:
         print("handoff   @0x%08x" % h["handoff_addr"])
+    if h["record_addr"]:
+        print("record    @0x%08x (boot record: what MimiBoot checked and measured)" % h["record_addr"])
     print("built     %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(h["build_time"])))
     if h["flags"] & F_SIGNED:
         line = "signed    key %08x" % h["key_id"]

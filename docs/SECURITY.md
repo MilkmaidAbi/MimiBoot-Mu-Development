@@ -183,6 +183,33 @@ the multiply instructions:
 So on a Cortex-M3 the configurator requires `CONSOLE_AUTH` with encrypted
 images: only someone who has unlocked the console can send envelopes to time.
 
+## Measured boot (boot record)
+
+With `BOOT_RECORD`, an image that asks for it (an `MB_BOOT_RECORD_BUFFER` in
+its RAM, see `include/mimiboot/mb_record.h`; mbtool puts its address in the
+header) gets a record of what held on this boot. MimiBoot writes it after
+every check has passed, right before the jump. It says:
+
+- whether the signature verified, and against which key id;
+- whether the payload was hashed and matched on this boot;
+- whether this is a trial boot, and whether the image runs from RAM;
+- the image's version and security version, and the rollback floor in force;
+- the payload hash;
+- the SHA-256 of the bootloader's own image in flash. That is exactly what
+  `mimiboot.bin` holds, so it can be recomputed from the build;
+- a measurement: SHA-256 of `"MimiBoot measure v1\0"`, the bootloader hash
+  and the image header's signed bytes. Those bytes hold the payload hash,
+  version, security version, flags and key id.
+
+A server that knows which bootloader and image a board should run can
+recompute the measurement and compare. The QEMU test does exactly that.
+
+It's a report, not attestation. Nothing in it is signed by the device, and
+the image can change the record after it starts, so it is as trustworthy as
+the image passing it on. Proper attestation needs a device secret the app
+can't read (DICE-style), which these chips don't give MimiBoot in a form
+it can hide.
+
 ## Updating the bootloader itself (two-stage)
 
 A one-stage MimiBoot can't replace itself: a bug in it is fixed with a debug
@@ -426,7 +453,8 @@ needs a hardware RNG: not yet).
 - **Encryption covers the way in, not the flash.** With `ENCRYPTED_IMAGES`,
   update files and links are private. Slots hold plaintext, and the key is only
   as safe as the bootloader's flash (see above).
-- **No measured boot or attestation.**
+- **No attestation.** `BOOT_RECORD` tells the image what was checked and
+  measured, but nothing on the device signs it.
 
 ## Reporting a problem
 

@@ -78,6 +78,20 @@ static const mb_keyring_t revoke_ring = { MB_REVOKE_KEY_COUNT, revoke_trusted };
 #else
 #define REVOKE_RING NULL
 #endif
+#if MB_FEAT_BOOT_RECORD && !defined(MB_CM_CLIENT) && !defined(MB_CM_STAGE0)
+// Measured boot: the bootloader's own image, from the linker script's bounds (= mimiboot.bin)
+extern const uint8_t _mb_image_start[], _mb_image_end[];
+static int loader_hash(uint8_t out[32]) {
+    mb_sha256_t s;
+    mb_sha256_init(&s);
+    mb_sha256_update(&s, _mb_image_start, (size_t)(_mb_image_end - _mb_image_start));
+    mb_sha256_final(&s, out);
+    return MB_OK;
+}
+#define LOADER_HASH loader_hash
+#else
+#define LOADER_HASH NULL
+#endif
 #if defined(MB_ENC_KEY) && MB_FEAT_ENC && !defined(MB_CM_CLIENT) && !defined(MB_CM_STAGE0)
 static const uint8_t enc_key[32] = MB_ENC_KEY;     // the board's X25519 decryption key (ENC_KEY)
 #define ENC_KEY enc_key
@@ -579,7 +593,7 @@ const mb_port_t mb_mcu_port = {
     .reboot = reboot, .reboot_rom = REBOOT_ROM, .reset_cause = cause, .reset_reason = reason,
     .capabilities = caps, .floor = FLOOR, .fault_slot = fault_slot, .lockdown = LOCK_TXT DEBUG_TXT,
     .stage1_slot = STAGE1_SLOT, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING, .flash_base = MB_FLASH_BASE, .revoke_keys = REVOKE_RING,
-    .enc_key = ENC_KEY,
+    .enc_key = ENC_KEY, .loader_hash = LOADER_HASH,
 };
 
 int main(void) {

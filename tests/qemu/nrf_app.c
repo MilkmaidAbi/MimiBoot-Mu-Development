@@ -9,6 +9,7 @@
  */
 #include <stdint.h>
 #include "mimiboot/mb_handoff.h"
+#include "mimiboot/mb_record.h"
 
 #ifndef NAME
 #define NAME "app"
@@ -21,6 +22,9 @@
 #define IRQN 20
 
 __attribute__((section(".noinit.mb_handoff"), used, aligned(8))) volatile mb_handoff_t mb_handoff;
+#ifdef RECORD
+__attribute__((section(".noinit.mb_boot_record"), used, aligned(8))) volatile mb_boot_record_t mb_boot_record;
+#endif
 extern uint32_t _estack;
 void reset(void);
 static volatile uint32_t svc_hits, irq_hits;
@@ -81,6 +85,25 @@ void reset(void) {
     } else {
         puts_(" no-handoff");
     }
+#ifdef RECORD
+    // measured boot: flags, key id, then the loader hash and the measurement in full
+    if (mb_boot_record.magic == MB_RECORD_MAGIC) {
+        puts_(" rec=");
+        hex(mb_boot_record.flags);
+        putc_('/');
+        hex(mb_boot_record.key_id);
+        puts_(" loader=");
+        for (int i = 0; i < 32; i += 4)
+            hex((uint32_t)mb_boot_record.loader_sha256[i] << 24 | (uint32_t)mb_boot_record.loader_sha256[i + 1] << 16 |
+                (uint32_t)mb_boot_record.loader_sha256[i + 2] << 8 | mb_boot_record.loader_sha256[i + 3]);
+        puts_(" meas=");
+        for (int i = 0; i < 32; i += 4)
+            hex((uint32_t)mb_boot_record.measurement[i] << 24 | (uint32_t)mb_boot_record.measurement[i + 1] << 16 |
+                (uint32_t)mb_boot_record.measurement[i + 2] << 8 | mb_boot_record.measurement[i + 3]);
+    } else {
+        puts_(" no-record");
+    }
+#endif
 #ifdef FLOOR_AT
     // the bootloader's protected floor store: the first entry [tag][value][~value][~tag]
     puts_(" floor=");

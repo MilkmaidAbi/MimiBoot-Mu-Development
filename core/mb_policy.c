@@ -597,6 +597,46 @@ static void write_handoff(const mb_port_t *p, const mb_bcl_rec_t *log, const mb_
     memcpy(dst, &h, sizeof(h));
 }
 
+// Measured boot: tell the image what was checked and what ran (mimiboot/mb_record.h).
+// Called once every check has passed, before the watchdog is armed (hashing the
+// loader takes a moment on a slow part).
+static void write_record(const mb_port_t *p, const mb_bcl_rec_t *log, const mb_slot_info_t *in, bool trial) {
+#if MB_FEAT_BOOT_RECORD
+    const mb_image_hdr_t *hdr = &in->hdr;
+    if (!hdr->record_addr || !p->ram_ptr)
+        return;
+    mb_boot_record_t *dst = p->ram_ptr(hdr->record_addr, sizeof(mb_boot_record_t));
+    if (!dst)
+        return; // not somewhere we may write
+    mb_boot_record_t r;
+    memset(&r, 0, sizeof(r));
+    r.magic = MB_RECORD_MAGIC;
+    r.version = MB_RECORD_VERSION;
+    r.size = sizeof(r);
+    bool signed_ok = in->proof_sig == MB_PROOF_SIG;
+    r.flags = (signed_ok ? MB_REC_SIGNED : 0) | (in->proof_hash == MB_PROOF_HASH ? MB_REC_HASHED : 0) |
+              (trial ? MB_REC_TRIAL : 0) | (hdr->load_type == MB_LOAD_RAM ? MB_REC_RAM : 0);
+    r.key_id = signed_ok ? hdr->key_id : 0;
+    r.image_version = hdr->version;
+    r.security_version = hdr->security_version;
+    r.floor = security_floor(log);
+    r.loader_version = MIMIBOOT_VERSION_NUM;
+    memcpy(r.image_sha256, hdr->sha256, 32);
+    if (p->loader_hash && p->loader_hash(r.loader_sha256) == MB_OK)
+        r.flags |= MB_REC_LOADER;
+    mb_sha256_t s;
+    mb_sha256_init(&s);
+    mb_sha256_update(&s, MB_RECORD_DOMAIN, sizeof(MB_RECORD_DOMAIN));
+    mb_sha256_update(&s, r.loader_sha256, 32);
+    mb_sha256_update(&s, hdr, MB_IMG_SIGNED_BYTES);
+    mb_sha256_final(&s, r.measurement);
+    r.crc = mb_crc32(0, &r, offsetof(mb_boot_record_t, crc));
+    memcpy(dst, &r, sizeof(r));
+#else
+    (void)p; (void)log; (void)in; (void)trial;
+#endif
+}
+
 static int hash_ram(const mb_port_t *p, const void *mem, uint32_t len, uint8_t out[32]) {
     if (p->hash_mem && p->hash_mem(mem, len, out) == MB_OK)
         return MB_OK;
@@ -737,7 +777,10 @@ int mb_boot(const mb_port_t *p, mb_bcl_t *log, const mb_config_t *cfg, mb_slot_i
         mb_stage1_confirm(p);
     uint32_t wd = hdr->trial_timeout_ms ? hdr->trial_timeout_ms : MB_DEFAULT_TRIAL_MS;
     int rc;
-    if (!launch_checks(p, &plan->boot, &info[slot], slot)) {
+    bool checked = launch_checks(p, &plan->boot, &info[slot], slot);
+    if (checked)
+        write_record(p, &plan->boot, &info[slot], plan->choice.trial);
+    if (!checked) {
         rc = MB_E_REFUSED;                      // a check that "passed" without its proof: glitch or bug
     } else if (hdr->load_type == MB_LOAD_RAM) {
         rc = stage_ram(p, slot, hdr);
@@ -810,6 +853,7 @@ int mb_boot_ram(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg,
     set_args(&c, args);
     if (p->stage1_slot)
         mb_stage1_confirm(p);
+    write_record(p, &log->cur, &tmp, false);
     write_handoff(p, &log->cur, cfg, hdr, &c);
     return p->launch_ram(hdr);
 }

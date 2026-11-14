@@ -226,6 +226,14 @@ static uint32_t f_cause(void) { return sim.reset_cause; }
 static const char* f_reason(void) { return sim.reset_cause & MB_RESET_WATCHDOG ? "sim watchdog" : "sim power-on"; }
 static int f_self(void) { return sim.self_slot; }
 static int f_stage1(void) { return sim.stage1_slot; }
+// the "bootloader image" of the simulator, for boot records
+static int f_loader_hash(uint8_t out[32]) {
+    mb_sha256_t s;
+    mb_sha256_init(&s);
+    mb_sha256_update(&s, "the simulated bootloader", 24);
+    mb_sha256_final(&s, out);
+    return MB_OK;
+}
 
 void sim_two_stage(bool on, const uint8_t s1_public[32]) {
     sim_port.layout = on ? &layout2 : &layout;
@@ -244,7 +252,7 @@ mb_port_t sim_port = {
     .time_ms = f_time, .watchdog_arm = f_wdt, .watchdog_disarm = f_wdt_off, .button = f_button,
     .console_open = f_console_open, .getc = f_getc, .write = f_write,
     .reboot = f_reboot, .reboot_rom = f_rom, .reset_cause = f_cause, .reset_reason = f_reason, .self_slot = f_self,
-    .floor = &floor_store, .fault_slot = f_fault_slot,
+    .floor = &floor_store, .fault_slot = f_fault_slot, .loader_hash = f_loader_hash,
 };
 
 void sim_reset(void) {

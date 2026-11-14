@@ -78,6 +78,7 @@ typedef struct mb_port {
     const mb_keyring_t* unlock_keys;    /* MB_FEAT_CONSOLE_AUTH: who may unlock the console */
     const mb_keyring_t* revoke_keys;    /* who may revoke a signing key (NULL: revocation off, entries ignored) */
     const uint8_t* enc_key;             /* MB_FEAT_ENC: X25519 private key for image envelopes (NULL: encrypted uploads refused) */
+    int (*loader_hash)(uint8_t out[32]);/* MB_FEAT_BOOT_RECORD: SHA-256 of the bootloader's own image (NULL: can't) */
 
     /* flash: offsets from the start of flash. erase/program take whole
      * sectors / pages (the core aligns); read takes anything. */

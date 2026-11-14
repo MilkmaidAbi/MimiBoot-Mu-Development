@@ -62,6 +62,9 @@ On the 32-bit chips (the "full" core):
 - Take encrypted images (`ENCRYPTED_IMAGES`): `mbtool pack --encrypt` encrypts the
   payload for one board key, MimiBoot decrypts it on the way in. Same scheme as
   MCUboot (AES-CTR, ECIES-X25519). Keeps update files private, not the flash.
+- Measured boot (`BOOT_RECORD`): the started image can get a record of what was
+  checked (signature and key, hash, trial) with a hash of the bootloader and a
+  measurement a server can recompute. A report, not attestation.
 - A console over the chip's own USB on SAM D21/D51 (`CONSOLE_USB`, TinyUSB): for boards
   whose only connection is USB. Built, not yet run on a board.
 - Talk mcumgr / SMP on the console (`SMP`): Zephyr's tools (mcumgr, smpmgr, smpclient)

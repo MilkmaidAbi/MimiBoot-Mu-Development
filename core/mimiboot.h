@@ -6,6 +6,7 @@
 
 #include "core/mb_port.h"
 #include "mimiboot/mb_bcl.h"
+#include "mimiboot/mb_record.h"
 
 #define MIMIBOOT_VERSION        "2.0.0"
 #define MIMIBOOT_NAME           "MimiBoot-Night"

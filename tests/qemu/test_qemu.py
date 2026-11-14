@@ -206,7 +206,8 @@ class QemuSerial:
 
 
 def build_nrf_app(work: Path, name: str, origin: int, ram_base: int, ram_end: int, probe: int,
-                  check: tuple | None = None, floor_at: int | None = None, store_at: int | None = None) -> Path:
+                  check: tuple | None = None, floor_at: int | None = None, store_at: int | None = None,
+                  record: bool = False) -> Path:
     ld = work / f"{name}.ld"
     ld.write_text(f"""MEMORY {{ FLASH (rx) : ORIGIN = 0x{origin:08x}, LENGTH = 32K
          RAM (rwx) : ORIGIN = 0x{ram_base:08x}, LENGTH = 0x{ram_end - ram_base:x} }}
@@ -221,7 +222,8 @@ SECTIONS {{ .isr_vector : {{ KEEP(*(.isr_vector)) }} > FLASH
          f"-DPROBE=0x{probe:08x}u", f"-I{ROOT / 'include'}", ROOT / "tests/qemu/nrf_app.c", f"-T{ld}", "-o", elf,
          *([f"-DCHECK_LO=0x{check[0]:08x}u", f"-DCHECK_HI=0x{check[1]:08x}u"] if check else []),
          *([f"-DFLOOR_AT=0x{floor_at:08x}u"] if floor_at is not None else []),
-         *([f"-DSTORE_AT=0x{store_at:08x}u"] if store_at is not None else [])])
+         *([f"-DSTORE_AT=0x{store_at:08x}u"] if store_at is not None else []),
+         *(["-DRECORD=1"] if record else [])])
     return elf
 
 
@@ -456,6 +458,7 @@ def nrf51_tests(work: Path, db, check):
     smp_tests(work, db, check, board, machine, ram_lo, ram_hi, probe, os.environ.get("IMGTOOL") or shutil.which("imgtool"))
     revoke_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
     enc_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
+    record_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
 
 
 def smp_request(s, req, timeout=15.0):
@@ -729,6 +732,42 @@ def enc_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
           "MU-APP enc-smp" in o and f"relay={slot['a']['link_native']:08x}" in o, o[-1500:])
 
 
+def record_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
+    """11. Measured boot on the nRF51: a signed image asks for a boot record; the
+    app prints it and the test recomputes the bootloader hash from mimiboot.bin and
+    the measurement from that and the image header, as a verifier would."""
+    import hashlib
+    import re
+    sys.path.insert(0, str(ROOT / "tools"))
+    import mbtool as mbt
+    cfg = Config(db, board)
+    cfg.set("LAYOUT", "ab+golden")
+    for k, v in (("KEYS", str(work / "trusted.pub")), ("REQUIRE_SIGNATURE", True), ("BOOT_RECORD", True)):
+        cfg.set(k, v)
+    out = work / f"{board}-record"
+    info = mubuild.build(cfg, out, log=lambda *a: None)
+    lay = json.loads((out / "layout.json").read_text())
+    slot = {s["name"]: s for s in lay["slots"]}
+    print(f"{board} (boot record): bootloader {info['flash_used']} B flash, {info['ram_used']} B RAM")
+    elf = build_nrf_app(work, "rec-app", slot["a"]["link_native"], ram_lo, ram_hi, probe, record=True)
+    p = work / "rec-app.mimg"
+    mbtool("pack", str(elf), "--target", lay["target"], "-o", str(p), "--version", "5.0.0", "--key", str(work / "trusted.key"))
+    img = p.read_bytes()
+    flash = flash_image(work, "record", lay["flash_size"], out / "mimiboot.bin", slot["a"]["offset"], img)
+    o = boot(machine, flash, seconds=5)
+    m = re.search(r"rec=([0-9a-f]{8})/([0-9a-f]{8}) loader=([0-9a-f]{64}) meas=([0-9a-f]{64})", o)
+    loader = hashlib.sha256((out / "mimiboot.bin").read_bytes()).digest()
+    meas = hashlib.sha256(b"MimiBoot measure v1\0" + loader + img[:mbt.SIGNED_BYTES]).hexdigest()
+    key_id = int.from_bytes(bytes.fromhex((work / "trusted.pub").read_text().split()[0])[:4], "little")
+    flags = int(m.group(1), 16) if m else 0
+    check(f"{board}: RECORD: the image gets a boot record: signed, hashed, loader measured",
+          bool(m) and flags & 0x0B == 0x0B and int(m.group(2), 16) == key_id, o[-1500:])
+    check(f"{board}: RECORD: the loader hash is SHA-256 of mimiboot.bin", bool(m) and m.group(3) == loader.hex(),
+          f"{m.group(3) if m else None} vs {loader.hex()}")
+    check(f"{board}: RECORD: the measurement recomputes from mimiboot.bin and the image header",
+          bool(m) and m.group(4) == meas, f"{m.group(4) if m else None} vs {meas}")
+
+
 def revoke_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
     """9. Key revocation on the nRF51: a statement from the revocation key, sent with
     mbtool's code, goes into the protected store; after a power cycle an image
@@ -988,7 +1027,7 @@ def main():
 
     if not only or "microbit" in only:
         nrf51_tests(work, db, check)
-    elif "two-stage" in only or "smp" in only or "revoke" in only or "enc" in only:     # just case 7, 8, 9 or 10 (nRF51)
+    elif "two-stage" in only or "smp" in only or "revoke" in only or "enc" in only or "record" in only:     # just cases 7-11 (nRF51)
         flash = 256 * 1024
         args = (work, db, check, "microbit", "microbit", 0x20000008, 0x20004000, flash - 4)
         if "two-stage" in only:
@@ -999,6 +1038,8 @@ def main():
             revoke_tests(*args)
         if "enc" in only:
             enc_tests(*args)
+        if "record" in only:
+            record_tests(*args)
 
     for board in ("netduinoplus2", "stm32vldiscovery"):
         if only and board not in only:

@@ -1256,6 +1256,73 @@ static void test_client_install(void) {
           "not the running slot, not golden");
 }
 
+// ---------------------------------------------------------------------------
+// measured boot: the boot record (mimiboot/mb_record.h)
+// ---------------------------------------------------------------------------
+#if MB_FEAT_BOOT_RECORD
+static mb_boot_record_t* sim_record(uint32_t addr) { return (mb_boot_record_t*)(sim_ram + (addr - SIM_RAM_BASE)); }
+
+static void test_boot_record(void) {
+    printf("boot record: a signed image that asks for one gets what was checked and a measurement\n");
+    good_a();
+    put_signed(MB_SLOT_B, signed_record_hdr, SIGNED_RECORD_SEED, SIGNED_RECORD_SIZE);
+    mb_boot_record_t* r = sim_record(SIGNED_RECORD_ADDR);
+    memset(r, 0, sizeof(*r));
+    sim_port.require_signature = true;
+    CHECK(boot() == MB_SLOT_B, "b (new) boots as a trial");
+    sim_port.require_signature = false;
+    CHECK(r->magic == MB_RECORD_MAGIC && r->version == MB_RECORD_VERSION && r->size == sizeof(*r) &&
+          r->crc == mb_crc32(0, r, offsetof(mb_boot_record_t, crc)), "written, intact");
+    CHECK((r->flags & (MB_REC_SIGNED | MB_REC_HASHED | MB_REC_TRIAL | MB_REC_LOADER)) ==
+          (MB_REC_SIGNED | MB_REC_HASHED | MB_REC_TRIAL | MB_REC_LOADER) && !(r->flags & MB_REC_RAM),
+          "signed, hashed, trial, loader measured (flags %lx)", (unsigned long)r->flags);
+    const mb_image_hdr_t* h = (const mb_image_hdr_t*)signed_record_hdr;
+    CHECK(r->key_id == h->key_id && r->key_id != 0 && r->image_version == h->version && r->security_version == 2,
+          "the key, the version, the security version");
+    CHECK(!memcmp(r->image_sha256, h->sha256, 32), "the payload hash");
+    uint8_t lh[32], m[32];
+    mb_sha256_t s;
+    mb_sha256_init(&s);
+    mb_sha256_update(&s, "the simulated bootloader", 24);
+    mb_sha256_final(&s, lh);
+    mb_sha256_init(&s);
+    mb_sha256_update(&s, "MimiBoot measure v1", 20);       // with its NUL
+    mb_sha256_update(&s, lh, 32);
+    mb_sha256_update(&s, signed_record_hdr, MB_IMG_SIGNED_BYTES);
+    mb_sha256_final(&s, m);
+    CHECK(!memcmp(r->loader_sha256, lh, 32) && !memcmp(r->measurement, m, 32), "the loader hash and the measurement recompute");
+
+    printf("boot record: unsigned, into loader RAM, or not asked for\n");
+    good_a();
+    uint32_t size = make_payload(301, 20000);
+    mb_image_hdr_t u = make_header("plain", MB_VERSION(1, 1, 0), 1, size, 0);
+    u.record_addr = SIM_RAM_BASE + 0x31000;
+    mb_image_seal(&u);
+    put_image(MB_SLOT_B, &u);
+    r = sim_record(u.record_addr);
+    memset(r, 0, sizeof(*r));
+    CHECK(boot() == MB_SLOT_B && r->magic == MB_RECORD_MAGIC && !(r->flags & MB_REC_SIGNED) && r->key_id == 0 &&
+          (r->flags & MB_REC_HASHED), "unsigned: the record says so (no key)");
+    good_a();
+    size = make_payload(302, 20000);                        // a new image each time: the log remembers trials
+    u = make_header("plain", MB_VERSION(1, 1, 0), 1, size, 0);
+    u.record_addr = SIM_LOADER_RAM + 64;
+    mb_image_seal(&u);
+    put_image(MB_SLOT_B, &u);
+    memset(sim_ram + (SIM_LOADER_RAM - SIM_RAM_BASE), 0xAA, 256);
+    CHECK(boot() == MB_SLOT_B && sim_ram[SIM_LOADER_RAM - SIM_RAM_BASE + 64] == 0xAA, "into loader RAM: not written");
+    good_a();
+    size = make_payload(303, 20000);
+    u = make_header("plain", MB_VERSION(1, 1, 0), 1, size, 0);
+    put_image(MB_SLOT_B, &u);
+    r = sim_record(SIM_RAM_BASE + 0x31000);
+    memset(r, 0, sizeof(*r));
+    CHECK(boot() == MB_SLOT_B && r->magic == 0, "not asked for: nothing written");
+}
+#else
+static void test_boot_record(void) {}
+#endif
+
 #if MB_FEAT_ENC
 // ---------------------------------------------------------------------------
 // encrypted images (the envelope and AES are checked against imgtool in
@@ -1970,6 +2037,7 @@ int main(int argc, char** argv) {
     test_client_install();
     test_revocation();
     test_encrypted();
+    test_boot_record();
     test_power_cuts();
     test_two_stage();
     test_smp();

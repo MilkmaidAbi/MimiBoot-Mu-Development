@@ -424,6 +424,9 @@ SECTIONS {{
   .data : {{ _sdata = .; *(.data*) . = ALIGN(4); _edata = .; }} > RAM AT > FLASH
   .bss (NOLOAD) : {{ _sbss = .; *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; }} > RAM
   end = _ebss; _end = end;
+  /* the bootloader's image in flash, as mimiboot.bin holds it (BOOT_RECORD measures it) */
+  _mb_image_start = ORIGIN(FLASH);
+  _mb_image_end = LOADADDR(.data) + SIZEOF(.data);
   ASSERT(_ebss + _stack_size <= _estack, "MimiBoot: RAM too small for data + stack: turn features off")
 }}
 """

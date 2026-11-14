@@ -31,6 +31,8 @@ PROFILES = {
     "two-stage+smp": dict(TWO_STAGE=1, SMP=1),
     "encrypted+smp": dict(ENC=1, SMP=1, IMG_MCUBOOT=1),
     "encrypted-without-ed25519": dict(ENC=1, SIGNATURES=0, ECDSA=1),
+    "boot-record": dict(BOOT_RECORD=1),
+    "boot-record-minimal": {**OFF_ALL, "BOOT_RECORD": 1},
 }
 INVALID = {
     "recv-without-console": dict(CONSOLE=0, SHELL=0, SHELL_DIAG=0, RECV=1),

@@ -54,6 +54,13 @@ for name, seed, size, secret, version, secver in cases:
     print("#define %s_SEED %d\n#define %s_SIZE %d" % (name.upper(), seed, name.upper(), size))
     print(c_array(name + "_hdr", hdr))
 
+# measured boot: a signed image that asks for a boot record in the simulator's RAM
+REC_ADDR = 0x20030000
+hdr = mbtool.build_header(payload(15, 30000), "signed_record", mbtool.parse_version("4.1.0"), 2, target="sim",
+                          arch=mbtool.ARCH_ARM, secret=RFC1_SECRET, build_time=0, record_addr=REC_ADDR)
+print("#define SIGNED_RECORD_SEED 15\n#define SIGNED_RECORD_SIZE 30000\n#define SIGNED_RECORD_ADDR 0x%08xu" % REC_ADDR)
+print(c_array("signed_record_hdr", hdr))
+
 # two-stage: stage-1 images for the sim's two-stage layout (s1a at 0x140000), signed with
 # the stage-1 key (OTHER_SECRET in two-stage tests) and with the app key (RFC1_SECRET)
 S1A_LINK = 0x140000 + 0x1000

@@ -110,6 +110,9 @@
 #ifndef MB_FEAT_ENC
 #define MB_FEAT_ENC             0   /* take encrypted images (core/mb_enc.c): decrypted as they are installed */
 #endif
+#ifndef MB_FEAT_BOOT_RECORD
+#define MB_FEAT_BOOT_RECORD     0   /* measured boot: a record of what was checked and run (mimiboot/mb_record.h) */
+#endif
 #if defined(MB_CM_CLIENT) || defined(MB_RP2040_CLIENT) || defined(MB_RP2350_CLIENT)
 #undef MB_FEAT_ENC                  /* an app never decrypts: the key stays in the bootloader */
 #define MB_FEAT_ENC             0
