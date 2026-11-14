@@ -14,6 +14,16 @@
  *   mb_client_request(...)           menu / another slot or entry once / ROM loader, next reset
  *   mb_client_install_*()            write a new image into the other slot (A/B update)
  *   mb_client_recv(...)              ... or receive one over a byte stream (OTA)
+ *
+ * Two ways to ask for a boot mode:
+ *   mb_client_request()   writes the request into the boot log. Always works,
+ *                         with any MimiBoot build and without a handoff.
+ *   mb_client_control()   the control service: more (boot profiles, config
+ *                         mode, reboot at once). Only when this boot's
+ *                         handoff says the bootloader has it: check
+ *                         mb_client_capabilities() & MB_CAP_CONTROL first;
+ *                         without it the call returns MB_E_UNSUPP and
+ *                         mb_client_request() is the fallback.
  */
 #ifndef MIMIBOOT_CLIENT_H
 #define MIMIBOOT_CLIENT_H
@@ -39,7 +49,8 @@ const mb_handoff_t *mb_client_handoff(void); /* NULL: none this boot */
 const char *mb_client_args(void);            /* never NULL */
 int mb_client_status(mb_client_status_t *st);
 int mb_client_confirm(void);
-int mb_client_reject(int slot);              /* mark another slot BAD */
+int mb_client_reject(int slot);              /* mark another slot BAD (until its image changes) */
+int mb_client_vacate(int slot);              /* empty another slot: its header erased, its log record cleared */
 int mb_client_request(int request, int arg); /* MB_REQ_MENU / _BOOT_ONCE(slot) / _BOOTSEL / _FLASH */
 int mb_client_request_entry(const char *entry, const char *args); /* MB_REQ_ENTRY_ONCE by name */
 
@@ -47,14 +58,16 @@ int mb_client_request_entry(const char *entry, const char *args); /* MB_REQ_ENTR
  * writing your own slot or golden is refused). The header is written last,
  * after the payload hashed correctly, so a half-written image is never
  * seen as one. The bootloader boots it as a trial on the next reset.
- * Bare-metal MCUs program flash in units that can be written once per erase:
- * 2 bytes (STM32F0/F1/F3), 4 (nRF, STM32F2/F4/F7), 8 (STM32L4/G0/G4),
- * 16 (SAM D51), 64 (SAM D21). A unit already written can't be topped up
- * (the write fails with MB_E_IO), so pass chunks that start on such a
- * boundary; chunks on 256-byte boundaries work everywhere. */
+ * Writes are in order (offset = what has been written so far; a chunk sent
+ * again is accepted and ignored) and of any size: the library gathers whole
+ * flash pages and programs each once, so flash with write-once units (STM32
+ * L4/G0/G4 ECC, SAM D21 rows) needs nothing from the caller.
+ * install_abort() gives up: the slot is left empty (its header was erased at
+ * begin), the library ready for a new begin. */
 int mb_client_install_begin(int slot, const mb_image_hdr_t *hdr);
 int mb_client_install_write(uint32_t offset, const void *data, size_t len);
 int mb_client_install_end(void);
+int mb_client_install_abort(void);
 
 /* OTA: run the mb_recv protocol on a byte stream (a console, a socket...)
  * straight into `slot` through the install functions above. */

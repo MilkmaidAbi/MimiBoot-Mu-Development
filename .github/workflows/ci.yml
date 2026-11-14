@@ -32,6 +32,27 @@ jobs:
       - name: host tools
         run: python tests/test_tools.py
 
+  fuzz:
+    name: fuzzing the input parsers (libFuzzer, ASan, UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: clang 18 with libFuzzer and the sanitizer runtimes
+        run: sudo apt-get update && sudo apt-get install -y clang-18 libclang-rt-18-dev
+      - name: SMP, console uploads, boot config, flash contents: 60 s each
+        env:
+          FUZZ_CC: clang-18
+        run: python tests/fuzz/run_fuzz.py 60
+      - name: keep what crashed
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes
+          path: tests/fuzz/crashes/
+
   build:
     name: configurator + every board compiles
     runs-on: ubuntu-24.04

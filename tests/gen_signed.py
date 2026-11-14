@@ -77,6 +77,16 @@ for name, secret in (("s1_signed_s1key", OTHER_SECRET), ("s1_signed_appkey", RFC
     print(c_array(name + "_hdr", hdr))
 print("#define S1_SIGNED_SEED 21\n#define S1_SIGNED_SIZE 30000")
 
+# key revocation statements (mbtool's revoke_signature): by the revocation key (OTHER_SECRET in the
+# tests), for the sim's Ed25519 key and its P-256 key; and one signed by the image key itself
+import struct  # noqa: E402
+ED_ID = struct.unpack("<I", ed.public_key(RFC1_SECRET)[:4])[0]
+P256_ID = P256_SECRET.key_id
+print("#define REVOKE_ED_ID 0x%08xu\n#define REVOKE_P256_ID 0x%08xu" % (ED_ID, P256_ID))
+print(c_array("revoke_ed_sig", mbtool.revoke_signature(OTHER_SECRET, b"sim", ED_ID)))
+print(c_array("revoke_p256_sig", mbtool.revoke_signature(OTHER_SECRET, b"sim", P256_ID)))
+print(c_array("revoke_by_image_key_sig", mbtool.revoke_signature(RFC1_SECRET, b"sim", P256_ID)))
+
 # signed boot configs (CFG_SIGNED), with mbtool's config_signature()
 CFG_TEXT = b"default rescue\nentry rescue\n title Signed rescue\n slot g\n args signed=1\n"
 for name, version, secret in (("cfg_v5", 5, RFC1_SECRET), ("cfg_v3", 3, RFC1_SECRET), ("cfg_other_key", 9, OTHER_SECRET)):

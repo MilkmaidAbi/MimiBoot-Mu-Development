@@ -581,6 +581,14 @@ def unlock_message(target: bytes, nonce: bytes) -> bytes:
     return UNLOCK_DOMAIN + target[:16].ljust(16, b"\0") + nonce
 
 
+REVOKE_DOMAIN = b"MimiBoot revoke v1\0"
+
+
+def revoke_signature(secret: bytes, target: bytes, key_id: int) -> bytes:
+    """what a board with REVOKE_KEYS checks before it stops trusting key_id (core/mb_image.c)"""
+    return ed25519.sign(secret, REVOKE_DOMAIN + target[:16].ljust(16, b"\0") + struct.pack("<I", key_id))
+
+
 CONFIG_DOMAIN = b"MimiBoot config v1\0"
 
 
@@ -711,6 +719,32 @@ def cmd_loader(a):
           "copy if it doesn't get as far as starting an app within %d boots)" % (path, other, 3))
     if a.reboot:
         s.write(b"reboot\r")
+
+
+def revoke_on(s, secret, target, key_id):
+    """At the prompt: 'revoke <id>', then the statement. -> the board's answer line"""
+    s.write(("revoke %08x\r" % key_id).encode())
+    out, m = read_until(s, r"MB REVOKE [0-9a-f]{8} statement\?|MB ERR[^\r\n]*", 5)
+    if not m or m.group(0).startswith("MB ERR"):
+        die("the board won't take a revocation: " + ANSI.sub("", out)[-300:])
+    s.write(revoke_signature(secret, target, key_id).hex().encode() + b"\r")
+    out, m = read_until(s, r"MB (REVOKED|ERR[^\r\n]*)", 10)
+    return m.group(0) if m else "no answer: " + ANSI.sub("", out)[-200:]
+
+
+def cmd_revoke(a):
+    """stop a board trusting one signing key (statement signed with a REVOKE_KEYS key)"""
+    key_id = int(a.keyid, 16)
+    secret = read_key(a.key)
+    if a.print:
+        print(revoke_signature(secret, a.target.encode(), key_id).hex())
+        return
+    s = open_serial(a.port)
+    to_shell(s)
+    res = revoke_on(s, secret, a.target.encode(), key_id)
+    print(res)
+    if not res.startswith("MB REVOKED"):
+        sys.exit(1)
 
 
 def cmd_ramboot(a):
@@ -903,6 +937,12 @@ def main():
     p = sub.add_parser("cmd"); p.add_argument("commands", nargs="+"); p.add_argument("--port"); p.add_argument("--timeout", type=float, default=10)
     p.set_defaults(fn=cmd_cmd)
     p = sub.add_parser("layout"); p.set_defaults(fn=cmd_layout)
+    p = sub.add_parser("revoke", help="stop a board trusting one signing key (needs a REVOKE_KEYS key)")
+    p.add_argument("--key", required=True, help="the revocation key's secret file (mbtool keygen)")
+    p.add_argument("--keyid", required=True, help="the key to revoke: 8 hex digits (the board's 'keys' lists them)")
+    p.add_argument("--target", required=True, help="the chip as the board names it (e.g. nrf52840)")
+    p.add_argument("--print", action="store_true", help="only print the statement (to send later, or by hand)")
+    p.add_argument("--port"); p.set_defaults(fn=cmd_revoke)
     p = sub.add_parser("loader", help="two-stage boards: update the bootloader (stage 1) from a mimiconf build")
     p.add_argument("build_dir", help="the build directory (stage1-s1a.img, stage1-s1b.img, layout.json)")
     p.add_argument("--port"); p.add_argument("--reboot", action="store_true", help="reboot into it straight away")

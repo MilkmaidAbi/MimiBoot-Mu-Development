@@ -11,3 +11,6 @@ build-console.log
 .config
 .config.old
 __pycache__/
+
+# fuzzer findings (kept by CI as an artifact)
+tests/fuzz/crashes/

@@ -1173,6 +1173,89 @@ static void test_ota(void) {
           "running slot and golden are off limits");
 }
 
+static void test_revocation(void) {
+    printf("key revocation (REVOKE_KEYS)\n");
+    static const mb_keyring_t revoke_ring = { 1, (const uint8_t (*)[32])s1_public };   // gen_signed's OTHER key
+    sim_reset();
+    sim_port.require_signature = true;
+    put_signed(MB_SLOT_A, signed_good_hdr, SIGNED_GOOD_SEED, SIGNED_GOOD_SIZE);          // Ed25519 image key
+    put_signed(MB_SLOT_GOLDEN, signed_p256_hdr, SIGNED_P256_SEED, SIGNED_P256_SIZE);     // P-256 image key
+    CHECK(mb_key_revoke(&sim_port, REVOKE_ED_ID, revoke_ed_sig) == MB_E_UNSUPP, "a build without REVOKE_KEYS takes none");
+    sim_port.revoke_keys = &revoke_ring;
+    CHECK(boot() == MB_SLOT_A, "before: the Ed25519-signed image boots");
+    CHECK(mb_key_revoke(&sim_port, REVOKE_P256_ID, revoke_by_image_key_sig) == MB_E_SIGNATURE,
+          "a statement signed by an image key is refused");
+    uint8_t bad[64];
+    memcpy(bad, revoke_ed_sig, 64);
+    bad[5] ^= 1;
+    CHECK(mb_key_revoke(&sim_port, REVOKE_ED_ID, bad) == MB_E_SIGNATURE, "a damaged statement is refused");
+    CHECK(mb_key_revoke(&sim_port, REVOKE_P256_ID, revoke_ed_sig) == MB_E_SIGNATURE, "a statement for another key is refused");
+    CHECK(mb_key_revoke(&sim_port, 0x12345678u, revoke_ed_sig) == MB_E_BADARG, "a key this board doesn't have: refused");
+    CHECK(mb_key_revoke(&sim_port, REVOKE_ED_ID, revoke_ed_sig) == MB_OK && mb_key_revoked(&sim_port, REVOKE_ED_ID),
+          "the Ed25519 key revoked");
+    CHECK(mb_key_revoke(&sim_port, REVOKE_ED_ID, revoke_ed_sig) == MB_OK &&
+          mb_store_count(&sim_port, MB_STORE_KEY_REVOKED, REVOKE_ED_ID) == 1, "again: nothing more written");
+    CHECK(boot() == MB_SLOT_GOLDEN && log_now().slot[MB_SLOT_A].bad_reason == MB_BAD_SIGNATURE,
+          "after: the image signed with it is refused, the P-256 one boots");
+    CHECK(mb_key_revoke(&sim_port, REVOKE_P256_ID, revoke_p256_sig) == MB_E_REFUSED,
+          "the last trusted image key can't be revoked");
+    sim.console = true;
+    sim.button = true;
+    sim_input("c\rkeys\r", 7);
+    sim_power_on();
+    sim.console = false;
+    sim.button = false;
+    CHECK(strstr(sim.out, "REVOKED") != NULL, "'keys' shows it");
+    sim_port.revoke_keys = NULL;
+    wipe_log();
+    CHECK(boot() == MB_SLOT_A, "a build without REVOKE_KEYS ignores the entry (an app can't plant one)");
+    sim_port.require_signature = false;
+}
+
+static void test_client_install(void) {
+    printf("client install: odd chunks on write-once flash, a resend, order, abort, vacate\n");
+    good_a();
+    sim.self_slot = MB_SLOT_A;
+    mb_client_init(&sim_port);
+    uint32_t size = make_payload(71, 30001);
+    mb_image_hdr_t h = make_header("chunks", MB_VERSION(1, 6, 0), 2, size, 0);
+    sim.write_once = true;                                  // a page programmed twice fails, as on ECC flash
+    CHECK(mb_client_install_begin(MB_SLOT_B, &h) == MB_OK, "begin");
+    uint32_t off = 0, k = 0;
+    int rc = MB_OK;
+    while (off < size && rc == MB_OK) {
+        uint32_t n = 37 + (k++ * 101) % 700;                // never page sized, never page aligned
+        if (n > size - off) n = size - off;
+        rc = mb_client_install_write(off, payload + off, n);
+        if (rc == MB_OK && k == 5) rc = mb_client_install_write(off, payload + off, n);   // a retry of the same chunk
+        off += n;
+    }
+    CHECK(rc == MB_OK, "odd-sized chunks and a resend: every page programmed once (%d)", rc);
+    CHECK(mb_client_install_write(off + 512, payload, 16) != MB_OK, "a chunk past the end is refused");
+    CHECK(mb_client_install_end() == MB_OK && slot_intact(MB_SLOT_B), "the image is complete and intact");
+    sim.write_once = false;
+
+    CHECK(mb_client_install_begin(MB_SLOT_B, &h) == MB_OK, "again");
+    CHECK(mb_client_install_write(0, payload, 1000) == MB_OK && mb_client_install_write(2000, payload + 2000, 100) == MB_E_BADARG,
+          "out of order: refused");
+    CHECK(mb_client_install_end() == MB_E_CORRUPT, "end before the whole payload arrived: refused");
+    mb_slot_info_t in;
+    CHECK(mb_image_read_header(&sim_port, MB_SLOT_B, &in) != MB_OK, "... and b stays empty");
+    CHECK(mb_client_install_begin(MB_SLOT_B, &h) == MB_OK && mb_client_install_write(0, payload, 4096) == MB_OK &&
+          mb_client_install_abort() == MB_OK && mb_client_install_write(4096, payload + 4096, 10) == MB_E_BADARG,
+          "abort: closed");
+    CHECK(mb_image_read_header(&sim_port, MB_SLOT_B, &in) != MB_OK, "an aborted install leaves b empty");
+
+    install_raw(MB_SLOT_B, "old", MB_VERSION(1, 0, 0), 2, 72, 20000);
+    boot();                                                 // the log learns about it
+    sim.self_slot = MB_SLOT_A;
+    mb_client_init(&sim_port);
+    CHECK(mb_client_vacate(MB_SLOT_B) == MB_OK && mb_image_read_header(&sim_port, MB_SLOT_B, &in) != MB_OK &&
+          log_now().slot[MB_SLOT_B].state == MB_ST_EMPTY, "vacate: b has no header and no log record");
+    CHECK(mb_client_vacate(MB_SLOT_A) == MB_E_BADARG && mb_client_vacate(MB_SLOT_GOLDEN) == MB_E_REFUSED,
+          "not the running slot, not golden");
+}
+
 // ---------------------------------------------------------------------------
 // power cuts
 // ---------------------------------------------------------------------------
@@ -1672,6 +1755,8 @@ int main(int argc, char** argv) {
     test_console();
     test_recv();
     test_ota();
+    test_client_install();
+    test_revocation();
     test_power_cuts();
     test_two_stage();
     test_smp();

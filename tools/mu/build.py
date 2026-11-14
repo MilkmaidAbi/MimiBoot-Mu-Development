@@ -158,6 +158,7 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
         "sources": [f"core/{n}.c" for n in NIGHT_CORE] + ["port/cortexm/cm_port.c"] + VENDOR_SOURCES[t.get("vendor")],
         "headers": ["core/*.h", "include/mimiboot/*.h", "port/cortexm/*.h", f"port/{t.get('vendor')}/*.h",
                     "third_party/micro-ecc/*"],
+        "usb": bool(cfg.effective("CONSOLE_USB")),
         "cflags": [f"-mcpu={cpu}", "-mthumb", "-std=c11", "-Os", "-g", "-Wall", "-Wextra", "-Wno-unused-parameter",
                    "-ffunction-sections", "-fdata-sections", "-fno-common", "-ffreestanding"]
                   # flash at address 0 (nRF, SAMD): reading it is not a null dereference
@@ -165,6 +166,11 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
         "ldflags": ["-nostartfiles", "--specs=nano.specs", "--specs=nosys.specs", "-Wl,--gc-sections"],
         "config": "mimiboot_config.h", "linker": "link.ld", "target": "mimiboot",
     }
+    if recipe["usb"]:
+        recipe["sources"] += gen.USB_SOURCES
+        recipe["cflags"] += gen.usb_includes(cfg)
+        recipe["headers"] += ["third_party/tinyusb/src/**/*.h", "port/samd/usb/*.h", "third_party/cmsis/Include/**/*.h",
+                              f"third_party/microchip/samd{t.get('series')}/include/**/*.h"]
 
     if cfg.effective("TWO_STAGE"):
         return _build_two_stage(cfg, out, gcc, recipe, ram, stack, flash)

@@ -53,10 +53,11 @@ typedef struct {
 #define MB_FLOOR_COUNT      4
 /* Counted entries (two-stage), value = the low 32 bits of a stage 1's image id.
  * Kept far from the floor tags so a new floor can never read them as one. */
+#define MB_STORE_KEY_REVOKED 13     /* value = key_id of a signing key no longer trusted (REVOKE_KEYS) */
 #define MB_STORE_S1_GOOD    14      /* this stage 1 started an image: it works */
 #define MB_STORE_S1_ATTEMPT 15      /* one boot of an unconfirmed stage 1 */
 #define MB_STORE_RESERVE    8       /* attempts never take the last entries: floors still fit */
-_Static_assert(MB_FLOOR_COUNT <= MB_STORE_S1_GOOD, "floor tags would overlap the counted ones");
+_Static_assert(MB_FLOOR_COUNT <= MB_STORE_KEY_REVOKED, "floor tags would overlap the counted ones");
 typedef struct mb_floor_store {
     uint32_t off, size;         /* flash offset and size of the store (one erase unit) */
     uint32_t entry;             /* bytes per entry: 16, or the chip's program unit if larger */
@@ -75,6 +76,7 @@ typedef struct mb_port {
     const mb_keyring_p256_t* p256_keys;     /* MB_FEAT_ECDSA: P-256 keys (NULL: none) */
     bool require_signature;     /* refuse unsigned images */
     const mb_keyring_t* unlock_keys;    /* MB_FEAT_CONSOLE_AUTH: who may unlock the console */
+    const mb_keyring_t* revoke_keys;    /* who may revoke a signing key (NULL: revocation off, entries ignored) */
 
     /* flash: offsets from the start of flash. erase/program take whole
      * sectors / pages (the core aligns); read takes anything. */

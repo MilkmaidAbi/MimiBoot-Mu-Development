@@ -437,6 +437,18 @@ class Config:
                     parse_version_text(str(e("STAGE1_VERSION")))
                 except ValueError as ex:
                     out.append(("error", f"STAGE1_VERSION: {ex}"))
+            if e("REVOKE_KEYS"):
+                p = Path(str(e("REVOKE_KEYS")))
+                if not (p if p.is_absolute() else Path.cwd() / p).exists():
+                    out.append(("error", f"REVOKE_KEYS file not found: {p}"))
+                if not (e("PROTECTED_FLOOR") or e("TWO_STAGE")):
+                    out.append(("error", "key revocation is kept in the protected store: needs PROTECTED_FLOOR (nRF) "
+                                         "or TWO_STAGE"))
+                if not e("REQUIRE_SIGNATURE"):
+                    out.append(("warn", "key revocation without 'Refuse unsigned images': an unsigned image boots anyway, "
+                                        "so a revoked key protects nothing"))
+                if e("KEYS") and Path(str(e("REVOKE_KEYS"))).resolve() == Path(str(e("KEYS"))).resolve():
+                    out.append(("warn", "REVOKE_KEYS is the KEYS file: a leaked image key could then revoke the others"))
             if e("LAYOUT") == "single" and e("AB_TRIAL"):
                 out.append(("warn", "one slot + 'Updates must confirm': an app that never confirms stops booting after "
                                     f"{e('TRIES')} tries (nothing to roll back to)"))

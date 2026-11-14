@@ -81,6 +81,16 @@ void mcu_remap_vectors(uint32_t vectors);
 #ifdef MB_VENDOR_NRF
 int  mcu_random(void* buf, size_t len);   /* hardware RNG (nRF); other vendors: none yet */
 #endif
+uint32_t mb_cm_ms(void);                    /* cm_port's millisecond clock (SysTick or the timer) */
+#if defined(MB_CONSOLE_USB) && MB_CONSOLE_USB
+/* The console over native USB (port/samd/samd_usb.c): brought up on demand,
+ * taken down before an image starts. open: true once a terminal has the port. */
+bool mcu_usb_open(uint32_t wait_ms);
+int  mcu_usb_getc(void);                    /* -1: nothing (runs the USB stack) */
+void mcu_usb_write(const char* s, size_t n);
+void mcu_usb_close(void);
+void mb_usb_irq(void);                      /* the USB interrupt (cm_port's vector table) */
+#endif
 #if defined(MB_FEAT_BOOT_LOCK) && MB_FEAT_BOOT_LOCK
 /* Write/erase-protect [off, off+len) until the next reset, also against a
  * debugger-driven CPU. Called right before an image starts, after the

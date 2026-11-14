@@ -862,6 +862,7 @@ clock_hz = 8000000
 erase_unit = 256
 nvic_words = 1
 vtor_align = 256
+usb_irqs = [7, 7]                # USB (CONSOLE_USB)
 sercoms = [
   { base = 0x42000800, gclk = 0x14, apb_off = 0x20, apb_bit = 2 },
   { base = 0x42000C00, gclk = 0x15, apb_off = 0x20, apb_bit = 3 },
@@ -884,6 +885,7 @@ erase_unit = 8192
 nvic_words = 5
 vtor_align = 1024
 mcuboot_hdr = 0x400
+usb_irqs = [80, 83]              # USB_0..USB_3 (CONSOLE_USB)
 sercoms = [
   { base = 0x40003000, gclk = 7, apb_off = 0x14, apb_bit = 12 },
   { base = 0x40003400, gclk = 8, apb_off = 0x14, apb_bit = 13 },

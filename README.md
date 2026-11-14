@@ -59,6 +59,8 @@ On the 32-bit chips (the "full" core):
   the debug port shut. A console lock makes uploads and changes wait for a signed
   unlock. `mbtool provision` prints the fuse / option-byte steps for the other chips.
   What holds against whom is in [docs/SECURITY.md](docs/SECURITY.md).
+- A console over the chip's own USB on SAM D21/D51 (`CONSOLE_USB`, TinyUSB): for boards
+  whose only connection is USB. Built, not yet run on a board.
 - Talk mcumgr / SMP on the console (`SMP`): Zephyr's tools (mcumgr, smpmgr, smpclient)
   can list, upload, test, confirm and erase images, MimiBoot's own and imgtool-signed ones.
 - Update itself in the field (`TWO_STAGE`, Cortex-M parts with 192 KB+): a small fixed
@@ -150,6 +152,10 @@ docs/               test status, security, option reference, Zephyr / FreeRTOS n
 ## License
 
 MIT. The STK500 code was written from Atmel's AVR061 application note. The ECDSA
-arithmetic is micro-ecc (BSD 2-clause, `third_party/micro-ecc`).
+arithmetic is micro-ecc (BSD 2-clause, `third_party/micro-ecc`). The USB console
+uses TinyUSB 0.21.0 (MIT, `third_party/tinyusb`), Arm's CMSIS 6.4.0 core headers
+(Apache-2.0, `third_party/cmsis`) and Microchip's SAM D USB and NVMCTRL register
+headers (Apache-2.0, `third_party/microchip`), all unmodified, with their licence
+files next to them.
 
 (I doubt people will even ever see this proj, so Imma just anyhow put MIT lol)

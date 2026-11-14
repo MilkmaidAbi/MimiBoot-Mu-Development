@@ -111,6 +111,9 @@ static int f_program(uint32_t off, const void* buf, size_t len) {
     if (off % 256 || len % 256 || off + len > SIM_FLASH_SIZE) return MB_E_BADARG;
     if (running_stage1(off, len)) return MB_E_REFUSED;
     if (sim.fail_writes) return MB_E_IO;
+    if (sim.write_once)
+        for (size_t i = 0; i < len; i++)
+            if (sim_flash[off + i] != 0xFF) return MB_E_IO;
     const uint8_t* b = buf;
     if (cut_now()) {
         for (size_t i = 0; i < len / 2; i++) sim_flash[off + i] &= b[i];
@@ -258,6 +261,7 @@ void sim_reset(void) {
     sim_port.layout = &layout;                      // one-stage unless a test asks (sim_two_stage)
     sim_port.stage1_slot = NULL;
     sim_port.stage1_keys = NULL;
+    sim_port.revoke_keys = NULL;
 }
 
 void sim_input(const void* data, size_t len) {

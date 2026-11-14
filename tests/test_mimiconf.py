@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """mimiconf: model, dependencies, .config round trip, layouts, generated headers,
 the TUI state machine. --build-all also compiles every board's default config."""
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -339,6 +340,13 @@ def two_stage_checks(db):
     check(any("S1_KEYS" in m for lvl, m in c2.problems() if lvl == "error"), "required signatures need S1_KEYS")
     c2.set("STAGE1_VERSION", "1.2")
     check(any("STAGE1_VERSION" in m for lvl, m in c2.problems() if lvl == "error"), "a bad stage-1 version is refused")
+    # key revocation: needs the protected store, and means little without required signatures
+    c3 = Config(db, "nucleo-f411re")
+    c3.set("REVOKE_KEYS", __file__)                # any existing file: only the checks run here
+    check(any("protected store" in m for lvl, m in c3.problems() if lvl == "error"), "revocation without a store refused")
+    check(any("protects nothing" in m for lvl, m in c3.problems() if lvl == "warn"), "revocation without required signatures warned")
+    c3.set("TWO_STAGE", True)
+    check(not any("protected store" in m for lvl, m in c3.problems()), "two-stage has the store")
     h = gen.mcu_header(cfg, lay, 0x3000, gen.STAGE0_OFF)
     check("#define MB_FEAT_TWO_STAGE 1" in h and "#define MB_FEAT_CONSOLE 0" in h and "#define MB_FEAT_RECV 0" in h,
           "stage 0's header: two-stage on, console and uploads off")
@@ -364,6 +372,45 @@ def build_all():
     return len(bad)
 
 
+def usb_descriptors(out: Path) -> list[str]:
+    """Problems with the USB descriptors linked into a CONSOLE_USB build (read from the binary)"""
+    import struct
+    from mu import build as mubuild
+    nm = mubuild._tool(mubuild.arm_gcc(), "nm")
+    syms = {}
+    for line in subprocess.run([nm, "-S", str(out / "mimiboot.elf")], capture_output=True, text=True).stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 4:
+            syms[parts[3]] = (int(parts[0], 16), int(parts[1], 16))
+    image = (out / "mimiboot.bin").read_bytes()
+    bad = []
+    if "dev_desc" not in syms or "cfg_desc" not in syms:
+        return ["descriptors not found in the binary"]
+    a, n = syms["dev_desc"]
+    dev = image[a:a + n]
+    if n != 18 or dev[0] != 18 or dev[1] != 1 or struct.unpack_from("<H", dev, 2)[0] != 0x0200 or dev[7] != 64:
+        bad.append(f"device descriptor {dev.hex()}")
+    a, n = syms["cfg_desc"]
+    cfg = image[a:a + n]
+    if cfg[1] != 2 or struct.unpack_from("<H", cfg, 2)[0] != n:
+        bad.append(f"configuration: total length {struct.unpack_from('<H', cfg, 2)[0]}, {n} bytes there")
+    i, kinds, eps = 0, [], {}
+    while i < n:
+        ln, kind = cfg[i], cfg[i + 1]
+        if ln < 2 or i + ln > n:
+            bad.append(f"descriptor at {i}: length {ln}")
+            break
+        kinds.append(kind)
+        if kind == 5:
+            eps[cfg[i + 2]] = (cfg[i + 3] & 3, struct.unpack_from("<H", cfg, i + 4)[0])
+        i += ln
+    if kinds.count(0x0B) != 1 or kinds.count(4) != 2 or cfg[4] != 2:
+        bad.append(f"expected one IAD and two interfaces: {kinds}")
+    if eps != {0x81: (3, 8), 0x02: (2, 64), 0x82: (2, 64)}:
+        bad.append(f"endpoints {eps}")
+    return bad
+
+
 def build_variants():
     """Every bare-metal board again, as two-stage and with SMP, where the configurator
     says the variant fits (small parts are refused up front, and that is checked too)"""
@@ -374,7 +421,10 @@ def build_variants():
     for name in db.boards:
         if Config(db, name).t.build != "mcu":
             continue
-        for variant, opts in (("two-stage", {"TWO_STAGE": True}), ("smp", {"SMP": True})):
+        variants = [("two-stage", {"TWO_STAGE": True}), ("smp", {"SMP": True})]
+        if Config(db, name).t.get("vendor") == "samd":
+            variants.append(("usb", {"CONSOLE_USB": True}))
+        for variant, opts in variants:
             cfg = Config(db, name)
             for k, v in opts.items():
                 cfg.set(k, v)
@@ -384,6 +434,11 @@ def build_variants():
             try:
                 info = mubuild.build(cfg, out / f"{name}-{variant}", log=lambda *a: None)
                 built += 1
+                if variant == "usb":
+                    probs = usb_descriptors(out / f"{name}-{variant}")
+                    if probs:
+                        bad.append(f"{name}/usb descriptors")
+                        print(f"  {name:20} usb       DESCRIPTORS: {'; '.join(probs)}")
                 print(f"  {name:20} {variant:9} {info['flash_used']:6} / {info['flash_region']} bytes")
             except Exception as e:  # noqa: BLE001
                 msg = str(e).splitlines()[-1] if str(e) else traceback.format_exc()

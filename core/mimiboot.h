@@ -103,6 +103,15 @@ int  mb_stage1_accepts(const mb_port_t* p, int slot, const mb_image_hdr_t* h);  
 int  mb_stage1_check_sig(const mb_port_t* p, mb_slot_info_t* info);     /* against the stage-1 keys only */
 int  mb_stage1_vectors_ok(const mb_port_t* p, int slot, const mb_image_hdr_t* h);  /* reset vector inside, as linked */
 
+/* ---- key revocation (REVOKE_KEYS) ----------------------------------------------------
+ * A signing key (Ed25519 or P-256, image or stage-1 keys) named by its key_id can
+ * be revoked with a statement from one of the port's revoke_keys:
+ *   Ed25519 over "MimiBoot revoke v1\0" || target[16] || key_id (LE)
+ * It is recorded in the protected store and every signature check skips that
+ * key from then on. Refused if no unrevoked key would be left in its keyring. */
+bool mb_key_revoked(const mb_port_t* p, uint32_t key_id);
+int  mb_key_revoke(const mb_port_t* p, uint32_t key_id, const uint8_t sig[64]);
+
 /* The slot whose image is being checked right now (MB_SLOT_NONE otherwise):
  * a port's fault handler records it so the next boot can mark it bad. */
 extern volatile uint8_t mb_checking_slot;

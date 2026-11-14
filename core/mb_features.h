@@ -94,6 +94,9 @@
 #ifndef MB_FEAT_BOOT_LOCK
 #define MB_FEAT_BOOT_LOCK       0   /* write-protect the bootloader region until reset before starting an image */
 #endif
+#ifndef MB_CONSOLE_USB
+#define MB_CONSOLE_USB          0   /* the console over native USB (SAM D: port/samd/samd_usb.c) */
+#endif
 #ifndef MB_FEAT_SMP
 #define MB_FEAT_SMP             0   /* mcumgr / SMP over the console (core/mb_smp.c) */
 #endif

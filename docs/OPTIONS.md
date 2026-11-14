@@ -188,6 +188,12 @@ default ****; needs `SIGNATURES`. (full core)
 
 A text file with one Ed25519 public key per line (64 hex digits): mbtool keygen writes keys/mimiboot.pub. Enter a path; quotes are fine.
 
+### `REVOKE_KEYS`: Key revocation keys file (who may revoke a signing key)
+
+default ****; needs `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)
+
+Ed25519 public keys (one per line) whose statements make the board stop trusting one of its signing keys: 'mbtool revoke --key <revocation key> --keyid <id>'. Keep these keys offline and apart from KEYS: a leaked image key must not be able to revoke the good ones. The revocation is kept in the protected store, so it needs one: nRF with PROTECTED_FLOOR, or a two-stage build. A board never revokes the last key of a kind. Images signed only by a revoked key stop booting when signatures are required: re-sign them first.
+
 ### `CFG_SIGNED`: Only use a boot config signed with your keys
 
 default **off**; needs `CFG_FILE`, `SIGNATURES`. (full core)
@@ -299,6 +305,30 @@ default **on**; needs `SHELL`; cost ~1.2 KB on nucleo-f411re. (full core)
 Receive images in CRC-checked frames and write them to a slot.
 
 C macro: `MB_FEAT_RECV`
+
+### `CONSOLE_USB`: Console over native USB (CDC serial port) instead of the UART
+
+default **off**; needs `CONSOLE`. (full core; builds: STM32/nRF/SAMD)
+
+The menu, command line, uploads and SMP over the chip's own USB port, as a serial port the host sees with no driver: for boards whose only connection is USB (Feather M0/M4, Trinket M0, XIAO). TinyUSB (MIT, vendored unmodified) does the USB; the 48 MHz it needs comes from the DFLL locked to the host (no crystal). USB comes up only when the console is wanted: the button, nothing bootable, or the app asking for the menu (there's no key-at-reset break-in over USB), and is taken down completely before an image starts. About 8 KB. Built only: not run on a board yet.
+
+C macro: `MB_CONSOLE_USB`
+
+### `USB_VID`: USB vendor ID (decimal; 4617 = 0x1209, pid.codes)
+
+default **4617**; 1..65535; needs `CONSOLE_USB`. (full core; builds: STM32/nRF/SAMD)
+
+With USB_PID the identity the host sees. The default 0x1209:0x0001 is pid.codes' test ID: fine on the bench, not for a product (pid.codes gives open-source projects their own PID for free).
+
+C macro: `MB_USB_VID`
+
+### `USB_PID`: USB product ID (decimal)
+
+default **1**; 1..65535; needs `CONSOLE_USB`. (full core; builds: STM32/nRF/SAMD)
+
+See USB_VID.
+
+C macro: `MB_USB_PID`
 
 ### `SMP`: mcumgr / SMP on the console (Zephyr's update tools)
 

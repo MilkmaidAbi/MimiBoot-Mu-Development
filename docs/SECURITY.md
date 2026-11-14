@@ -74,6 +74,34 @@ console doesn't get past it, and neither does `ramboot` when signatures are
 required. The store has room for 256 raises; when it is full the floors stay
 where they are and the log copy carries on.
 
+## Revoking a signing key
+
+Keys are compiled in, so that nothing in flash can add one. The other side of
+that: a key that leaks would stay trusted until every board got a new
+bootloader. With `REVOKE_KEYS` a board can drop one of its keys in the field:
+
+- The statement is an Ed25519 signature by a revocation key over
+  `"MimiBoot revoke v1\0" || target || key_id`. `mbtool revoke --key
+  <revocation key> --keyid <id> --target <chip>` makes it and sends it (the
+  board's `keys` command lists the ids); `--print` only prints it.
+- Revocation keys are their own set. Keep them offline: an image key, leaked
+  or not, can't revoke anything.
+- The revocation goes into the protected store (append-only, next to the
+  rollback floors), so it needs one: nRF with `PROTECTED_FLOOR`, or a
+  two-stage build. From then on every signature check (images, and stage-1
+  copies in two-stage builds) skips that key.
+- A board never revokes the last trusted key of a kind (image keys, stage-1
+  keys): nothing could be signed for it again.
+- Images signed only by the revoked key stop booting when signatures are
+  required. Re-sign and install them with another key first. Without
+  required signatures a revocation protects nothing (an unsigned image boots
+  anyway); the configurator warns.
+- It holds against the app where the store is locked (nRF). On chips without
+  a runtime lock a compromised app could erase the store and with it the
+  revocation; there it is an operator's tool, not a defence against the app.
+  A board built without `REVOKE_KEYS` ignores revocation entries altogether,
+  so an app can't plant one.
+
 ## Updating the bootloader itself (two-stage)
 
 A one-stage MimiBoot can't replace itself: a bug in it is fixed with a debug
@@ -293,6 +321,12 @@ needs a hardware RNG: not yet).
   entries. An older signed config can't come back where the protected floor
   store exists (nRF); elsewhere a replayed older signed config would still be
   accepted.
+- **Key revocation needs a protected store.** `REVOKE_KEYS` works on nRF
+  (`PROTECTED_FLOOR`) and in two-stage builds; elsewhere a leaked key is
+  dealt with by building and installing a bootloader without it.
+- **RP2350 secure boot isn't automated.** It means burning OTP, which can't be
+  undone; `mbtool provision` points at the datasheet instead of printing
+  steps.
 - **No encryption.** Images are stored in the clear.
 - **No measured boot or attestation.**
 

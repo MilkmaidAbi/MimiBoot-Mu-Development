@@ -454,6 +454,7 @@ def nrf51_tests(work: Path, db, check):
 
     two_stage_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
     smp_tests(work, db, check, board, machine, ram_lo, ram_hi, probe, os.environ.get("IMGTOOL") or shutil.which("imgtool"))
+    revoke_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
 
 
 def smp_request(s, req, timeout=15.0):
@@ -618,6 +619,72 @@ def smp_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe, imgt
     o = boot_keep(machine, flash2, fsize)
     check(f"{board}: SMP: ... and it boots after a power cycle (vector table at b + 0x200)",
           "MU-APP smp-mcuboot" in o and f"relay={slot['b']['link_mcuboot']:08x}" in o, o[-1500:])
+
+
+def revoke_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
+    """9. Key revocation on the nRF51: a statement from the revocation key, sent with
+    mbtool's code, goes into the protected store; after a power cycle an image
+    signed with the revoked key is refused and one signed with the other key boots."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import mbtool as mbt
+    for k in ("img1", "img2", "revoker"):
+        mbtool("keygen", "--out", str(work / k), "--force")
+    (work / "img12.pub").write_text((work / "img1.pub").read_text() + (work / "img2.pub").read_text())
+    cfg = Config(db, board)
+    cfg.set("LAYOUT", "ab+golden")
+    for k, v in (("BOOT_LOCK", True), ("PROTECTED_FLOOR", True), ("KEYS", str(work / "img12.pub")),
+                 ("REQUIRE_SIGNATURE", True), ("REVOKE_KEYS", str(work / "revoker.pub"))):
+        cfg.set(k, v)
+    out = work / f"{board}-revoke"
+    info = mubuild.build(cfg, out, log=lambda *a: None)
+    lay = json.loads((out / "layout.json").read_text())
+    g = next(s for s in lay["slots"] if s["name"] == "g")
+    fsize = lay["flash_size"]
+    print(f"{board} (key revocation): bootloader {info['flash_used']} B flash")
+    elf = build_nrf_app(work, "rev-app", g["link_native"], ram_lo, ram_hi, probe)
+    images = {}
+    for k in ("img1", "img2"):
+        p = work / f"rev-{k}.mimg"
+        mbtool("pack", str(elf), "--target", lay["target"], "-o", str(p), "--golden", "--version", "1.0.0",
+               "--key", str(work / f"{k}.key"))
+        images[k] = p.read_bytes()
+    id1 = int.from_bytes(bytes.fromhex((work / "img1.pub").read_text().split()[0])[:4], "little")
+    flash = flash_image(work, "revoke", fsize, out / "mimiboot.bin", g["offset"], b"")
+    prompt = r"mimiboot(?:\x1b\[0m)?> $"
+    s = QemuSerial(machine, flash, seconds=60, keep=True)
+    answers, notes = [], []
+    try:
+        if not mbt.read_until(s, r"up/down \+ enter", 30)[1]:
+            raise RuntimeError("the menu never came up")
+        for _ in range(3):
+            s.write(b"c")
+            if mbt.read_until(s, prompt, 6)[1]:
+                break
+        s.write(b"\x15\r")
+        mbt.read_until(s, prompt, 3)
+        answers.append(mbt.revoke_on(s, mbt.read_key(str(work / "img1.key")), lay["target"].encode(), id1))
+        mbt.read_until(s, prompt, 3)
+        answers.append(mbt.revoke_on(s, mbt.read_key(str(work / "revoker.key")), lay["target"].encode(), id1))
+        mbt.read_until(s, prompt, 3)
+        s.keep_flash(fsize)
+    except (SystemExit, TimeoutError, RuntimeError) as e:
+        notes.append(str(e))
+    o = s.close()
+    note = f"{notes} {answers}\n{o[-1200:]}"
+    check(f"{board}: REVOKE: a statement signed by an image key is refused",
+          len(answers) > 0 and "not signed by a revocation key" in answers[0], note)
+    check(f"{board}: REVOKE: the revocation key's statement is taken", len(answers) > 1 and answers[1] == "MB REVOKED", note)
+    for k, want in (("img1", False), ("img2", True)):
+        f = work / f"revoke-{k}.flash.bin"
+        img = bytearray(flash.read_bytes())
+        img[g["offset"]:g["offset"] + len(images[k])] = images[k]
+        f.write_bytes(bytes(img))
+        o = boot(machine, f, seconds=5)
+        if want:
+            check(f"{board}: REVOKE: an image signed with the other key boots", "MU-APP rev-app" in o, o[-1200:])
+        else:
+            check(f"{board}: REVOKE: after a power cycle, an image signed with the revoked key is refused",
+                  "MU-APP" not in o and "nothing bootable" in o, o[-1200:])
 
 
 def two_stage_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
@@ -813,13 +880,15 @@ def main():
 
     if not only or "microbit" in only:
         nrf51_tests(work, db, check)
-    elif "two-stage" in only or "smp" in only:     # just case 7 or 8 (nRF51)
+    elif "two-stage" in only or "smp" in only or "revoke" in only:     # just case 7, 8 or 9 (nRF51)
         flash = 256 * 1024
         args = (work, db, check, "microbit", "microbit", 0x20000008, 0x20004000, flash - 4)
         if "two-stage" in only:
             two_stage_tests(*args)
         if "smp" in only:
             smp_tests(*args, imgtool)
+        if "revoke" in only:
+            revoke_tests(*args)
 
     for board in ("netduinoplus2", "stm32vldiscovery"):
         if only and board not in only:

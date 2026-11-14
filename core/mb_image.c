@@ -166,6 +166,56 @@ static uint32_t key_id_of(const uint8_t* key) {
 }
 #endif
 
+// Revocation counts only on a board built to take it (REVOKE_KEYS): elsewhere
+// an entry in the store (an app can write one on chips that can't lock it) means nothing.
+bool mb_key_revoked(const mb_port_t* p, uint32_t key_id) {
+    return p->revoke_keys && p->revoke_keys->count && p->floor &&
+           mb_store_count(p, MB_STORE_KEY_REVOKED, key_id) > 0;
+}
+
+#if MB_FEAT_SIGNATURES
+// Keys in one family (image keys, or stage-1 keys) still trusted, leaving `except` out
+static int usable(const mb_port_t* p, const mb_keyring_t* ed, const mb_keyring_p256_t* ec, uint32_t except, bool* has) {
+    int n = 0;
+    for (int k = 0; ed && k < ed->count; k++) {
+        uint32_t id = key_id_of(ed->keys[k]);
+        if (id == except) *has = true;
+        else if (!mb_key_revoked(p, id)) n++;
+    }
+    for (int k = 0; ec && k < ec->count; k++) {
+        uint32_t id = key_id_of(ec->keys[k]);
+        if (id == except) *has = true;
+        else if (!mb_key_revoked(p, id)) n++;
+    }
+    return n;
+}
+#endif
+
+int mb_key_revoke(const mb_port_t* p, uint32_t key_id, const uint8_t sig[64]) {
+#if MB_FEAT_SIGNATURES
+    if (!p->revoke_keys || !p->revoke_keys->count || !p->floor) return MB_E_UNSUPP;
+    bool in_image = false, in_s1 = false;
+    int left_image = usable(p, p->keys, p->p256_keys, key_id, &in_image);
+    int left_s1 = usable(p, p->stage1_keys, p->stage1_p256_keys, key_id, &in_s1);
+    if (!in_image && !in_s1) return MB_E_BADARG;                    // not a key this board trusts
+    if ((in_image && !left_image) || (in_s1 && !left_s1)) return MB_E_REFUSED;     // the last one: nothing could be signed again
+    if (mb_key_revoked(p, key_id)) return MB_OK;
+    static const char domain[] = "MimiBoot revoke v1";                 // + its NUL, as mbtool signs it
+    uint8_t msg[sizeof(domain) + 16 + 4];
+    memcpy(msg, domain, sizeof(domain));
+    memset(msg + sizeof(domain), 0, 16);
+    for (int i = 0; i < 16 && p->target[i]; i++) msg[sizeof(domain) + i] = (uint8_t)p->target[i];
+    for (int i = 0; i < 4; i++) msg[sizeof(domain) + 16 + i] = (uint8_t)(key_id >> (8 * i));
+    for (int k = 0; k < p->revoke_keys->count; k++)
+        if (mb_ed25519_verify(sig, msg, sizeof(msg), p->revoke_keys->keys[k]))
+            return mb_store_append(p, MB_STORE_KEY_REVOKED, key_id);
+    return MB_E_SIGNATURE;
+#else
+    (void)p; (void)key_id; (void)sig;
+    return MB_E_UNSUPP;
+#endif
+}
+
 // Signed: the key named by key_id must be in the build's keyring and the
 // signature must verify. Unsigned: fine unless the build requires signatures.
 // Ed25519 (the default) signs the first MB_IMG_SIGNED_BYTES of the header;
@@ -204,6 +254,7 @@ int mb_image_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
         for (int k = 0; k < p->p256_keys->count; k++) {
             const uint8_t* key = p->p256_keys->keys[k];
             if (info->fmt != MB_FMT_MCUBOOT && key_id_of(key) != h->key_id) continue;
+            if (mb_key_revoked(p, key_id_of(key))) continue;
             if (mb_ecdsa_p256_verify(h->signature, digest, key)) {
                 info->sig_state = 1;
                 info->proof_sig = MB_PROOF_SIG;
@@ -215,6 +266,7 @@ int mb_image_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
     }
     for (int k = 0; k < p->keys->count; k++) {
         const uint8_t* key = p->keys->keys[k];
+        if (mb_key_revoked(p, key_id_of(key))) continue;
         bool ok;
         if (info->fmt == MB_FMT_MCUBOOT) {
             ok = mb_ed25519_verify(h->signature, h->sha256, 32, key);

@@ -69,6 +69,15 @@ static const mb_keyring_p256_t s1_p256_ring = { MB_S1_P256_KEY_COUNT, s1_trusted
 #else
 #define S1_P256_RING NULL
 #endif
+/* key revocation (REVOKE_KEYS): every stage and the app side honour revocations;
+ * only the bootloader's console records new ones */
+#ifdef MB_REVOKE_KEY_COUNT
+static const uint8_t revoke_trusted[MB_REVOKE_KEY_COUNT][32] = MB_REVOKE_KEYS;
+static const mb_keyring_t revoke_ring = { MB_REVOKE_KEY_COUNT, revoke_trusted };
+#define REVOKE_RING (&revoke_ring)
+#else
+#define REVOKE_RING NULL
+#endif
 #if defined(MB_VENDOR_NRF) && MB_FEAT_CONSOLE_AUTH && !defined(MB_CM_CLIENT) && !defined(MB_CM_STAGE0)
 #define RANDOM mcu_random
 #else
@@ -193,7 +202,11 @@ __attribute__((naked)) static void relay(void) {
 #else
 #define Fault_Handler mb_cm_fault
 #define H(x) ((const void*)(x))
+#if MB_CONSOLE_USB
+#define N_VECTORS (16 + MB_USB_IRQ_LAST + 1)     /* up to the USB interrupt(s); the rest fault */
+#else
 #define N_VECTORS 16
+#endif
 #endif
 
 #if MB_TIME_SYSTICK
@@ -208,6 +221,9 @@ __attribute__((section(".isr_vector"), used)) const void* const mb_vectors[N_VEC
     H(Fault_Handler), H(Fault_Handler), 0, H(Fault_Handler), H(SysTick_Handler),
 #if MB_VECTORS == MB_VECTORS_RELAY
     [16 ... N_VECTORS - 1] = (const void*)RELAY_IRQS,
+#elif MB_CONSOLE_USB
+    [16 ... 16 + MB_USB_IRQ_FIRST - 1] = (const void*)mb_cm_fault,
+    [16 + MB_USB_IRQ_FIRST ... 16 + MB_USB_IRQ_LAST] = (const void*)mb_usb_irq,
 #endif
 };
 #endif /* !MB_CM_CLIENT */
@@ -299,7 +315,7 @@ const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
     .keys = KEYRING, .p256_keys = P256_RING, .require_signature = MB_REQUIRE_SIGNATURE,
     .flash_read = f_read, .flash_erase = f_erase, .flash_program = f_program, .reboot = client_reboot,
-    .self_slot = client_self_slot, .floor = FLOOR,
+    .self_slot = client_self_slot, .floor = FLOOR, .revoke_keys = REVOKE_RING,
 };
 #else
 
@@ -318,6 +334,11 @@ static bool sp_ok(uint32_t sp) {
 
 /* ---- starting an image --------------------------------------------------------------- */
 static void quiesce(void) {
+#if MB_CONSOLE_USB && !defined(MB_CM_STAGE0)
+    // first, while interrupts and the millisecond clock still run: USB flushes,
+    // detaches, and its 48 MHz clock goes off, so the app starts clean
+    mcu_usb_close();
+#endif
     __asm volatile("cpsid i" ::: "memory");
     REG32(SYST_CSR) = 0;
     for (int i = 0; i < MB_NVIC_WORDS; i++) {
@@ -328,7 +349,9 @@ static void quiesce(void) {
 #ifndef MB_CM_STAGE0
     // stage 0 never opened the UART or the pins: "closing" them would wait on
     // status bits of a peripheral whose clock was never on (STM32 TC, SAM D SYNCBUSY)
+#if !MB_CONSOLE_USB
     mcu_uart_deinit();
+#endif
     mcu_pins_release();
 #endif
     mcu_restore();
@@ -430,7 +453,7 @@ static void reboot_rom(void) {
 static const mb_port_t stage0_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
     .keys = S1_RING, .p256_keys = S1_P256_RING, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING,
-    .require_signature = MB_REQUIRE_SIGNATURE, .flash_base = MB_FLASH_BASE,
+    .require_signature = MB_REQUIRE_SIGNATURE, .flash_base = MB_FLASH_BASE, .revoke_keys = REVOKE_RING,
     .flash_read = f_read, .can_start = can_start, .floor = FLOOR, .fault_slot = fault_slot,
 };
 
@@ -462,21 +485,34 @@ static int launch_ram(const mb_image_hdr_t* h) {
 
 /* ---- console, time, watchdog, resets ------------------------------------------------ */
 static uint32_t time_ms(void) { return now_ms(); }
+uint32_t mb_cm_ms(void) { return now_ms(); }
+#if MB_CONSOLE_USB
+// native USB: it comes up only now, and "someone is there" means a terminal opened the port
+static bool console_open(uint32_t wait_ms) { return mcu_usb_open(wait_ms); }
+static int  con_rx(void) { return mcu_usb_getc(); }
+static void write_port(const char* s, size_t n) { mcu_usb_write(s, n); }
+#else
 static bool console_open(uint32_t wait_ms) { (void)wait_ms; return true; }    // a UART is always "there"
+static int  con_rx(void) { return mcu_uart_getc(); }
+static void write_port(const char* s, size_t n) { while (n--) mcu_uart_putc(*s++); }
+#endif
 static int  getc_port(uint32_t ms) {
     uint32_t t0 = now_ms();
     do {
-        int c = mcu_uart_getc();
+        int c = con_rx();
         if (c >= 0) return c;
         mcu_wdt_feed();                                     // a person at the menu isn't a hang
     } while (now_ms() - t0 < ms);
     return -1;
 }
-static void write_port(const char* s, size_t n) { while (n--) mcu_uart_putc(*s++); }
 static void wd_arm(uint32_t ms) { mcu_wdt_start(ms); }
 static void wd_off(void) { mcu_wdt_disarm(); }
 static void reboot(void) {
+#if MB_CONSOLE_USB
+    mcu_usb_close();                                        // the host sees it go (the UART was never opened)
+#else
     mcu_uart_deinit();
+#endif
     __asm volatile("dsb" ::: "memory");
     REG32(SCB_AIRCR) = 0x05FA0004u;                         // SYSRESETREQ
     for (;;) {}
@@ -487,8 +523,11 @@ static const char* reason(void) {
 }
 
 // The menu key: the board button, or a key on the UART soon after reset.
+// (Over USB there is no early key: the port isn't up yet. The button, an app's
+// request or nothing bootable open it.)
 static bool button(void) {
     if (mcu_button()) return true;
+    if (MB_CONSOLE_USB) return false;
     mcu_led(true);
     uint32_t t0 = now_ms();
     bool hit = false;
@@ -533,7 +572,7 @@ const mb_port_t mb_mcu_port = {
     .console_open = console_open, .getc = getc_port, .write = write_port,
     .reboot = reboot, .reboot_rom = REBOOT_ROM, .reset_cause = cause, .reset_reason = reason,
     .capabilities = caps, .floor = FLOOR, .fault_slot = fault_slot, .lockdown = LOCK_TXT DEBUG_TXT,
-    .stage1_slot = STAGE1_SLOT, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING, .flash_base = MB_FLASH_BASE,
+    .stage1_slot = STAGE1_SLOT, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING, .flash_base = MB_FLASH_BASE, .revoke_keys = REVOKE_RING,
 };
 
 int main(void) {
@@ -545,7 +584,9 @@ int main(void) {
     REG32(SYST_CVR) = 0;
     REG32(SYST_CSR) = 7;                                    // core clock, interrupt, enable
 #endif
+#if !MB_CONSOLE_USB
     mcu_uart_init();
+#endif
     mb_main(&mb_mcu_port);
     return 0;
 }

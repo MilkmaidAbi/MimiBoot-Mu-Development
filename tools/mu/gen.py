@@ -12,7 +12,8 @@ ROLE_NAMES = {ROLE_AB: "A/B", ROLE_GOLDEN: "golden", 3: "aux", ROLE_STAGE1: "sta
 # what stage 0 is built without (two-stage builds): it reads MimiBoot images and nothing else
 STAGE0_OFF = {"IMG_MCUBOOT": False, "IMG_RAW": False, "CONSOLE": False, "SHELL": False, "SHELL_DIAG": False,
               "RECV": False, "CFG_FILE": False, "CFG_SIGNED": False, "CONSOLE_AUTH": False, "GRUB": False,
-              "CONTROL": False, "HANDOFF": False, "RAM_IMAGES": False, "SCRUB_RAM": False}
+              "CONTROL": False, "HANDOFF": False, "RAM_IMAGES": False, "SCRUB_RAM": False, "SMP": False,
+              "CONSOLE_USB": False}
 NATIVE_HDR = 0x1000
 VECTOR_MODES = {"vtor": 0, "remap": 1, "relay": 2}
 
@@ -84,6 +85,11 @@ def key_macros(cfg: Config) -> list[str]:
                 raise ValueError(f"{s1} has P-256 keys: turn on ECDSA, or remove them")
             out += [f"#define MB_S1_P256_KEY_COUNT {len(p256)}",
                     "#define MB_S1_P256_KEYS {" + ",".join(_c_bytes(k) for k in p256) + "}"]
+    rk = cfg.effective("REVOKE_KEYS") if cfg.effective("SIGNATURES") else None
+    if rk:
+        rkeys = read_keys(rk)
+        out += [f"#define MB_REVOKE_KEY_COUNT {len(rkeys)}",
+                "#define MB_REVOKE_KEYS {" + ",".join(_c_bytes(k) for k in rkeys) + "}"]
     path = cfg.effective("KEYS")
     if not path or not cfg.effective("SIGNATURES"):
         return out
@@ -290,7 +296,23 @@ def samd_macros(cfg: Config) -> list[str]:
         f"#define MB_UART_TX_PORT {tx[0]}", f"#define MB_UART_TX_PIN {tx[1]}",
         f"#define MB_UART_RX_PORT {rx[0]}", f"#define MB_UART_RX_PIN {rx[1]}",
     ]
+    if cfg.effective("CONSOLE_USB"):
+        first, last = fam["usb_irqs"]
+        lines += [f"#define MB_USB_IRQ_FIRST {first}", f"#define MB_USB_IRQ_LAST {last}"]
     return lines + _pins(cfg)
+
+
+# the console over native USB (CONSOLE_USB, SAM D): TinyUSB 0.21.0 vendored, plus the glue
+USB_SOURCES = ["third_party/tinyusb/src/tusb.c", "third_party/tinyusb/src/common/tusb_fifo.c",
+               "third_party/tinyusb/src/device/usbd.c",
+               "third_party/tinyusb/src/class/cdc/cdc_device.c",
+               "third_party/tinyusb/src/portable/microchip/samd/dcd_samd.c", "port/samd/samd_usb.c"]
+
+
+def usb_includes(cfg: Config) -> list[str]:
+    series = cfg.t.get("series")
+    return ["-Ithird_party/tinyusb/src", "-Iport/samd/usb", "-Ithird_party/cmsis/Include",
+            f"-Ithird_party/microchip/samd{series}/include"]
 
 
 VENDOR_MACROS = {"stm32": stm32_macros, "nrf": nrf_macros, "samd": samd_macros}

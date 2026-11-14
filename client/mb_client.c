@@ -11,6 +11,9 @@ static struct {
     int slot;
     mb_image_hdr_t hdr;
     bool open;
+    uint32_t next;              /* payload bytes taken so far */
+    uint32_t page_at;           /* payload offset of the page being gathered */
+    uint8_t page[256];          /* written whole, once (write-once flash units) */
 } inst;
 static mb_handoff_t ho; // our copy of this boot's handoff
 static bool ho_valid;
@@ -156,6 +159,30 @@ int mb_client_reject(int slot) {
     return mb_bcl_commit(&log, &r);
 }
 
+// Empty a slot for good: its header goes (so nothing reads an image there) and
+// so does its log record. Not the running image, not golden, not a stage-1
+// copy, and not the confirmed image the board falls back to.
+int mb_client_vacate(int slot) {
+    if (!port || slot < 0 || slot >= port->layout->n_slots || slot == self)
+        return MB_E_BADARG;
+    int role = mb_slot_role(port, slot);
+    if (role == MB_ROLE_GOLDEN || role == MB_ROLE_STAGE1)
+        return MB_E_REFUSED;
+    mb_bcl_t log;
+    if (mb_bcl_load(&log, port) != MB_OK)
+        return MB_E_IO;
+    if (slot == log.cur.active && log.cur.slot[slot].state == MB_ST_GOOD)
+        return MB_E_REFUSED;
+    int rc = mb_slot_erase(port, slot, 0);              // the header sector (and an MCUboot trailer)
+    if (rc != MB_OK)
+        return rc;
+    if (inst.open && inst.slot == slot)
+        inst.open = false;
+    mb_bcl_rec_t r = log.cur;
+    memset(&r.slot[slot], 0, sizeof(r.slot[slot]));
+    return mb_bcl_commit(&log, &r);
+}
+
 int mb_client_request(int request, int arg) {
     if (!port)
         return MB_E_BADARG;
@@ -194,8 +221,12 @@ int mb_client_install_begin(int slot, const mb_image_hdr_t *hdr) {
         return MB_E_BADARG;
     if (slot == self || mb_slot_role(port, slot) == MB_ROLE_GOLDEN)
         return MB_E_REFUSED; // never the running image or recovery
+    if (port->layout->page_size > sizeof(inst.page))
+        return MB_E_UNSUPP;
     if (mb_image_check_header(port, hdr, port->layout->slot[slot].size) != MB_OK)
         return MB_E_CORRUPT;
+    if (mb_stage1_accepts(port, slot, hdr) != MB_OK)
+        return MB_E_REFUSED; // a bootloader stage 1 in an app slot, or anything in a stage-1 slot
     mb_slot_info_t tmp;
     memset(&tmp, 0, sizeof(tmp));
     tmp.hdr = *hdr;
@@ -208,7 +239,16 @@ int mb_client_install_begin(int slot, const mb_image_hdr_t *hdr) {
     inst.slot = slot;
     inst.hdr = *hdr;
     inst.open = true;
+    inst.next = inst.page_at = 0;
+    memset(inst.page, 0xFF, sizeof(inst.page));
     return MB_OK;
+}
+
+static int flush_page(void) {
+    int rc = mb_slot_write(port, inst.slot, inst.page_at, inst.page, port->layout->page_size);
+    inst.page_at += port->layout->page_size;
+    memset(inst.page, 0xFF, sizeof(inst.page));
+    return rc;
 }
 
 int mb_client_install_write(uint32_t offset, const void *data, size_t len) {
@@ -216,13 +256,38 @@ int mb_client_install_write(uint32_t offset, const void *data, size_t len) {
         return MB_E_BADARG;
     if (offset > inst.hdr.payload_size || len > inst.hdr.payload_size - offset)
         return MB_E_NOSPACE;
-    return mb_slot_write(port, inst.slot, offset, data, len);
+    if (offset + len <= inst.next)
+        return MB_OK; // sent again (a retry): already taken
+    if (offset != inst.next)
+        return MB_E_BADARG; // in order only
+    const uint8_t *d = data;
+    uint32_t page = port->layout->page_size;
+    while (len) {
+        uint32_t at = inst.next - inst.page_at;
+        uint32_t n = page - at < len ? page - at : (uint32_t)len;
+        memcpy(inst.page + at, d, n);
+        inst.next += n;
+        d += n;
+        len -= n;
+        if (inst.next - inst.page_at == page) {
+            int rc = flush_page();
+            if (rc != MB_OK) {
+                inst.open = false;
+                return rc;
+            }
+        }
+    }
+    return MB_OK;
 }
 
 int mb_client_install_end(void) {
     if (!inst.open)
         return MB_E_BADARG;
     inst.open = false;
+    if (inst.next != inst.hdr.payload_size)
+        return MB_E_CORRUPT; // not all of it arrived: the slot stays empty
+    if (inst.next > inst.page_at && flush_page() != MB_OK)
+        return MB_E_IO;
     mb_slot_info_t info;
     memset(&info, 0, sizeof(info));
     info.hdr = inst.hdr;
@@ -230,6 +295,11 @@ int mb_client_install_end(void) {
     if (mb_image_verify(port, inst.slot, &info) != MB_OK)
         return MB_E_CORRUPT; // slot stays empty
     return mb_slot_write_header(port, inst.slot, &inst.hdr);
+}
+
+int mb_client_install_abort(void) {
+    inst.open = false; // the header was erased at begin: the slot already reads as empty
+    return MB_OK;
 }
 
 // ---------------------------------------------------------------------------
