@@ -42,7 +42,7 @@ jobs:
           python-version: "3.12"
       - name: clang 18 with libFuzzer and the sanitizer runtimes
         run: sudo apt-get update && sudo apt-get install -y clang-18 libclang-rt-18-dev
-      - name: SMP, console uploads, boot config, flash contents: 60 s each
+      - name: "SMP, console uploads, boot config, flash contents: 60 s each"
         env:
           FUZZ_CC: clang-18
         run: python tests/fuzz/run_fuzz.py 60
