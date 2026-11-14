@@ -59,4 +59,65 @@ with tempfile.TemporaryDirectory(prefix="night-tools-") as td:
     try:e.unwrap(e.load_key(str(d/"dev.key")),other)
     except ValueError:pass
     else:raise AssertionError("an envelope for another key opened")
-print("host tool tests: PASS (three UF2 families, layout bounds, RP2040 XIP refusal, encrypted images)")
+
+    # LMS: mb_lms.py against the published vectors (tests/gen_lms.py output), then keygen / pack / sign / info
+    import json, re
+    L = m.lms
+    vec = (ROOT / "tests/gen_lms.h").read_text()
+    n_sig = 0
+    for v in re.finditer(r'\{"([^"]+)",(.*?),\s*(true|false)\}', vec, re.S):
+        pub, msg, sig = (bytes.fromhex("".join(re.findall(r'"([0-9a-f]*)"', part)))
+                         for part in re.findall(r'((?:\s*"[0-9a-f]*")+)', v.group(2)))
+        assert L.verify(pub, msg, sig) == (v.group(3) == "true"), v.group(1)
+        n_sig += 1
+    assert n_sig >= 40
+    for k in json.loads((ROOT / "tests/lms_keygen.json").read_text()):
+        pub = H(k["pub"])
+        if pub[3] in (5, 0x0A):                         # the H5 ones (the H10 trees take seconds each)
+            got, _ = L.public_from_seed(int.from_bytes(pub[:4], "big"), int.from_bytes(pub[4:8], "big"), H(k["I"]), H(k["seed"]))
+            assert got == pub, k["src"]
+    with contextlib.redirect_stdout(io.StringIO()):
+        m.cmd_keygen(types.SimpleNamespace(out=str(d / "pq"), force=False, type="lms", lms_height=5, lms_w=4))
+    pq = json.loads((d / "pq.key").read_text())
+    assert pq["next"] == 0 and (d / "pq.key.tree").exists() and "MB_TRUSTED_LMS_KEYS" in (d / "pq_keys.h").read_text()
+    assert "*.key.tree" in (d / ".gitignore").read_text().split()
+    args.encrypt = None; args.key = str(d / "pq.key"); args.output = str(d / "pq.mimg")
+    with contextlib.redirect_stdout(io.StringIO()): m.cmd_pack(args)
+    img, h, _, problems = m.image_file(args.output)
+    assert not problems and h["flags"] & m.F_LMS and h["flags"] & m.F_SIGNED and h["signature"] == bytes(64)
+    assert h["key_id"] == L.key_id(H((d / "pq.pub").read_text().split()[0]))
+    assert json.loads((d / "pq.key").read_text())["next"] == 1, "the key file counts the signature it made"
+    info = types.SimpleNamespace(image=args.output, pub=str(d / "pq.pub"), enc_key=None, layout="4m")
+    with contextlib.redirect_stdout(io.StringIO()) as o: rc = m.cmd_info(info)
+    assert rc == 0 and "signature OK" in o.getvalue() and "LMS" in o.getvalue(), o.getvalue()
+    # a one-level HSS public key file (binary, as hash-sigs / pyhsslms write it) works too
+    (d / "pq.hss.pub").write_bytes(L.hss_public(H((d / "pq.pub").read_text().split()[0])))
+    info.pub = str(d / "pq.hss.pub")
+    with contextlib.redirect_stdout(io.StringIO()) as o: rc = m.cmd_info(info)
+    assert rc == 0 and "signature OK" in o.getvalue()
+    # re-signing replaces the signature (one LMS TLV, a fresh leaf); a flipped bit is caught
+    with contextlib.redirect_stdout(io.StringIO()): m.cmd_sign(types.SimpleNamespace(image=args.output, key=args.key, output=None))
+    img, h, _, problems = m.image_file(args.output)
+    assert not problems and json.loads((d / "pq.key").read_text())["next"] == 2
+    assert struct.unpack(">I", h["lms_sig"][:4])[0] == 1, "leaf 1 for the second signature"
+    bad = bytearray(img); bad[m.HDR_SIZE + 4 + 500] ^= 1
+    (d / "pq-bad.mimg").write_bytes(bytes(bad)); info.image = str(d / "pq-bad.mimg"); info.pub = str(d / "pq.pub")
+    with contextlib.redirect_stdout(io.StringIO()) as o: rc = m.cmd_info(info)
+    assert rc == 1 and "signature BAD" in o.getvalue()
+    # an Ed25519 key re-signs it: the LMS signature goes, the flag with it
+    with contextlib.redirect_stdout(io.StringIO()):
+        m.cmd_keygen(types.SimpleNamespace(out=str(d / "ed"), force=False, type="ed25519"))
+        m.cmd_sign(types.SimpleNamespace(image=args.output, key=str(d / "ed.key"), output=str(d / "ed.mimg")))
+    img, h, _, problems = m.image_file(str(d / "ed.mimg"))
+    assert not problems and not h["flags"] & m.F_LMS and m.TLV_LMS not in m.tlvs_of(img)
+    # a used-up key refuses, and leaves its file alone
+    pq = json.loads((d / "pq.key").read_text()); pq["next"] = 32; (d / "pq.key").write_text(json.dumps(pq))
+    try: m.cmd_pack(args)
+    except (SystemExit, ValueError): pass
+    else: raise AssertionError("an exhausted LMS key signed")
+    assert json.loads((d / "pq.key").read_text())["next"] == 32
+    # a stray TLV in the header sector is refused (the board refuses it too)
+    junk = bytearray(img); junk[m.HDR_SIZE:m.HDR_SIZE + 8] = bytes([0x77, 0, 4, 0, 1, 2, 3, 4])
+    (d / "junk.mimg").write_bytes(bytes(junk))
+    assert m.image_file(str(d / "junk.mimg"))[3], "unknown TLV accepted"
+print("host tool tests: PASS (three UF2 families, layout bounds, RP2040 XIP refusal, encrypted images, LMS)")

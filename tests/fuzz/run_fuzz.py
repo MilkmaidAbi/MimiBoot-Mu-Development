@@ -19,9 +19,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
-        "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc"]
+        "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc", "mb_lms"]
 TARGETS = ["smp", "recv", "config", "flash"]
-FEATURES = ["-DMB_FEAT_SMP=1", "-DMB_FEAT_ENC=1", "-DMB_FEAT_REVOKE=1", "-DMB_FEAT_ECDSA=1", "-DMB_FEAT_IMG_MCUBOOT=1", "-DMB_FEAT_IMG_RAW=1"]
+FEATURES = ["-DMB_FEAT_SMP=1", "-DMB_FEAT_ENC=1", "-DMB_FEAT_REVOKE=1", "-DMB_FEAT_ECDSA=1", "-DMB_FEAT_IMG_MCUBOOT=1", "-DMB_FEAT_IMG_RAW=1", "-DMB_FEAT_LMS=1"]
 
 
 def c_arrays(path):
@@ -38,7 +38,7 @@ def seeds(target, d):
         for name, data in c_arrays(ROOT / "tests/gen_smp.h").items():
             if name.startswith("smp_") and data[:2] == b"\x06\x09":
                 # raw mode: the frames as a client sends them (encrypted uploads: with the board's key)
-                (d / name).write_bytes((b"\x09" if "_enc" in name else b"\x01") + data)
+                (d / name).write_bytes((b"\x09" if "_enc" in name else b"\x11" if "_lms" in name else b"\x01") + data)
     elif target == "config":
         (d / "basic").write_bytes(b"default os\ntimeout 3\nentry os\n title A/B\n slot ab\n args quiet=1\n"
                                   b"entry rescue\n slot g\n arch arm\n")

@@ -207,8 +207,9 @@ class Db:
     def _check(self):
         for o in self.options.values():
             for d in o.depends:
-                if re.split(r"!?=", d)[0] not in self.options:
-                    raise ValueError(f"{o.id} depends on unknown option {d}")
+                for alt in d.split("|"):
+                    if re.split(r"!?=", alt)[0] not in self.options:
+                        raise ValueError(f"{o.id} depends on unknown option {alt}")
             if o.kind == "choice" and o.default not in o.choices:
                 raise ValueError(f"{o.id}: default {o.default!r} isn't a choice")
             if o.menu not in self.menu_defs:
@@ -294,6 +295,8 @@ class Config:
 
     # ---- dependencies ----
     def dep_ok(self, dep: str) -> bool:
+        if "|" in dep:
+            return any(self.dep_ok(d) for d in dep.split("|"))
         if "!=" in dep:
             k, v = dep.split("!=", 1)
             o = self.db.options.get(k)
@@ -415,6 +418,8 @@ class Config:
                     p = Path.cwd() / p
                 if not p.exists():
                     out.append(("error", f"KEYS file not found: {p}"))
+            if e("LMS"):
+                out += self._lms_problems()
             if e("CFG_SIGNED") and not e("KEYS"):
                 out.append(("error", "'Only use a signed boot config' needs KEYS"))
             if e("CONSOLE_AUTH") and not e("KEYS"):
@@ -518,6 +523,35 @@ class Config:
                 out.append(("error", "the flash service isn't supported on >128 KB AVRs yet (the call needs EIND)"))
             if not e("STK500") and e("VERIFY") == "none":
                 out.append(("warn", "no upload and no check: the bootloader only starts the app (Optiboot without the boot)"))
+        return out
+
+    def _lms_problems(self) -> list[tuple[str, str]]:
+        """LMS keys: a classical key next to them undoes the point; W8 stage-1 keys cost every boot"""
+        from .gen import read_keys_any
+        out, e = [], self.effective
+        found = False
+        for k in ("KEYS", "S1_KEYS"):
+            path = e(k) if k == "KEYS" or e("TWO_STAGE") else None
+            if not path:
+                continue
+            p = Path(str(path))
+            p = p if p.is_absolute() else Path.cwd() / p
+            if not p.exists():
+                continue
+            try:
+                ed, p256, lms = read_keys_any(str(p))
+            except ValueError as ex:
+                out.append(("error", str(ex)))
+                continue
+            found = found or bool(lms)
+            if lms and (ed or p256):
+                out.append(("warn", f"{k} has LMS and classical (Ed25519/P-256) keys: an image signed by either boots, so "
+                                    "a quantum computer could still forge one. Keep only the LMS keys to rely on LMS"))
+            if k == "S1_KEYS" and any(pub[7] == 4 for pub in lms):
+                out.append(("warn", "an S1_KEYS LMS key uses W8: stage 0 checks both stage-1 copies on every boot, "
+                                    "~4400 SHA-256 blocks each (a W4 key: ~600)"))
+        if not found:
+            out.append(("warn", "LMS is on but no KEYS / S1_KEYS file has an LMS key (mbtool keygen --type lms)"))
         return out
 
     # ---- .config ----

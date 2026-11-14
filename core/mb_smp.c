@@ -343,9 +343,12 @@ static bool slot_ok_for_writes(const mb_port_t* p, int slot) {
     return true;
 }
 
+/* the header sector's TLV list an upload may carry (from byte 256): a key envelope, an LMS signature */
+#define SMP_TLV_MAX (MB_ENC_ENV_MAX + (MB_FEAT_LMS ? 4 + MB_LMS_SIG_MAX : 0))
+
 /* the upload in progress */
 static struct {
-    bool on, mimg, enc, has_sha, head_done;
+    bool on, mimg, enc, lms, has_sha, head_done;
     int slot;
     uint32_t len, off;          /* total, next expected */
     uint8_t head[PAGE];         /* the first page, written last */
@@ -353,7 +356,7 @@ static struct {
     uint32_t page_at;           /* its offset in the image */
     uint8_t sha[32];
     mb_sha256_t fsha;           /* of the file as it arrives (flash holds plaintext when it came encrypted) */
-    uint8_t env[MB_ENC_ENV_MAX];/* an encrypted image's key envelope: header sector, from byte 256 */
+    uint8_t tlv[SMP_TLV_MAX];   /* the header sector's TLVs (from byte 256), when the header says there are some */
     mb_slot_sink_t sink;
 } up;
 static const uint8_t zero_nonce[16];
@@ -383,11 +386,17 @@ static int begin(const mb_port_t* p) {
         if (h.payload_offset != MB_IMG_PAYLOAD_OFF || up.len != MB_IMG_PAYLOAD_OFF + h.payload_size) return IE_INVALID_LENGTH;
         up.mimg = true;
         up.enc = (h.flags & MB_IMG_F_ENCRYPTED) != 0;
+        up.lms = (h.flags & MB_IMG_F_LMS) != 0;
         if (up.enc && (!MB_FEAT_ENC || !p->enc_key)) return IE_BAD_HEADER;   // no key here to open it
+        if (up.lms && !MB_FEAT_LMS) return IE_BAD_HEADER;
         up.sink.p = p;
         up.sink.slot = up.slot;
+        up.sink.hdr = h;
+        memset(up.tlv, 0xFF, sizeof(up.tlv));
         // header, target, stage-1 rules, signature: the erase waits for the end of the
-        // header sector (payload_start), where an encrypted image's envelope has arrived
+        // header sector (payload_start), where an envelope or an LMS signature arrives;
+        // an LMS signature is checked there too, everything else right away
+        if (up.lms) return 0;
         return mb_sink_slot_check(&up.sink, &h) == MB_OK ? 0 : IE_BAD_HEADER;
     }
 #if MB_FEAT_IMG_MCUBOOT
@@ -428,17 +437,24 @@ static int finish(const mb_port_t* p) {
     return 0;
 }
 
-// A MimiBoot image's header sector is all in: open an encrypted image's
-// envelope (a wrong one is refused before anything is erased), then erase.
+// A MimiBoot image's header sector is all in: open an encrypted image's envelope,
+// check an LMS signature (a wrong one is refused before anything is erased), erase,
+// put the LMS signature into the slot's header sector.
 static int payload_start(const mb_port_t* p) {
+    size_t at, n;
     if (up.enc) {
-        size_t n = 4 + ((size_t)up.env[2] | (size_t)up.env[3] << 8);
-        if (n > MB_ENC_ENV_MAX) return IE_BAD_HEADER;
-        for (size_t i = n; i < MB_ENC_ENV_MAX; i++)
-            if (up.env[i] != 0xFF) return IE_BAD_HEADER;
-        if (mb_enc_unwrap(&mb_upload_key, up.env, n, p->enc_key) != MB_OK) return IE_BAD_HEADER;
+        if (mb_tlv_find(up.tlv, sizeof(up.tlv), MB_ENC_TLV_X25519, &at, &n) != MB_OK) return IE_BAD_HEADER;
+        if (mb_enc_unwrap(&mb_upload_key, up.tlv + at - 4, n + 4, p->enc_key) != MB_OK) return IE_BAD_HEADER;
     }
-    return mb_slot_erase(p, up.slot, up.sink.hdr.payload_size) == MB_OK ? 0 : IE_FLASH_ERASE;
+    if (up.lms) {
+        if (mb_tlv_find(up.tlv, sizeof(up.tlv), MB_TLV_LMS_SIG, &at, &n) != MB_OK || n > sizeof(mb_upload_sig.buf))
+            return IE_BAD_HEADER;
+        memcpy(mb_upload_sig.buf, up.tlv + at, n);
+        mb_upload_sig.len = (uint16_t)n;
+        if (mb_sink_slot_check(&up.sink, &up.sink.hdr) != MB_OK) return IE_BAD_HEADER;
+    }
+    if (mb_slot_erase(p, up.slot, up.sink.hdr.payload_size) != MB_OK) return IE_FLASH_ERASE;
+    return mb_sink_slot_tlvs(&up.sink) == MB_OK ? 0 : IE_FLASH_WRITE;
 }
 
 // Feed image bytes at image offset `at`
@@ -458,9 +474,9 @@ static int feed(const mb_port_t* p, uint32_t at, const uint8_t* data, uint32_t n
             }
             continue;
         }
-        if (up.mimg && at < MB_IMG_PAYLOAD_OFF) {       // header sector padding: blank (but an envelope)
+        if (up.mimg && at < MB_IMG_PAYLOAD_OFF) {       // header sector: TLVs (when announced), then blank
             for (; n && at < MB_IMG_PAYLOAD_OFF; at++, data++, n--) {
-                if (up.enc && at - PAGE < MB_ENC_ENV_MAX) up.env[at - PAGE] = *data;
+                if ((up.enc || up.lms) && at - PAGE < sizeof(up.tlv)) up.tlv[at - PAGE] = *data;
                 else if (*data != 0xFF) return IE_BAD_HEADER;
             }
             if (at == MB_IMG_PAYLOAD_OFF) {

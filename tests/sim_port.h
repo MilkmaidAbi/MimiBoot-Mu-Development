@@ -57,6 +57,7 @@ extern mb_port_t sim_port;              /* tests flip require_signature / keys *
 extern const uint8_t sim_test_secret[32], sim_test_public[32];
 
 void sim_reset(void);
+void sim_lms(const uint8_t* pub, const uint8_t* s1_pub);     /* LMS image / stage-1 keys (NULL: none) */
 void sim_two_stage(bool on, const uint8_t s1_public[32]);   /* slots c, d -> s1a, s1b; NULL key: keep */
 void sim_store_two(bool on);    /* the protected store as two 2 KB units that compact (sim_reset: one) */
 void sim_input(const void* data, size_t len);

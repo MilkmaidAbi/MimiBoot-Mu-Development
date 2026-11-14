@@ -12,8 +12,9 @@ Images
           image; its arch comes from the IMAGE_DEF.
   info    app.mimg [--pub keys/mimiboot.pub]      show and check an image
   sign    app.mimg --key keys/mimiboot.key        (re)sign an image in place
-  keygen  [--out keys/mimiboot]                   new Ed25519 key: .key (secret, keep it
-                                                  out of git), .pub, and _keys.h for the build
+  keygen  [--out keys/mimiboot] [--type ...]      new key: .key (secret, keep it out of git),
+                                                  .pub, and _keys.h for the build. Ed25519 by default;
+                                                  p256, lms (post-quantum, stateful), x25519 (decryption)
   uf2     app.mimg --slot a -o app_a.uf2          a UF2 that lands the image in a slot
   flash   app.mimg --slot a                       picotool load at the slot address (never -x)
 
@@ -49,6 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mb_ed25519 as ed25519  # noqa: E402
 import mb_p256 as p256  # noqa: E402
 import mb_enc as enc  # noqa: E402
+import mb_lms as lms  # noqa: E402
 
 MAGIC = 0x474D494D
 HDR_VERSION = 2
@@ -58,7 +60,9 @@ PAYLOAD_OFF = 4096
 LOAD_CHAIN, LOAD_RAM = 1, 2
 ARCH_ANY, ARCH_ARM, ARCH_RISCV = 0, 1, 2
 ARCH_NAMES = {ARCH_ANY: "any", ARCH_ARM: "arm", ARCH_RISCV: "riscv"}
-F_GOLDEN, F_SIGNED, F_ECDSA, F_STAGE1, F_ENCRYPTED = 0x1, 0x2, 0x4, 0x8, 0x10
+F_GOLDEN, F_SIGNED, F_ECDSA, F_STAGE1, F_ENCRYPTED, F_LMS = 0x1, 0x2, 0x4, 0x8, 0x10, 0x20
+TLV_LMS = 0x4C              # header-sector TLV: an LMS signature (enc.TLV_X25519 = 0x33: a key envelope)
+TLV_AREA = 4096 - 256
 TARGET = "rp2350"
 RECORD_ADDR = 0             # set by read_input(): the image's mb_boot_record buffer
 XIP_BASE = 0x10000000
@@ -239,7 +243,7 @@ def build_header(payload, name, version, secver=0, golden=False, trial_ms=0, tar
     if secret is not None and not isinstance(secret, Secret):
         secret = Secret("ed25519", secret)
     if secret:
-        flags |= F_SIGNED | (F_ECDSA if secret.ecdsa else 0)
+        flags |= secret.flags
         key_id = secret.key_id
     fields = [MAGIC, HDR_VERSION, HDR_SIZE, flags, load_type, PAYLOAD_OFF, len(payload), hashlib.sha256(payload).digest(),
               version, secver, int(time.time() if build_time is None else build_time), load_addr, load_addr if entry is None else entry, trial_ms,
@@ -252,8 +256,9 @@ def build_header(payload, name, version, secver=0, golden=False, trial_ms=0, tar
 
 
 def resign(hdr, secret):
+    """a new header signed by secret (an LMS signature is left in secret.pending_tlv)"""
     body = bytearray(hdr[:HDR_SIZE - 4])
-    flags = (struct.unpack_from("<I", body, 8)[0] & ~F_ECDSA) | F_SIGNED | (F_ECDSA if secret.ecdsa else 0)
+    flags = (struct.unpack_from("<I", body, 8)[0] & ~(F_ECDSA | F_LMS)) | secret.flags
     struct.pack_into("<I", body, 8, flags)
     struct.pack_into("<I", body, 136, secret.key_id)
     body[SIGNED_BYTES:] = secret.sign(bytes(body[:SIGNED_BYTES]))
@@ -281,12 +286,17 @@ def image_file(path):
     if not h["crc_ok"]:
         problems.append("header CRC mismatch")
     payload = img[h["payload_offset"]:h["payload_offset"] + h["payload_size"]]
-    h["envelope"] = None
-    if h["flags"] & F_ENCRYPTED:
-        try:
+    h["envelope"] = h["lms_sig"] = None
+    try:
+        tl = tlvs_of(img)
+        if h["flags"] & F_ENCRYPTED:
             h["envelope"] = envelope_of(img)
-        except ValueError as e:
-            problems.append(str(e))
+        if h["flags"] & F_LMS:
+            h["lms_sig"] = lms_sig_of(img)
+        elif TLV_LMS in tl:
+            problems.append("an LMS signature in the header sector, but the header doesn't say LMS")
+    except ValueError as e:
+        problems.append(str(e))
     if len(payload) != h["payload_size"]:
         problems.append("file shorter than the payload")
     elif not h["flags"] & F_ENCRYPTED and hashlib.sha256(payload).digest() != h["sha256"]:
@@ -294,14 +304,49 @@ def image_file(path):
     return img, h, payload, problems
 
 
+def tlv(t, data):
+    return struct.pack("<BBH", t, 0, len(data)) + data
+
+
+def tlvs_of(img):
+    """The header sector's TLV list (offset 256..): {type: whole TLV}. Only a key envelope and an
+    LMS signature may be there, each once, then 0xFF to the end of the sector (as the board checks)."""
+    out, at = {}, HDR_SIZE
+    while at < PAYLOAD_OFF and img[at] != 0xFF:
+        if PAYLOAD_OFF - at < 4:
+            raise ValueError("header sector: a TLV cut short")
+        t, z, n = struct.unpack_from("<BBH", img, at)
+        if z or at + 4 + n > PAYLOAD_OFF:
+            raise ValueError("header sector: a malformed TLV at +%d" % at)
+        if t not in (enc.TLV_X25519, TLV_LMS) or t in out:
+            raise ValueError("header sector: TLV type 0x%02x %s" % (t, "twice" if t in out else "unknown"))
+        out[t] = img[at:at + 4 + n]
+        at += 4 + n
+    if img[at:PAYLOAD_OFF].strip(b"\xff"):
+        raise ValueError("header sector not blank after its TLVs")
+    return out
+
+
+def header_sector(hdr, tlvs=b""):
+    if len(tlvs) > TLV_AREA:
+        die("the header sector has room for %d bytes of TLVs, these are %d" % (TLV_AREA, len(tlvs)))
+    return hdr + tlvs + b"\xff" * (TLV_AREA - len(tlvs))
+
+
 def envelope_of(img):
-    """An encrypted image's key envelope: a TLV at offset 256 of the header sector, 0xFF after it"""
-    t, z, n = struct.unpack_from("<BBH", img, HDR_SIZE)
-    if t != enc.TLV_X25519 or z or n not in (80, 96):
+    """An encrypted image's key envelope (TLV 0x33, head included)"""
+    e = tlvs_of(img).get(enc.TLV_X25519)
+    if not e or len(e) - 4 not in (80, 96):
         raise ValueError("encrypted, but no key envelope after the header")
-    if img[HDR_SIZE + 4 + n:PAYLOAD_OFF].strip(b"\xff"):
-        raise ValueError("header sector not blank after the key envelope")
-    return img[HDR_SIZE:HDR_SIZE + 4 + n]
+    return e
+
+
+def lms_sig_of(img):
+    """An LMS-signed image's signature (without the TLV head)"""
+    t = tlvs_of(img).get(TLV_LMS)
+    if not t:
+        raise ValueError("LMS-signed, but no LMS signature in the header sector")
+    return t[4:]
 
 
 def not_encrypted(h, what):
@@ -311,19 +356,47 @@ def not_encrypted(h, what):
 
 
 class Secret:
-    """A signing key: Ed25519 (file: 64 hex digits) or ECDSA P-256 (file: "p256:" + 64 hex digits)."""
+    """A signing key: Ed25519 (file: 64 hex digits), ECDSA P-256 (file: "p256:" + 64 hex digits)
+    or LMS (a JSON key file from keygen --type lms; raw = mb_lms.PrivateKey, stateful)."""
 
     def __init__(self, kind, raw):
         self.kind, self.raw = kind, raw
         self.ecdsa = kind == "p256"
-        self.public = p256.public_key(raw) if self.ecdsa else ed25519.public_key(raw)
-        self.key_id = struct.unpack("<I", self.public[:4])[0]      # the first 4 bytes of the public key
+        self.lms = kind == "lms"
+        self.pending_tlv = b""
+        if self.lms:
+            self.public = raw.public
+            self.key_id = lms.key_id(self.public)                  # the first 4 bytes of I
+        else:
+            self.public = p256.public_key(raw) if self.ecdsa else ed25519.public_key(raw)
+            self.key_id = struct.unpack("<I", self.public[:4])[0]  # the first 4 bytes of the public key
+
+    @property
+    def flags(self):
+        return F_SIGNED | (F_ECDSA if self.ecdsa else 0) | (F_LMS if self.lms else 0)
+
+    def describe(self):
+        if self.lms:
+            return "LMS key %08x (%s, %d signatures left)" % (self.key_id, lms.describe(self.public), self.raw.remaining)
+        return "%s key %s" % (self.kind, self.public[:4].hex())
 
     def sign(self, msg):
+        """the header's 64-byte signature field; an LMS signature goes to pending_tlv (the field: zeros)"""
+        if self.lms:
+            try:
+                self.pending_tlv = tlv(TLV_LMS, self.raw.sign(msg))
+            except ValueError as e:                 # used up, or a damaged key file
+                die(str(e))
+            return b"\0" * 64
         return p256.sign(self.raw, msg) if self.ecdsa else ed25519.sign(self.raw, msg)
 
 
 def read_secret(path):
+    if lms.is_private_key_file(path):
+        try:
+            return Secret("lms", lms.PrivateKey(path))
+        except (ValueError, KeyError) as e:
+            die("%s: %s" % (path, e))
     s = open(path).read().strip()
     if s.startswith("p256:"):
         raw = bytes.fromhex(s[5:])
@@ -334,16 +407,21 @@ def read_secret(path):
 
 
 def read_public(path):
-    """-> (kind, key): 64 hex digits Ed25519, 128 hex digits P-256 (X || Y)"""
+    """-> (kind, key): hex Ed25519 (32 bytes), P-256 (64, X || Y) or LMS (56/48, or one-level HSS);
+    a binary LMS / HSS public key file (as hash-sigs or pyhsslms write) works too"""
+    raw = open(path, "rb").read()
     try:
-        k = bytes.fromhex(open(path).read().split()[0])
-    except (ValueError, IndexError):
-        die("%s: expected a hex public key" % path)
+        k = bytes.fromhex(raw.decode().split()[0])
+    except (ValueError, IndexError, UnicodeDecodeError):
+        k = raw
     if len(k) == 32:
         return "ed25519", k
     if len(k) == 64:
         return "p256", k
-    die("%s: a public key is 32 (Ed25519) or 64 (P-256) bytes" % path)
+    try:
+        return "lms", lms.parse_public(k)
+    except ValueError:
+        die("%s: a public key is Ed25519 (32 bytes), P-256 (64) or LMS (56)" % path)
 
 
 def read_key(path):
@@ -443,7 +521,7 @@ def cmd_pack(a):
         key = os.urandom(getattr(a, "encrypt_keylen", 128) // 8)
         env = enc.wrap(enc.load_key(encrypt), key)
         payload = enc.aes_ctr(key, payload)
-    img = hdr + env + b"\xff" * (PAYLOAD_OFF - HDR_SIZE - len(env)) + payload
+    img = header_sector(hdr, (secret.pending_tlv if secret else b"") + env) + payload
     out = a.output or os.path.splitext(a.input)[0] + ".mimg"
     open(out, "wb").write(img)
     print("%s: %s v%s, %s %s%s, %d bytes, sha256 %s%s%s%s" % (
@@ -451,6 +529,8 @@ def cmd_pack(a):
         " (golden)" if a.golden else "", len(payload), plain_sha[:16],
         ", handoff @0x%08x" % handoff if handoff else "", ", signed" if secret else "",
         ", encrypted (AES-%d)" % ((len(env) - 68) * 8) if encrypt else ""))
+    if secret and secret.lms:
+        print("signed with " + secret.describe())
 
 
 def cmd_info(a):
@@ -469,11 +549,19 @@ def cmd_info(a):
     print("built     %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(h["build_time"])))
     if h["flags"] & F_SIGNED:
         line = "signed    key %08x" % h["key_id"]
-        line += " (%s)" % ("ECDSA P-256" if h["flags"] & F_ECDSA else "Ed25519")
+        is_lms = bool(h["flags"] & F_LMS)
+        sig = h["lms_sig"]
+        if is_lms:
+            line += " (LMS%s)" % (", %d-byte signature, leaf %d" % (len(sig), struct.unpack(">I", sig[:4])[0]) if sig else "")
+        else:
+            line += " (%s)" % ("ECDSA P-256" if h["flags"] & F_ECDSA else "Ed25519")
         if a.pub:
             kind, pub = read_public(a.pub)
-            if (kind == "p256") != bool(h["flags"] & F_ECDSA):
+            want = "lms" if is_lms else "p256" if h["flags"] & F_ECDSA else "ed25519"
+            if kind != want:
                 ok = False
+            elif kind == "lms":
+                ok = bool(sig) and lms.key_id(pub) == h["key_id"] and lms.verify(pub, img[:SIGNED_BYTES], sig)
             elif kind == "p256":
                 ok = p256.verify(pub, img[:SIGNED_BYTES], h["signature"])
             else:
@@ -511,9 +599,11 @@ def cmd_sign(a):
     if problems:
         die("refusing to sign a broken image: " + ", ".join(problems))
     secret = read_secret(a.key)
-    img = resign(img[:HDR_SIZE], secret) + img[HDR_SIZE:]
+    hdr = resign(img[:HDR_SIZE], secret)
+    keep = tlvs_of(img).get(enc.TLV_X25519, b"")             # an envelope stays; an old LMS signature goes
+    img = header_sector(hdr, secret.pending_tlv + keep) + img[PAYLOAD_OFF:]
     open(a.output or a.image, "wb").write(img)
-    print("signed %s with %s key %s" % (a.output or a.image, secret.kind, secret.public[:4].hex()))
+    print("signed %s with %s" % (a.output or a.image, secret.describe()))
 
 
 def cmd_keygen(a):
@@ -521,6 +611,31 @@ def cmd_keygen(a):
     if os.path.exists(base + ".key") and not a.force:
         die("%s.key exists (--force to replace it; images signed with it would stop booting)" % base)
     os.makedirs(os.path.dirname(base) or ".", exist_ok=True)
+    if a.type == "lms":
+        if os.path.exists(base + ".key"):
+            os.remove(base + ".key")                               # (--force)
+        t0 = time.time()
+        leaves = 1 << a.lms_height
+        k = lms.generate(base + ".key", a.lms_height, a.lms_w,
+                         progress=lambda q, n: print("\r  building the tree: %d/%d leaves" % (q, n), end="", flush=True))
+        print("\r  %d one-time keys in %.0f s%s" % (leaves, time.time() - t0, " " * 20))
+        pub = k.public
+        open(base + ".pub", "w").write(pub.hex() + "\n")
+        with open(base + "_keys.h", "w") as f:
+            f.write("/* MimiBoot trusted keys: generated by mbtool keygen. Build with -DMB_KEYS_HEADER=... */\n")
+            f.write("#define MB_TRUSTED_LMS_KEY_COUNT 1\n#define MB_TRUSTED_LMS_KEYS { { %s } }\n"
+                    % ", ".join("0x%02x" % b for b in pub))
+        gi = os.path.join(os.path.dirname(base) or ".", ".gitignore")
+        lines = open(gi).read().split() if os.path.exists(gi) else []
+        for pat in ("*.key", "*.key.tree"):
+            if pat not in lines:
+                open(gi, "a").write(pat + "\n")
+        print("secret %s.key  STATEFUL: it counts the signatures it has made. Never copy it, restore it from a\n"
+              "                 backup or sign from two machines with it: each of those reuses one-time keys.\n"
+              "public %s.pub  key id %08x, %s, %d signatures, %d-byte signature\n"
+              "build  %s_keys.h (or put the .pub line in mimiconf's KEYS file; turn on LMS)"
+              % (base, base, k.key_id, lms.describe(pub), leaves, lms.sig_len(k.lt, k.ot), base))
+        return
     if a.type == "x25519":
         secret = os.urandom(32)
         open(base + ".key", "w").write(secret.hex() + "\n")
@@ -711,10 +826,14 @@ def send_image(s, img, payload, ready_timeout=10):
         die("device refused: " + ANSI.sub("", out)[-300:])
     max_frame, where = int(m.group(1)), m.group(2)
     s.write(b"H" + img[:HDR_SIZE])
-    out, m = read_until(s, r"MB (OK|KEY|ERR[^\r\n]*)\r?\n", 180)    # erasing a big slot takes a while
+    out, m = read_until(s, r"MB (OK|KEY|SIG|ERR[^\r\n]*)\r?\n", 180)    # erasing a big slot takes a while
     if m and m.group(1) == "KEY":                                   # an encrypted image: the envelope next
         env = envelope_of(img)
         s.write(b"K" + struct.pack("<H", len(env)) + env + struct.pack("<I", zlib.crc32(env) & 0xFFFFFFFF))
+        out, m = read_until(s, r"MB (OK|SIG|ERR[^\r\n]*)\r?\n", 180)
+    if m and m.group(1) == "SIG":                                   # LMS-signed: the signature next
+        sig = lms_sig_of(img)
+        s.write(b"S" + struct.pack("<H", len(sig)) + sig + struct.pack("<I", zlib.crc32(sig) & 0xFFFFFFFF))
         out, m = read_until(s, r"MB (OK|ERR[^\r\n]*)\r?\n", 180)
     if not m or m.group(1) != "OK":
         die("header rejected: " + (m.group(0) if m else out[-200:]))
@@ -991,9 +1110,14 @@ def main():
     p = sub.add_parser("sign"); p.add_argument("image"); p.add_argument("--key", required=True); p.add_argument("-o", "--output")
     p.set_defaults(fn=cmd_sign)
     p = sub.add_parser("keygen"); p.add_argument("--out", default="keys/mimiboot"); p.add_argument("--force", action="store_true")
-    p.add_argument("--type", choices=["ed25519", "p256", "x25519"], default="ed25519",
-                   help="ed25519 (default) or p256 (ECDSA P-256: boards built with ECDSA) signing keys; "
+    p.add_argument("--type", choices=["ed25519", "p256", "lms", "x25519"], default="ed25519",
+                   help="ed25519 (default), p256 (ECDSA P-256: boards built with ECDSA) or lms (hash-based, "
+                        "post-quantum; boards built with LMS) signing keys; "
                         "x25519: a board's decryption key (ENC_KEY) for encrypted images")
+    p.add_argument("--lms-height", type=int, choices=[5, 10, 15, 20], default=10,
+                   help="LMS: 2^H signatures per key (default 10: 1024; each step up takes 32x longer to make)")
+    p.add_argument("--lms-w", type=int, choices=[4, 8], default=4,
+                   help="LMS Winternitz width: 4 (default; faster checks, 2.5 KB signatures) or 8 (1.4 KB, ~8x slower checks)")
     p.set_defaults(fn=cmd_keygen)
     p = sub.add_parser("uf2"); p.add_argument("image"); p.add_argument("--slot", required=True); p.add_argument("-o", "--output")
     p.set_defaults(fn=cmd_uf2)

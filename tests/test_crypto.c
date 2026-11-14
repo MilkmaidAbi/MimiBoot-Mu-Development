@@ -22,6 +22,89 @@ static void unhex(const char* h, uint8_t* out) {
 
 static void tohex(const uint8_t* b, int n, char* out) { for (int i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", b[i]); }
 
+#if MB_FEAT_LMS
+#include "tests/gen_lms.h"
+extern uint32_t mb_sha256_blocks;
+
+static size_t unhex_n(const char* h, uint8_t* out, size_t cap) {
+    size_t n = strlen(h) / 2;
+    if (n > cap) return 0;
+    unhex(h, out);
+    return n;
+}
+
+typedef struct { const uint8_t* sig; uint32_t len; int fail_at; } lms_rd_t;    /* a reader that can fail */
+static int failing_read(void* ctx, uint32_t off, void* buf, size_t n) {
+    lms_rd_t* r = ctx;
+    if (r->fail_at >= 0 && off + n > (uint32_t)r->fail_at) return MB_E_IO;
+    if (off + n > r->len) return MB_E_CORRUPT;
+    memcpy(buf, r->sig + off, n);
+    return MB_OK;
+}
+
+// LMS against the published vectors (RFC 8554 Appendix F, NIST ACVP), signatures from
+// pyhsslms (an independent implementation), then what a verifier must refuse.
+static void test_crypto_lms(void) {
+    printf("LMS (RFC 8554 F, NIST ACVP sigVer/sigGen, pyhsslms): %u vectors\n",
+           (unsigned)(sizeof(lms_vectors) / sizeof(lms_vectors[0])));
+    static uint8_t pub[64], msg[8192], sig[9000], bad[9000];
+    for (unsigned i = 0; i < sizeof(lms_vectors) / sizeof(lms_vectors[0]); i++) {
+        size_t pn = unhex_n(lms_vectors[i].pub, pub, sizeof(pub));
+        size_t mn = unhex_n(lms_vectors[i].msg, msg, sizeof(msg));
+        size_t sn = unhex_n(lms_vectors[i].sig, sig, sizeof(sig));
+        CK(pn && sn && strlen(lms_vectors[i].msg) / 2 == mn, "%s: vector too big for the test buffers", lms_vectors[i].src);
+        mb_lms_ram_t r = {sig, (uint32_t)sn};
+        bool ok = mb_lms_pub_len(pub) == pn && mb_lms_verify(msg, mn, pub, mb_lms_read_ram, &r, (uint32_t)sn);
+        CK(ok == lms_vectors[i].ok, "%s: expected %s, got %s", lms_vectors[i].src, lms_vectors[i].ok ? "valid" : "invalid",
+           ok ? "accepted" : "refused");
+        if (!lms_vectors[i].ok || !ok) continue;
+        // what must fail: any flipped bit (q, type, C, a chain value, the lms type, the path), a
+        // changed message, a wrong length, a reader error, a leaf index past the tree
+        uint32_t spots[] = {3, 7, 9, (uint32_t)sn / 2, (uint32_t)sn - 1, (uint32_t)sn - 33};
+        for (unsigned k = 0; k < sizeof(spots) / sizeof(spots[0]); k++) {
+            memcpy(bad, sig, sn);
+            bad[spots[k]] ^= 0x10;
+            mb_lms_ram_t b = {bad, (uint32_t)sn};
+            CK(!mb_lms_verify(msg, mn, pub, mb_lms_read_ram, &b, (uint32_t)sn), "%s: bit flip at %u accepted",
+               lms_vectors[i].src, spots[k]);
+        }
+        msg[0] ^= 1;
+        CK(!mb_lms_verify(msg, mn, pub, mb_lms_read_ram, &r, (uint32_t)sn), "%s: changed message accepted", lms_vectors[i].src);
+        msg[0] ^= 1;
+        CK(!mb_lms_verify(msg, mn, pub, mb_lms_read_ram, &r, (uint32_t)sn - 1), "%s: short length accepted", lms_vectors[i].src);
+        lms_rd_t f = {sig, (uint32_t)sn, (int)sn / 3};
+        CK(!mb_lms_verify(msg, mn, pub, failing_read, &f, (uint32_t)sn), "%s: read error accepted", lms_vectors[i].src);
+        memcpy(bad, sig, sn);
+        unsigned h = pub[3] >= 0x0A ? 5u * (pub[3] - 9u) : 5u * (pub[3] - 4u);
+        uint32_t q = 1u << h;
+        bad[0] = (uint8_t)(q >> 24); bad[1] = (uint8_t)(q >> 16); bad[2] = (uint8_t)(q >> 8); bad[3] = (uint8_t)q;
+        mb_lms_ram_t b = {bad, (uint32_t)sn};
+        CK(!mb_lms_verify(msg, mn, pub, mb_lms_read_ram, &b, (uint32_t)sn), "%s: q = 2^h accepted", lms_vectors[i].src);
+        // a different key (another I) with the same signature
+        pub[8] ^= 1;
+        CK(!mb_lms_verify(msg, mn, pub, mb_lms_read_ram, &r, (uint32_t)sn), "%s: other key accepted", lms_vectors[i].src);
+        pub[8] ^= 1;
+        // what a check costs: SHA-256 blocks (one per chain step), for the parameter sets offered
+        if (pn == 56 && (pub[7] == 3 || pub[7] == 4) && (pub[3] == 5 || pub[3] == 6)) {
+            uint32_t before = mb_sha256_blocks;
+            mb_lms_verify(msg, mn, pub, mb_lms_read_ram, &r, (uint32_t)sn);
+            printf("  %-34s H%-2u W%u: %u SHA-256 blocks\n", lms_vectors[i].src, h, pub[7] == 3 ? 4u : 8u,
+                   (unsigned)(mb_sha256_blocks - before));
+        }
+    }
+    // types that aren't LMS-with-SHA-256, or an n/m mismatch
+    memset(pub, 0, sizeof(pub));
+    pub[3] = 0x0F; pub[7] = 3;
+    CK(mb_lms_sig_len(pub) == 0, "unknown LMS type has a signature length");
+    pub[3] = 5; pub[7] = 7;           // m = 32 with n = 24
+    CK(mb_lms_sig_len(pub) == 0, "mixed n/m accepted");
+    pub[3] = 6; pub[7] = 3;
+    CK(mb_lms_sig_len(pub) == 2508, "H10/W4 signature size");
+    pub[8] = 0x11; pub[9] = 0x22; pub[10] = 0x33; pub[11] = 0x44;
+    CK(mb_lms_key_id(pub) == 0x44332211u, "key id = the first 4 bytes of I, LE");
+}
+#endif
+
 #if MB_FEAT_ENC
 #include "tests/gen_enc.h"
 
@@ -247,5 +330,8 @@ void test_crypto(void) {
 #endif
 #if MB_FEAT_ENC
     test_crypto_enc();
+#endif
+#if MB_FEAT_LMS
+    test_crypto_lms();
 #endif
 }

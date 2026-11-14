@@ -60,6 +60,7 @@ int mb_image_read_header(const mb_port_t* p, int slot, mb_slot_info_t* out) {
         out->fmt = MB_FMT_NATIVE;
         out->hash_off = out->hdr.payload_offset;
         out->hash_len = out->hdr.payload_size;
+        out->tlv_flash = r->offset + MB_IMG_HDR_SIZE;
         return MB_OK;
     }
     memset(out, 0, sizeof(*out));
@@ -126,6 +127,7 @@ int mb_stage1_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
     mb_port_t q = *p;
     q.keys = p->stage1_keys;
     q.p256_keys = p->stage1_p256_keys;
+    q.lms_keys = p->stage1_lms_keys;
     return mb_image_check_sig(&q, info);
 }
 
@@ -175,8 +177,14 @@ bool mb_key_revoked(const mb_port_t* p, uint32_t key_id) {
 
 #if MB_FEAT_SIGNATURES && MB_FEAT_REVOKE
 // Keys in one family (image keys, or stage-1 keys) still trusted, leaving `except` out
-static int usable(const mb_port_t* p, const mb_keyring_t* ed, const mb_keyring_p256_t* ec, uint32_t except, bool* has) {
+static int usable(const mb_port_t* p, const mb_keyring_t* ed, const mb_keyring_p256_t* ec, const mb_keyring_lms_t* lms,
+                  uint32_t except, bool* has) {
     int n = 0;
+    for (int k = 0; MB_FEAT_LMS && lms && k < lms->count; k++) {
+        uint32_t id = mb_lms_key_id(lms->keys[k]);
+        if (id == except) *has = true;
+        else if (!mb_key_revoked(p, id)) n++;
+    }
     for (int k = 0; ed && k < ed->count; k++) {
         uint32_t id = key_id_of(ed->keys[k]);
         if (id == except) *has = true;
@@ -195,8 +203,8 @@ int mb_key_revoke(const mb_port_t* p, uint32_t key_id, const uint8_t sig[64]) {
 #if MB_FEAT_SIGNATURES && MB_FEAT_REVOKE
     if (!p->revoke_keys || !p->revoke_keys->count || !p->floor) return MB_E_UNSUPP;
     bool in_image = false, in_s1 = false;
-    int left_image = usable(p, p->keys, p->p256_keys, key_id, &in_image);
-    int left_s1 = usable(p, p->stage1_keys, p->stage1_p256_keys, key_id, &in_s1);
+    int left_image = usable(p, p->keys, p->p256_keys, p->lms_keys, key_id, &in_image);
+    int left_s1 = usable(p, p->stage1_keys, p->stage1_p256_keys, p->stage1_lms_keys, key_id, &in_s1);
     if (!in_image && !in_s1) return MB_E_BADARG;                    // not a key this board trusts
     if ((in_image && !left_image) || (in_s1 && !left_s1)) return MB_E_REFUSED;     // the last one: nothing could be signed again
     if (mb_key_revoked(p, key_id)) return MB_OK;
@@ -216,8 +224,85 @@ int mb_key_revoke(const mb_port_t* p, uint32_t key_id, const uint8_t sig[64]) {
 #endif
 }
 
+int mb_tlv_find(const uint8_t* area, size_t n, uint8_t type, size_t* at, size_t* len) {
+    size_t i = 0;
+    bool found = false, seen_env = false, seen_lms = false;
+    while (i < n && area[i] != 0xFF) {
+        if (n - i < 4 || area[i + 1] != 0) return MB_E_CORRUPT;
+        size_t l = (size_t)area[i + 2] | (size_t)area[i + 3] << 8;
+        if (l > n - i - 4) return MB_E_CORRUPT;
+        bool* seen = area[i] == MB_ENC_TLV_X25519 ? &seen_env : area[i] == MB_TLV_LMS_SIG ? &seen_lms : NULL;
+        if (!seen || *seen) return MB_E_CORRUPT;            // unknown, or twice
+        *seen = true;
+        if (area[i] == type) { *at = i + 4; *len = l; found = true; }
+        i += 4 + l;
+    }
+    for (; i < n; i++)
+        if (area[i] != 0xFF) return MB_E_CORRUPT;
+    return found ? MB_OK : MB_E_BADARG;
+}
+
+#if MB_FEAT_LMS
+typedef struct { const mb_port_t* p; uint32_t base, len; } flash_sig_t;
+static int read_flash_sig(void* ctx, uint32_t off, void* buf, size_t n) {
+    const flash_sig_t* f = ctx;
+    if (off > f->len || n > f->len - off) return MB_E_CORRUPT;
+    return f->p->flash_read(f->base + off, buf, n);
+}
+
+// The LMS signature of an image in a slot: walk the header sector's TLV list in flash
+static int lms_in_flash(const mb_port_t* p, uint32_t tlv, flash_sig_t* out) {
+    uint32_t at = 0;
+    while (at + 4 <= MB_TLV_AREA) {
+        uint8_t h[4];
+        if (p->flash_read(tlv + at, h, 4) != MB_OK) return MB_E_IO;
+        if (h[0] == 0xFF) break;
+        uint32_t l = (uint32_t)h[2] | (uint32_t)h[3] << 8;
+        if (h[1] != 0 || l > MB_TLV_AREA - at - 4) return MB_E_CORRUPT;
+        if (h[0] == MB_TLV_LMS_SIG) { out->p = p; out->base = tlv + at + 4; out->len = l; return MB_OK; }
+        at += 4 + l;
+    }
+    return MB_E_BADARG;
+}
+
+static int lms_check(const mb_port_t* p, mb_slot_info_t* info) {
+    const mb_image_hdr_t* h = &info->hdr;
+    const mb_keyring_lms_t* ring = p->lms_keys;
+    if (!ring || !ring->count) {
+        if (p->require_signature) return MB_E_SIGNATURE;
+        info->sig_state = 1;
+        info->proof_sig = MB_PROOF_UNSIGNED;    // nothing to check it against: counts as unsigned
+        return MB_OK;
+    }
+    if (info->fmt != MB_FMT_NATIVE && info->fmt != MB_FMT_NONE) return MB_E_SIGNATURE;
+    mb_lms_ram_t ram = {info->sig_ram, info->sig_ram_len};
+    flash_sig_t fl;
+    mb_lms_read_t rd;
+    void* ctx;
+    uint32_t len;
+    if (info->sig_ram) {
+        rd = mb_lms_read_ram; ctx = &ram; len = info->sig_ram_len;
+    } else {
+        if (!info->tlv_flash || lms_in_flash(p, info->tlv_flash, &fl) != MB_OK) return MB_E_SIGNATURE;
+        rd = read_flash_sig; ctx = &fl; len = fl.len;
+    }
+    for (int k = 0; k < ring->count; k++) {
+        const uint8_t* key = ring->keys[k];
+        if (mb_lms_key_id(key) != h->key_id || mb_key_revoked(p, h->key_id)) continue;
+        if (mb_lms_verify(h, MB_IMG_SIGNED_BYTES, key, rd, ctx, len)) {
+            info->sig_state = 1;
+            info->proof_sig = MB_PROOF_SIG;
+            return MB_OK;
+        }
+    }
+    return MB_E_SIGNATURE;
+}
+#endif
+
 // Signed: the key named by key_id must be in the build's keyring and the
 // signature must verify. Unsigned: fine unless the build requires signatures.
+// LMS (MB_IMG_F_LMS): against the LMS keys only, the signature from the header
+// sector (or the upload's, in RAM).
 // Ed25519 (the default) signs the first MB_IMG_SIGNED_BYTES of the header;
 // ECDSA P-256 (MB_IMG_F_ECDSA) signs their SHA-256. MCUboot images: the
 // signature is over the image's 32-byte SHA-256 digest (imgtool's default,
@@ -230,6 +315,15 @@ int mb_image_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
     if (!(h->flags & MB_IMG_F_SIGNED)) {
         if (!p->require_signature) { info->sig_state = 1; info->proof_sig = MB_PROOF_UNSIGNED; }
         return info->sig_state > 0 ? MB_OK : MB_E_SIGNATURE;
+    }
+    if (h->flags & MB_IMG_F_LMS) {
+#if MB_FEAT_LMS
+        return lms_check(p, info);
+#else
+        // built without LMS: like any signature this build can't check, it counts as unsigned
+        if (!p->require_signature) { info->sig_state = 1; info->proof_sig = MB_PROOF_UNSIGNED; }
+        return info->sig_state > 0 ? MB_OK : MB_E_SIGNATURE;
+#endif
     }
 #if MB_FEAT_SIGNATURES
     bool ecdsa = (h->flags & MB_IMG_F_ECDSA) != 0;
@@ -324,6 +418,25 @@ int mb_slot_write(const mb_port_t* p, int slot, uint32_t payload_off, const void
         int rc = p->flash_program(r->offset + start - at, buf, page);
         if (rc != MB_OK) return rc;
         start += n; src += n; len -= n;
+    }
+    return MB_OK;
+}
+
+// An LMS signature into the (erased) header sector's TLV list: TLV head + signature,
+// page by page, each page programmed once (write-once flash units), the rest 0xFF.
+int mb_slot_write_lms(const mb_port_t* p, int slot, const uint8_t* sig, size_t len) {
+    if (slot < 0 || slot >= p->layout->n_slots || len > MB_TLV_AREA - 4) return MB_E_BADARG;
+    uint32_t page = p->layout->page_size;
+    uint8_t buf[256];
+    if (page > sizeof(buf) || MB_IMG_HDR_SIZE % page) return MB_E_UNSUPP;
+    const uint8_t head[4] = {MB_TLV_LMS_SIG, 0, (uint8_t)len, (uint8_t)(len >> 8)};
+    for (uint32_t at = 0; at < 4 + len; at += page) {
+        for (uint32_t i = 0; i < page; i++) {
+            uint32_t k = at + i;
+            buf[i] = k < 4 ? head[k] : k - 4 < len ? sig[k - 4] : 0xFF;
+        }
+        int rc = p->flash_program(p->layout->slot[slot].offset + MB_IMG_HDR_SIZE + at, buf, page);
+        if (rc != MB_OK) return rc;
     }
     return MB_OK;
 }

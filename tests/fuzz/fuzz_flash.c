@@ -11,6 +11,7 @@
  * full unit, whatever the fuzzer put in it).
  */
 #include "tests/sim_port.h"
+#include "tests/gen_signed.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -62,6 +63,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* d, size_t n) {
     sim_two_stage((d[0] & 4) != 0, NULL);
     sim_store_two((d[0] & 8) != 0);
     sim_port.require_signature = (d[0] & 2) != 0;
+    sim_lms((d[0] & 16) ? lms_public : NULL, NULL);     // bit 4: LMS keys (signatures read from slot header sectors)
     size_t i = 1;
     for (size_t r = 0; r < sizeof(region) / sizeof(region[0]) && i < n; r++) {
         size_t k = n - i < region[r].len ? n - i : region[r].len;

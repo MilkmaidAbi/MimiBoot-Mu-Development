@@ -382,6 +382,52 @@ def two_stage_checks(db):
         c5.set("SIGNATURES", True)
         c5.set("CONSOLE_AUTH", True)
         check(not any("Cortex-M3" in m for m in errs(c5)), "Cortex-M3 with the console locked: allowed")
+    lms_checks(db, lay)
+
+
+def lms_key_file(path: Path, w: int = 4, ed: bool = False) -> Path:
+    """a KEYS file with one LMS public key (H5, made from a fixed seed) and maybe an Ed25519 one"""
+    import mb_lms
+    lt, ot = mb_lms.lms_type_for(5, w)
+    pub, _ = mb_lms.public_from_seed(lt, ot, bytes(range(16)), bytes(range(32)))
+    path.write_text("# LMS\n" + pub.hex() + "\n" + ("cd" * 32 + "\n" if ed else ""))
+    return path
+
+
+def lms_checks(db, lay):
+    """LMS keys: post-quantum only builds (no Ed25519 code), the key macros, the warnings"""
+    errs = lambda c: [m for lvl, m in c.problems() if lvl == "error"]       # noqa: E731
+    warns = lambda c: [m for lvl, m in c.problems() if lvl == "warn"]       # noqa: E731
+    with tempfile.TemporaryDirectory() as td:
+        keys = lms_key_file(Path(td) / "lms.pub")
+        c = Config(db, "nucleo-f411re")
+        for k, v in (("SIGNATURES", False), ("LMS", True), ("KEYS", str(keys)), ("REQUIRE_SIGNATURE", True)):
+            c.set(k, v)
+        check(c.effective("REQUIRE_SIGNATURE") and c.effective("KEYS"), "with LMS on, KEYS and required signatures need no Ed25519")
+        check(not errs(c) and not any("LMS" in m for m in warns(c)), f"an LMS-only build: accepted ({errs(c)} {warns(c)})")
+        h = gen.mcu_header(c, lay, 0x3000)
+        check("#define MB_FEAT_SIGNATURES 0" in h and "#define MB_FEAT_LMS 1" in h and "#define MB_TRUSTED_LMS_KEY_COUNT 1" in h,
+              "the header: no Ed25519, LMS on, the key")
+        check("#define MB_LMS_SIG_MAX 2348" in h, "the upload buffer sized for the key (H5 / W4: 2348 bytes)")
+        c.set("LMS", False)
+        check(not c.effective("KEYS"), "LMS off and Ed25519 off: no keys at all")
+        c.set("SIGNATURES", True)
+        try:
+            gen.key_macros(c)
+            check(False, "an LMS key with LMS off: refused")
+        except ValueError as e:
+            check("turn on LMS" in str(e), "an LMS key with LMS off: refused")
+        mixed = lms_key_file(Path(td) / "mixed.pub", ed=True)
+        c.set("LMS", True)
+        c.set("KEYS", str(mixed))
+        check(any("quantum" in m for m in warns(c)), "LMS next to an Ed25519 key: warned")
+        c.set("KEYS", str(Path(td) / "lms.pub"))
+        c.set("SIGNATURES", False)
+        c.set("TWO_STAGE", True)
+        c.set("S1_KEYS", str(lms_key_file(Path(td) / "s1.pub", w=8)))
+        check(any("W8" in m for m in warns(c)), "a W8 stage-1 key: warned (stage 0 checks two copies every boot)")
+        h = gen.mcu_header(c, lay, 0x3000)
+        check("#define MB_S1_LMS_KEY_COUNT 1" in h and "#define MB_LMS_SIG_MAX 2348" in h, "stage-1 LMS keys in the header")
 
 
 def build_all():
@@ -453,7 +499,10 @@ def build_variants():
     for name in db.boards:
         if Config(db, name).t.build != "mcu":
             continue
-        variants = [("two-stage", {"TWO_STAGE": True}), ("smp", {"SMP": True})]
+        lms_keys = lms_key_file(out / "lms.pub") if not (out / "lms.pub").exists() else out / "lms.pub"
+        variants = [("two-stage", {"TWO_STAGE": True}), ("smp", {"SMP": True}),
+                    ("lms-only", {"SIGNATURES": False, "LMS": True, "KEYS": str(lms_keys), "REQUIRE_SIGNATURE": True,
+                                  "BOOT_VERIFY": "every-boot"})]
         if Config(db, name).t.get("vendor") == "samd":
             variants.append(("usb", {"CONSOLE_USB": True}))
         for variant, opts in variants:

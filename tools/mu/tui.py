@@ -178,7 +178,7 @@ class TuiState:
             cfg = self.cfg
             out += [("title", o.title), ("dim", f"MU_{o.id}" + (f"  ->  {o.macro}" if o.macro else ""))]
             if not cfg.enabled(o.id):
-                out.append(("warn", "not selectable: needs " + ", ".join(o.depends)))
+                out.append(("warn", "not selectable: needs " + ", ".join(d.replace("|", " or ") for d in o.depends)))
             out.append(("text", ""))
             out += [("text", para) for para in (o.help or o.title).split("\n")]
             out.append(("text", ""))
@@ -352,7 +352,8 @@ class TuiState:
     def activate(self, oid: str, space=False):
         o = self.db.options[oid]
         if not self.cfg.enabled(oid):
-            self.message = f"{oid} needs {', '.join(o.depends)}"
+            needs = ", ".join(d.replace("|", " or ") for d in o.depends)
+            self.message = f"{oid} needs {needs}"
             return None
         if self.cfg.locked(oid) is not None:
             self.message = f"{oid} is fixed on this board"

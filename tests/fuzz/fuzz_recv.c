@@ -6,6 +6,7 @@
  * clear) or as given.
  */
 #include "tests/sim_port.h"
+#include "tests/gen_signed.h"
 #include <string.h>
 
 static uint8_t script[1 << 18];
@@ -45,6 +46,10 @@ int LLVMFuzzerTestOneInput(const uint8_t* d, size_t n) {
     bool encrypted = (d[0] & 4) != 0;
     h.flags = encrypted ? (h.flags | MB_IMG_F_ENCRYPTED) : (h.flags & ~(uint32_t)MB_IMG_F_ENCRYPTED);
     sim_port.enc_key = (d[0] & 8) ? NULL : dev_key;
+    // bit 4: LMS-signed (an 'S' frame from the input); bit 5: the board has an LMS key
+    bool lms = (d[0] & 16) != 0;
+    h.flags = lms ? (h.flags | MB_IMG_F_LMS) : (h.flags & ~(uint32_t)MB_IMG_F_LMS);
+    sim_lms((d[0] & 32) ? lms_public : NULL, NULL);
     mb_image_seal(&h);
     sn = 0;
     put('H');
@@ -56,6 +61,17 @@ int LLVMFuzzerTestOneInput(const uint8_t* d, size_t n) {
         put('K');
         put((uint8_t)len);
         put(0);
+        for (size_t k = 0; k < len; k++) put(d[i + k]);
+        put32(raw_crc ? 0 : mb_crc32(0, d + i, len));
+        i += len;
+    }
+    if (lms && i + 2 <= n) {                            // 'S' len signature crc
+        size_t len = (size_t)(d[i] | d[i + 1] << 8) % (MB_LMS_SIG_MAX + 64);
+        i += 2;
+        if (len > n - i) len = n - i;
+        put('S');
+        put((uint8_t)len);
+        put((uint8_t)(len >> 8));
         for (size_t k = 0; k < len; k++) put(d[i + k]);
         put32(raw_crc ? 0 : mb_crc32(0, d + i, len));
         i += len;

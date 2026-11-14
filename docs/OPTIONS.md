@@ -174,9 +174,19 @@ Put the P-256 public keys (128 hex digits) in the KEYS file next to any Ed25519 
 
 C macro: `MB_FEAT_ECDSA`
 
+### `LMS`: LMS signatures (hash-based, post-quantum)
+
+default **off**. (full core)
+
+Accept images signed with LMS (RFC 8554, NIST SP 800-208): a signature scheme built on SHA-256 alone, so a quantum computer doesn't break it. CNSA 2.0 names it for firmware signing, and the EU's agreed-mechanisms list has it. Keys: 'mbtool keygen --type lms' (1024 signatures with the default H10, then a new key is needed); put the public key in the KEYS file, Ed25519 off if you want nothing a quantum computer could forge.
+
+LMS keys are stateful: each signature uses up one of the key's one-time keys. mbtool keeps count in the key file and saves it before a signature leaves; never copy that file or sign from two machines with it. The board side only verifies: about 2 KB of code (no Ed25519 needed), no extra RAM at boot (the signature is read from flash as it is checked), plus one signature-sized buffer (1.3-3 KB) for uploads. A check is ~600 SHA-256 blocks with W4 keys (the default), ~4400 with W8. Console unlock, signed configs and revocation statements stay Ed25519.
+
+C macro: `MB_FEAT_LMS`
+
 ### `REQUIRE_SIGNATURE`: Refuse unsigned images (secure boot)
 
-default **off**; needs `SIGNATURES`. (full core)
+default **off**; needs `SIGNATURES` or `LMS`. (full core)
 
 Only images signed by one of KEYS boot. Needs KEYS, and the hash on every boot.
 
@@ -184,9 +194,9 @@ C macro: `MB_REQUIRE_SIGNATURE`
 
 ### `KEYS`: Trusted public keys file
 
-default ****; needs `SIGNATURES`. (full core)
+default ****; needs `SIGNATURES` or `LMS`. (full core)
 
-A text file with one Ed25519 public key per line (64 hex digits): mbtool keygen writes keys/mimiboot.pub. Enter a path; quotes are fine.
+A text file with one public key per line: Ed25519 (64 hex digits, what mbtool keygen writes to keys/mimiboot.pub), P-256 (128, with ECDSA on) or LMS (112, with LMS on). Enter a path; quotes are fine.
 
 ### `REVOKE_KEYS`: Key revocation keys file (who may revoke a signing key)
 
@@ -504,13 +514,13 @@ Once a stage 1 with this security version has worked, stage 0 never starts one b
 
 ### `S1_KEYS`: Stage-1 public keys file
 
-default ****; needs `TWO_STAGE`, `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)
+default ****; needs `TWO_STAGE`, `SIGNATURES` or `LMS`. (full core; builds: STM32/nRF/SAMD)
 
-The keys stage 0 accepts a stage 1 from (Ed25519, or P-256 with ECDSA on), one per line. Keep them apart from KEYS: a leaked app key must not be enough to replace the bootloader. Required with REQUIRE_SIGNATURE.
+The keys stage 0 accepts a stage 1 from (Ed25519, P-256 with ECDSA on, or LMS with LMS on), one per line. LMS keys here make the bootloader update path post-quantum; prefer W4 keys (stage 0 checks both copies on every boot). Keep them apart from KEYS: a leaked app key must not be enough to replace the bootloader. Required with REQUIRE_SIGNATURE.
 
 ### `STAGE1_SIGN_KEY`: Sign stage-1 images with (secret key file)
 
-default ****; needs `TWO_STAGE`, `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)
+default ****; needs `TWO_STAGE`, `SIGNATURES` or `LMS`. (full core; builds: STM32/nRF/SAMD)
 
 mbtool keygen's .key file, used by the build to sign stage1-s1a.img and stage1-s1b.img. Empty: they are built unsigned (sign them later with mbtool sign --key).
 

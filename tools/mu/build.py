@@ -19,7 +19,7 @@ from . import gen
 from .model import ROOT, Config, parse_sectors, parse_size
 
 NIGHT_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
-              "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc"]
+              "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc", "mb_lms"]
 # a two-stage build's stage 0: check MimiBoot images, keep its records, start one
 STAGE0_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_floor", "mb_ecdsa", "mb_stage0"]
 VENDOR_SOURCES = {"stm32": ["port/stm32/stm32_flash.c", "port/stm32/stm32_periph.c"],
@@ -138,7 +138,7 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
     t = cfg.t
     cpu = t.get("cpu")
     ram, _ = gen.mcu_ram(cfg)
-    stack = 0x1800 if cfg.effective("SIGNATURES") else 0xC00
+    stack = 0x1800 if cfg.effective("SIGNATURES") else 0x1000 if cfg.effective("LMS") else 0xC00
     flash = parse_size(t.get("flash"))
     auto = str(cfg.effective("BOOT_SIZE")).lower() == "auto"
     out.mkdir(parents=True, exist_ok=True)
@@ -290,7 +290,8 @@ def _build_two_stage(cfg: Config, out: Path, gcc: str, recipe: dict, ram: int, s
     version = parse_version_text(str(cfg.effective("STAGE1_VERSION")))
     secver = int(cfg.effective("STAGE1_SECURITY") or 0)
     key = cfg.effective("STAGE1_SIGN_KEY")
-    secret = mbtool.read_secret(str(key)) if key and cfg.effective("SIGNATURES") else None
+    signing = cfg.effective("SIGNATURES") or cfg.effective("LMS")
+    secret = mbtool.read_secret(str(key)) if key and signing else None     # (an LMS key: two signatures per build)
     images, sz1 = {}, None
     for i, s in copies:
         name = f"stage1-{s.name}"
@@ -300,7 +301,7 @@ def _build_two_stage(cfg: Config, out: Path, gcc: str, recipe: dict, ram: int, s
         payload = (out / f"{name}.bin").read_bytes()
         hdr = mbtool.build_header(payload, "mimiboot-stage1", version, secver, target=t.chip_name[:15],
                                   arch=mbtool.ARCH_ARM, secret=secret, entry=s.offset + gen.NATIVE_HDR, stage1=True)
-        img = hdr + b"\xff" * (gen.NATIVE_HDR - len(hdr)) + payload
+        img = mbtool.header_sector(hdr, secret.pending_tlv if secret else b"") + payload
         (out / f"{name}.img").write_bytes(img)
         images[s.name] = img
     # what a new board gets: stage 0, a blank store, stage 1 in the first copy

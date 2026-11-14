@@ -233,9 +233,16 @@ int mb_client_install_begin(int slot, const mb_image_hdr_t *hdr) {
     memset(&tmp, 0, sizeof(tmp));
     tmp.hdr = *hdr;
     tmp.header_ok = true;
+    bool lms = (hdr->flags & MB_IMG_F_LMS) != 0;
+    if (lms) { // the signature handed over with mb_client_install_sig()
+        tmp.sig_ram = mb_upload_sig.buf;
+        tmp.sig_ram_len = mb_upload_sig.len;
+    }
     if (mb_image_check_sig(port, &tmp) != MB_OK)
         return MB_E_SIGNATURE; // it could never boot: don't wipe the slot for it
     int rc = mb_slot_erase(port, slot, hdr->payload_size);
+    if (rc == MB_OK && lms)
+        rc = mb_slot_write_lms(port, slot, mb_upload_sig.buf, mb_upload_sig.len);
     if (rc != MB_OK)
         return rc;
     inst.slot = slot;
@@ -296,7 +303,22 @@ int mb_client_install_end(void) {
     info.header_ok = true;
     if (mb_image_verify(port, inst.slot, &info) != MB_OK)
         return MB_E_CORRUPT; // slot stays empty
+    if (inst.hdr.flags & MB_IMG_F_LMS) { // what boots is the copy in flash: check that one
+        info.tlv_flash = port->layout->slot[inst.slot].offset + MB_IMG_HDR_SIZE;
+        if (mb_image_check_sig(port, &info) != MB_OK)
+            return MB_E_SIGNATURE;
+    }
     return mb_slot_write_header(port, inst.slot, &inst.hdr);
+}
+
+int mb_client_install_sig(const void *sig, size_t len) {
+    if (!MB_FEAT_LMS)
+        return MB_E_UNSUPP;
+    if (len > sizeof(mb_upload_sig.buf))
+        return MB_E_NOSPACE;
+    memcpy(mb_upload_sig.buf, sig, len);
+    mb_upload_sig.len = (uint16_t)len;
+    return MB_OK;
 }
 
 int mb_client_install_abort(void) {

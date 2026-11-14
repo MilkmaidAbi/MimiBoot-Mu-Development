@@ -42,6 +42,14 @@ typedef struct {
     const uint8_t (*keys)[64];
 } mb_keyring_p256_t;
 
+/* Trusted LMS keys (MB_FEAT_LMS): u32 lms type || u32 ots type || I[16] || T[1],
+ * 56 bytes (SHA-256/192 keys use the first 48) */
+#define MB_LMS_PUB_MAX 56
+typedef struct {
+    int count;
+    const uint8_t (*keys)[MB_LMS_PUB_MAX];
+} mb_keyring_lms_t;
+
 /* Protected rollback floors (core/mb_floor.c): one erase unit the running
  * image can't write (the port locks it), read and programmed through these
  * functions, which bypass the port's "never the bootloader region" check.
@@ -157,6 +165,10 @@ typedef struct mb_port {
     /* Optional Night services; runtime capability checks include silicon policy. */
     uint32_t (*capabilities)(void);
     int (*prepare_topology)(mb_topology_t profile);
+
+    /* MB_FEAT_LMS: hash-based (post-quantum) image keys, and the stage-1 ones (two-stage) */
+    const mb_keyring_lms_t* lms_keys;
+    const mb_keyring_lms_t* stage1_lms_keys;
 } mb_port_t;
 
 #endif

@@ -36,6 +36,28 @@ bool mb_ed25519_verify(const uint8_t sig[64], const void* msg, size_t len, const
 /* ECDSA P-256 over a SHA-256 digest (MB_FEAT_ECDSA): sig = r || s, pub = X || Y, big-endian */
 bool mb_ecdsa_p256_verify(const uint8_t sig[64], const uint8_t digest[32], const uint8_t pub[64]);
 
+/* ---- LMS signatures (MB_FEAT_LMS, core/mb_lms.c) -------------------------------
+ * Single-level LMS (RFC 8554 / SP 800-208), SHA-256 or SHA-256/192. An image
+ * signed with LMS has MB_IMG_F_SIGNED | MB_IMG_F_LMS, key_id = the first 4 bytes
+ * of the key's I (LE), and its signature in the header sector's TLV list
+ * (MB_TLV_LMS_SIG) over the same bytes Ed25519 signs. The signature is read
+ * through `rd` (offset, length), in order. */
+#define MB_TLV_LMS_SIG      0x4C
+#ifndef MB_LMS_SIG_MAX
+#define MB_LMS_SIG_MAX      2988        /* the largest that fits the header sector: H25 / W4, SHA-256 */
+#endif
+typedef int (*mb_lms_read_t)(void* ctx, uint32_t off, void* buf, size_t n);
+typedef struct { const uint8_t* sig; uint32_t len; } mb_lms_ram_t;  /* ctx for mb_lms_read_ram */
+int    mb_lms_read_ram(void* ctx, uint32_t off, void* buf, size_t n);
+size_t mb_lms_sig_len(const uint8_t* pub);     /* the signature size this key makes; 0: unsupported key */
+size_t mb_lms_pub_len(const uint8_t* pub);     /* 56 or 48; 0: unsupported */
+uint32_t mb_lms_key_id(const uint8_t* pub);
+bool   mb_lms_verify(const void* msg, size_t msg_len, const uint8_t* pub, mb_lms_read_t rd, void* ctx, uint32_t sig_len);
+/* An upload's LMS signature (recv 'S' frame, SMP header sector, mb_client_install_sig),
+ * held from before the slot is erased until it is written into the header sector. */
+typedef struct { uint16_t len; uint8_t buf[MB_FEAT_LMS ? MB_LMS_SIG_MAX : 1]; } mb_upload_sig_t;
+extern mb_upload_sig_t mb_upload_sig;
+
 /* ---- encrypted images (MB_FEAT_ENC, core/mb_enc.c) ----------------------------
  * MCUboot's scheme, so imgtool and MimiBoot agree: the payload is AES-CTR
  * (128 or 256) under a random key, counter block = 12 zero bytes + the
@@ -94,7 +116,19 @@ typedef struct {
     uint8_t fmt;                /* MB_FMT_* */
     uint32_t hash_off, hash_len;/* digest coverage, from the slot start */
     mb_image_hdr_t hdr;
+    /* where an LMS signature is: an upload's, in RAM (sig_ram), or the slot's own
+     * header-sector TLV list at flash offset tlv_flash (0: none) */
+    const uint8_t* sig_ram;
+    uint32_t sig_ram_len;
+    uint32_t tlv_flash;
 } mb_slot_info_t;
+
+/* Header-sector TLV list (file offset 256..): type u8, 0, length u16 LE, data; 0xFF ends it.
+ * Find `type` in a list in RAM: MB_OK with the data at area[*at], *len bytes, MB_E_BADARG if absent,
+ * MB_E_CORRUPT if the list is malformed, holds a type twice, holds a type other than the
+ * key envelope and the LMS signature, or has anything but 0xFF after its end. */
+#define MB_TLV_AREA         (MB_IMG_PAYLOAD_OFF - MB_IMG_HDR_SIZE)
+int mb_tlv_find(const uint8_t* area, size_t n, uint8_t type, size_t* at, size_t* len);
 
 /* foreign formats (core/mb_formats.c); out->hdr is synthesized */
 int mb_mcuboot_probe(const mb_port_t* p, int slot, mb_slot_info_t* out);
@@ -270,7 +304,9 @@ void mb_main(const mb_port_t* p);
  *   dev:  "MB READY <where> <max frame>\n"
  *   host: 'H' + 256-byte image header          dev: "MB OK\n" | "MB KEY\n" | "MB ERR <why>\n"
  *   (MB KEY: the header says MB_IMG_F_ENCRYPTED)
- *   host: 'K' u16 len, envelope, u32 crc        dev: "MB OK\n" | "MB ERR <why>\n"
+ *   host: 'K' u16 len, envelope, u32 crc        dev: "MB OK\n" | "MB SIG\n" | "MB ERR <why>\n"
+ *   (MB SIG: the header says MB_IMG_F_LMS; it comes after MB KEY when both apply)
+ *   host: 'S' u16 len, LMS signature, u32 crc   dev: "MB OK\n" | "MB ERR <why>\n"
  *   host: 'D' u32 off, u16 len, data, u32 crc   dev: "MB OK <off>\n" | "MB ERR ..." (resend)
  *   (an encrypted image's data frames carry ciphertext; the sink gets plaintext)
  *   host: 'E'                                   dev: "MB DONE\n" | "MB ERR <why>\n"
@@ -297,6 +333,7 @@ int mb_sink_slot_check(void* ctx, const mb_image_hdr_t* hdr);     /* begin witho
 int mb_sink_slot_begin(void* ctx, const mb_image_hdr_t* hdr);
 int mb_sink_slot_data(void* ctx, uint32_t off, const void* d, size_t n);
 int mb_sink_slot_end(void* ctx);
+int mb_sink_slot_tlvs(void* ctx);           /* after an erase of your own: the LMS signature into the header sector */
 
 /* Start an image that is already in RAM at hdr->load_addr and checked
  * (console `ramboot`): signature + hash re-checked, handoff, launch. */
@@ -328,6 +365,7 @@ void mb_menu(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_info_t
 int mb_slot_erase(const mb_port_t* p, int slot, uint32_t bytes);          /* header sector + bytes of payload */
 int mb_slot_write(const mb_port_t* p, int slot, uint32_t payload_off, const void* data, size_t len);
 int mb_slot_write_header(const mb_port_t* p, int slot, const mb_image_hdr_t* hdr);
+int mb_slot_write_lms(const mb_port_t* p, int slot, const uint8_t* sig, size_t len);   /* into the erased header sector */
 
 /* ---- handoff -------------------------------------------------------------------------- */
 void mb_handoff_build(const mb_port_t* p, const mb_bcl_rec_t* log, const mb_config_t* cfg, const mb_image_hdr_t* hdr,

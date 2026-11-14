@@ -252,6 +252,17 @@ static int f_loader_hash(uint8_t out[32]) {
     return MB_OK;
 }
 
+// LMS keys (tests/gen_signed.py's fixed keys): set by the test, cleared by sim_reset
+static uint8_t lms_keys[1][MB_LMS_PUB_MAX], s1_lms_keys[1][MB_LMS_PUB_MAX];
+static const mb_keyring_lms_t lms_ring = { 1, (const uint8_t (*)[MB_LMS_PUB_MAX])lms_keys };
+static const mb_keyring_lms_t s1_lms_ring = { 1, (const uint8_t (*)[MB_LMS_PUB_MAX])s1_lms_keys };
+void sim_lms(const uint8_t* pub, const uint8_t* s1_pub) {
+    if (pub) memcpy(lms_keys[0], pub, 56);
+    if (s1_pub) memcpy(s1_lms_keys[0], s1_pub, 56);
+    sim_port.lms_keys = pub ? &lms_ring : NULL;
+    sim_port.stage1_lms_keys = s1_pub ? &s1_lms_ring : NULL;
+}
+
 void sim_two_stage(bool on, const uint8_t s1_public[32]) {
     sim_port.layout = on ? &layout2 : &layout;
     sim_port.stage1_slot = on ? f_stage1 : NULL;
@@ -288,6 +299,8 @@ void sim_reset(void) {
     sim_port.stage1_keys = NULL;
     sim_port.revoke_keys = NULL;
     sim_port.enc_key = NULL;
+    sim_port.lms_keys = NULL;
+    sim_port.stage1_lms_keys = NULL;
 }
 
 void sim_input(const void* data, size_t len) {

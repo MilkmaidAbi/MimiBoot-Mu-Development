@@ -41,8 +41,9 @@ On the 32-bit chips (the "full" core):
   skip that and trust a new image once it checks out, for firmware that knows nothing
   about MimiBoot.
 - Check images with SHA-256 on every boot, only on their first boot, or not at all.
-- Verify Ed25519 (or ECDSA P-256) signatures, optionally refusing anything unsigned. Anti-rollback with a
-  security version floor.
+- Verify Ed25519, ECDSA P-256 or LMS signatures, optionally refusing anything unsigned. LMS
+  is hash-based, so it holds against quantum computers; a build can carry LMS alone, with no
+  Ed25519 in it. Anti-rollback with a security version floor.
 - Boot MimiBoot's own image format, Zephyr / MCUboot images signed with imgtool, and
   plain firmware binaries (FreeRTOS, bare metal, Arduino builds).
 - Run images from RAM on chips that need it (RP2040) or when you want to try something

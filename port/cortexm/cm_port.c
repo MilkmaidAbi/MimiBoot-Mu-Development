@@ -52,6 +52,20 @@ static const mb_keyring_t unlock_ring = { MB_UNLOCK_KEY_COUNT, unlock_trusted };
 #else
 #define UNLOCK_RING NULL
 #endif
+#if MB_FEAT_LMS && defined(MB_TRUSTED_LMS_KEY_COUNT) && !defined(MB_CM_STAGE0)
+static const uint8_t trusted_lms[MB_TRUSTED_LMS_KEY_COUNT][MB_LMS_PUB_MAX] = MB_TRUSTED_LMS_KEYS;
+static const mb_keyring_lms_t lms_ring = {MB_TRUSTED_LMS_KEY_COUNT, trusted_lms};
+#define LMS_RING (&lms_ring)
+#else
+#define LMS_RING NULL
+#endif
+#if MB_FEAT_LMS && MB_FEAT_TWO_STAGE && defined(MB_S1_LMS_KEY_COUNT) && !defined(MB_CM_CLIENT)
+static const uint8_t s1_trusted_lms[MB_S1_LMS_KEY_COUNT][MB_LMS_PUB_MAX] = MB_S1_LMS_KEYS;
+static const mb_keyring_lms_t s1_lms_ring = {MB_S1_LMS_KEY_COUNT, s1_trusted_lms};
+#define S1_LMS_RING (&s1_lms_ring)
+#else
+#define S1_LMS_RING NULL
+#endif
 /* Two-stage builds: the keys stage 0 accepts stage 1 images from (S1_KEYS),
  * separate from the app keys. Stage 1 carries them too, to refuse a badly
  * signed upload at once. */
@@ -348,7 +362,7 @@ static int client_self_slot(void) {
 }
 const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
-    .keys = KEYRING, .p256_keys = P256_RING, .require_signature = MB_REQUIRE_SIGNATURE,
+    .keys = KEYRING, .p256_keys = P256_RING, .lms_keys = LMS_RING, .require_signature = MB_REQUIRE_SIGNATURE,
     .flash_read = f_read, .flash_erase = f_erase, .flash_program = f_program, .reboot = client_reboot,
     .self_slot = client_self_slot, .floor = FLOOR, .revoke_keys = REVOKE_RING,
 };
@@ -488,6 +502,7 @@ static void reboot_rom(void) {
 static const mb_port_t stage0_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
     .keys = S1_RING, .p256_keys = S1_P256_RING, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING,
+    .lms_keys = S1_LMS_RING, .stage1_lms_keys = S1_LMS_RING,
     .require_signature = MB_REQUIRE_SIGNATURE, .flash_base = MB_FLASH_BASE, .revoke_keys = REVOKE_RING,
     .flash_read = f_read, .can_start = can_start, .floor = FLOOR, .fault_slot = fault_slot,
 };
@@ -600,14 +615,14 @@ static int stage1_slot(void) { return MB_STAGE1_SLOT; }    // linked for this co
 
 const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
-    .keys = KEYRING, .p256_keys = P256_RING, .require_signature = MB_REQUIRE_SIGNATURE, .unlock_keys = UNLOCK_RING, .random = RANDOM,
+    .keys = KEYRING, .p256_keys = P256_RING, .lms_keys = LMS_RING, .require_signature = MB_REQUIRE_SIGNATURE, .unlock_keys = UNLOCK_RING, .random = RANDOM,
     .flash_read = f_read, .flash_erase = f_erase, .flash_program = f_program,
     .can_start = can_start, .launch = launch, .ram_ptr = ram_ptr, .launch_ram = launch_ram,
     .time_ms = time_ms, .watchdog_arm = wd_arm, .watchdog_disarm = wd_off, .button = button,
     .console_open = console_open, .getc = getc_port, .write = write_port,
     .reboot = reboot, .reboot_rom = REBOOT_ROM, .reset_cause = cause, .reset_reason = reason,
     .capabilities = caps, .floor = FLOOR, .fault_slot = fault_slot, .lockdown = LOCK_TXT DEBUG_TXT,
-    .stage1_slot = STAGE1_SLOT, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING, .flash_base = MB_FLASH_BASE, .revoke_keys = REVOKE_RING,
+    .stage1_slot = STAGE1_SLOT, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING, .stage1_lms_keys = S1_LMS_RING, .flash_base = MB_FLASH_BASE, .revoke_keys = REVOKE_RING,
     .enc_key = ENC_KEY, .loader_hash = LOADER_HASH,
 };
 

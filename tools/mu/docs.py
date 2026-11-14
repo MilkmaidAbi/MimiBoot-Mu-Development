@@ -53,7 +53,7 @@ def render(db: Db) -> str:
             if o.range:
                 extra.append(f"{o.range[0]}..{o.range[1]}")
             if o.depends:
-                extra.append("needs " + ", ".join(f"`{d}`" for d in o.depends))
+                extra.append("needs " + ", ".join("`" + d.replace("|", "` or `") + "`" for d in o.depends))
             for kind, s in sizes.items():
                 opt = s["options"].get(o.id)
                 if opt and o.kind == "bool" and abs(opt["delta"]) >= 16:

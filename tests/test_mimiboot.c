@@ -2088,6 +2088,25 @@ static void test_smp(void) {
     sim_port.enc_key = NULL;
 #endif
 
+#if MB_FEAT_LMS
+    printf("SMP: an LMS-signed image, its signature in the header sector\n");
+    good_a();
+    sim_lms(lms_public, NULL);
+    sim_port.require_signature = true;
+    install_raw(MB_SLOT_B, "previous", MB_VERSION(2, 0, 0), 1, 9, 20000);
+    SMP_ADD(smp_upload_lms_badsig);
+    smp_run();
+    CHECK(HAS(smp_rx_n - 1, "\x63" "err") && slot_intact(MB_SLOT_B), "a bad LMS signature: refused before b is erased");
+    SMP_ADD(smp_upload_lms);
+    smp_run();
+    any_err = false;
+    for (int k = 0; k < smp_rx_n; k++) any_err |= HAS(k, "\x63" "err") || HAS(k, "\x62rc");
+    CHECK(!any_err && HAS(smp_rx_n - 1, "\x65match\xf5") && slot_intact(MB_SLOT_B), "the good one goes in");
+    CHECK(boot() == MB_SLOT_B && (sim.booted_hdr.flags & MB_IMG_F_LMS), "b boots, its signature read from flash");
+    sim_port.require_signature = false;
+    sim_lms(NULL, NULL);
+#endif
+
     printf("SMP: erase, reset\n");
     good_a();
     install_raw(MB_SLOT_B, "other", MB_VERSION(2, 0, 0), 1, 8, 20000);
@@ -2104,6 +2123,198 @@ static void test_smp(void) {}
 #endif
 
 #include "tests/test_night.inc"
+
+
+// ---------------------------------------------------------------------------
+// LMS images (headers + signatures from tests/gen_signed.py, mbtool's own LMS signer)
+// ---------------------------------------------------------------------------
+#if MB_FEAT_LMS
+// an LMS-signed image as a file lands in flash: header, the signature TLV at +256, payload
+static void put_lms(int slot, const uint8_t* hdr, const uint8_t* sig, size_t siglen, uint32_t seed, uint32_t size) {
+    put_signed(slot, hdr, seed, size);
+    uint8_t* t = sim_flash + sim_port.layout->slot[slot].offset + MB_IMG_HDR_SIZE;
+    t[0] = MB_TLV_LMS_SIG;
+    t[1] = 0;
+    t[2] = (uint8_t)siglen;
+    t[3] = (uint8_t)(siglen >> 8);
+    memcpy(t + 4, sig, siglen);
+}
+
+static size_t put_sig_frame(uint8_t* out, const uint8_t* sig, size_t len) {
+    size_t n = 0;
+    out[n++] = 'S';
+    out[n++] = (uint8_t)len;
+    out[n++] = (uint8_t)(len >> 8);
+    memcpy(out + n, sig, len);
+    n += len;
+    uint32_t c = mb_crc32(0, out + 3, len);
+    for (int i = 0; i < 4; i++) out[n++] = (uint8_t)(c >> (8 * i));
+    return n;
+}
+
+// the console upload of an LMS-signed image: header, signature frame, payload frames
+static size_t put_lms_upload(uint8_t* sc, size_t n, const uint8_t* hdr, const uint8_t* sig, size_t siglen, uint32_t size) {
+    sc[n++] = 'H';
+    memcpy(sc + n, hdr, MB_IMG_HDR_SIZE);
+    n += MB_IMG_HDR_SIZE;
+    n += put_sig_frame(sc + n, sig, siglen);
+    for (uint32_t off = 0; off < size; off += 1000) {
+        uint16_t len = (uint16_t)(size - off < 1000 ? size - off : 1000);
+        n += put_frame(sc + n, off, payload + off, len);
+    }
+    sc[n++] = 'E';
+    return n;
+}
+
+// the log forgets a slot's record
+static void forget(int slot) {
+    mb_bcl_t b;
+    mb_bcl_load(&b, &sim_port);
+    mb_bcl_rec_t r = b.cur;
+    memset(&r.slot[slot], 0, sizeof r.slot[slot]);
+    mb_bcl_commit(&b, &r);
+}
+
+static void test_lms_images(void) {
+    printf("LMS images: mbtool-signed, checked from the slot's header sector\n");
+    sim_reset();
+    sim_lms(lms_public, NULL);
+    put_lms(MB_SLOT_A, lms_good_hdr, lms_good_sig, sizeof lms_good_sig, LMS_GOOD_SEED, LMS_GOOD_SIZE);
+    mb_slot_info_t info;
+    mb_image_read_header(&sim_port, MB_SLOT_A, &info);
+    CHECK((info.hdr.flags & MB_IMG_F_LMS) && info.hdr.key_id == LMS_KEY_ID, "header says LMS, key id from I");
+    CHECK(mb_image_check_sig(&sim_port, &info) == MB_OK && info.proof_sig == MB_PROOF_SIG, "the signature verifies");
+    sim_port.require_signature = true;
+    CHECK(boot() == MB_SLOT_A && (log_now().slot[MB_SLOT_A].flags & MB_SF_SIG_OK), "required + LMS: boots, cached");
+    app_confirms();
+    put_lms(MB_SLOT_B, lms_other_key_hdr, lms_other_key_sig, sizeof lms_other_key_sig, LMS_OTHER_KEY_SEED,
+            LMS_OTHER_KEY_SIZE);
+    CHECK(boot() == MB_SLOT_A && log_now().slot[MB_SLOT_B].bad_reason == MB_BAD_SIGNATURE, "a key the board lacks: refused");
+    put_lms(MB_SLOT_B, lms_newer_hdr, lms_newer_sig, sizeof lms_newer_sig, LMS_NEWER_SEED, LMS_NEWER_SIZE);
+    sim_flash[sim_port.layout->slot[MB_SLOT_B].offset + MB_IMG_HDR_SIZE + 4 + 700] ^= 0x04;
+    CHECK(boot() == MB_SLOT_A && log_now().slot[MB_SLOT_B].bad_reason == MB_BAD_SIGNATURE, "a flipped bit in the signature: refused");
+    // (a bad mark sticks to an image until the image changes; these checks reuse one, so the log forgets it each time)
+    forget(MB_SLOT_B);
+    put_signed(MB_SLOT_B, lms_newer_hdr, LMS_NEWER_SEED, LMS_NEWER_SIZE);       // no signature TLV at all
+    CHECK(boot() == MB_SLOT_A && log_now().slot[MB_SLOT_B].bad_reason == MB_BAD_SIGNATURE, "no signature in the header sector: refused");
+    mb_image_hdr_t h;
+    memcpy(&h, lms_newer_hdr, sizeof h);
+    h.security_version = 9;                     // a signed field changed (CRC fixed up)
+    mb_image_seal(&h);
+    forget(MB_SLOT_B);
+    put_lms(MB_SLOT_B, (const uint8_t*)&h, lms_newer_sig, sizeof lms_newer_sig, LMS_NEWER_SEED, LMS_NEWER_SIZE);
+    CHECK(boot() == MB_SLOT_A && log_now().slot[MB_SLOT_B].bad_reason == MB_BAD_SIGNATURE, "a field changed after signing: refused");
+    memcpy(&h, lms_newer_hdr, sizeof h);
+    h.flags &= ~MB_IMG_F_LMS;                   // claim it's Ed25519 (with a zero signature)
+    mb_image_seal(&h);
+    forget(MB_SLOT_B);
+    put_lms(MB_SLOT_B, (const uint8_t*)&h, lms_newer_sig, sizeof lms_newer_sig, LMS_NEWER_SEED, LMS_NEWER_SIZE);
+    CHECK(boot() == MB_SLOT_A && log_now().slot[MB_SLOT_B].bad_reason == MB_BAD_SIGNATURE, "LMS flag dropped: refused");
+    forget(MB_SLOT_B);
+    put_lms(MB_SLOT_B, lms_newer_hdr, lms_newer_sig, sizeof lms_newer_sig, LMS_NEWER_SEED, LMS_NEWER_SIZE);
+    CHECK(boot() == MB_SLOT_B && sim.watchdog_ms, "a good LMS update: boots as a trial");
+    sim_lms(NULL, NULL);
+    sim_reset();
+    put_lms(MB_SLOT_A, lms_good_hdr, lms_good_sig, sizeof lms_good_sig, LMS_GOOD_SEED, LMS_GOOD_SIZE);
+    sim_port.require_signature = true;
+    CHECK(boot() == -SIM_ROM, "no LMS keys in the build + required signatures: refused");
+    sim_port.require_signature = false;
+    forget(MB_SLOT_A);
+    CHECK(boot() == MB_SLOT_A, "no LMS keys, signatures optional: boots as unsigned");
+
+    printf("LMS: console upload ('S' frame), checked before the erase, kept in the slot\n");
+    good_a();
+    sim_lms(lms_public, NULL);
+    install_raw(MB_SLOT_B, "previous", MB_VERSION(2, 0, 0), 1, 9, 20000);
+    make_payload(LMS_NEWER_SEED, LMS_NEWER_SIZE);
+    static uint8_t bad[4000];
+    memcpy(bad, lms_newer_sig, sizeof lms_newer_sig);
+    bad[200] ^= 1;
+    size_t n = (size_t)sprintf((char*)script, "c\rrecv b\r");
+    n = put_lms_upload(script, n, lms_newer_hdr, bad, sizeof lms_newer_sig, LMS_NEWER_SIZE);
+    console_run(n);
+    CHECK(strstr(sim.out, "MB SIG") && strstr(sim.out, "MB ERR refused") && slot_intact(MB_SLOT_B) &&
+          mb_image_read_header(&sim_port, MB_SLOT_B, &info) == MB_OK && !(info.hdr.flags & MB_IMG_F_LMS),
+          "a bad signature: refused, b not erased");
+    n = (size_t)sprintf((char*)script, "c\rrecv b\r");
+    n = put_lms_upload(script, n, lms_newer_hdr, lms_newer_sig, sizeof lms_newer_sig, LMS_NEWER_SIZE);
+    console_run(n);
+    const uint8_t* t = sim_flash + sim_port.layout->slot[MB_SLOT_B].offset + MB_IMG_HDR_SIZE;
+    CHECK(strstr(sim.out, "MB DONE") && t[0] == MB_TLV_LMS_SIG && !memcmp(t + 4, lms_newer_sig, sizeof lms_newer_sig) &&
+          t[4 + sizeof lms_newer_sig] == 0xFF, "uploaded: the signature sits in b's header sector");
+    sim_port.require_signature = true;
+    CHECK(boot() == MB_SLOT_B, "and it boots with signatures required");
+    sim_port.require_signature = false;
+    good_a();
+    sim_lms(NULL, NULL);
+    make_payload(LMS_NEWER_SEED, LMS_NEWER_SIZE);
+    n = (size_t)sprintf((char*)script, "c\rrecv b\r");
+    n = put_lms_upload(script, n, lms_newer_hdr, lms_newer_sig, sizeof lms_newer_sig, LMS_NEWER_SIZE);
+    console_run(n);
+    CHECK(strstr(sim.out, "MB DONE"), "a build without LMS keys takes it as unsigned (signatures optional)");
+
+    printf("LMS: client install (install_sig, begin, write, end)\n");
+    good_a();
+    sim_lms(lms_public, NULL);
+    sim.self_slot = MB_SLOT_A;
+    mb_client_init(&sim_port);
+    mb_image_hdr_t nh;
+    memcpy(&nh, lms_newer_hdr, sizeof nh);
+    make_payload(LMS_NEWER_SEED, LMS_NEWER_SIZE);
+    CHECK(mb_client_install_sig(bad, sizeof lms_newer_sig) == MB_OK && mb_client_install_begin(MB_SLOT_B, &nh) == MB_E_SIGNATURE,
+          "a bad signature: refused at begin");
+    CHECK(mb_client_install_sig(lms_newer_sig, sizeof lms_newer_sig) == MB_OK && mb_client_install_begin(MB_SLOT_B, &nh) == MB_OK,
+          "the right one: begin");
+    mb_upload_sig.buf[0] ^= 0xFF;               // (the RAM copy is used up: what boots is the flash copy)
+    CHECK(mb_client_install_write(0, payload, LMS_NEWER_SIZE) == MB_OK && mb_client_install_end() == MB_OK,
+          "payload written, checked, header last");
+    CHECK(boot() == MB_SLOT_B, "the client-installed LMS image boots");
+    good_a();
+    sim_lms(lms_public, NULL);
+    sim.self_slot = MB_SLOT_A;
+    mb_client_init(&sim_port);
+    make_payload(LMS_NEWER_SEED, LMS_NEWER_SIZE);
+    mb_client_install_sig(lms_newer_sig, sizeof lms_newer_sig);
+    mb_client_install_begin(MB_SLOT_B, &nh);
+    sim_flash[sim_port.layout->slot[MB_SLOT_B].offset + MB_IMG_HDR_SIZE + 4 + 50] ^= 0x80;   // the flash copy went bad
+    mb_client_install_write(0, payload, LMS_NEWER_SIZE);
+    CHECK(mb_client_install_end() == MB_E_SIGNATURE && mb_image_read_header(&sim_port, MB_SLOT_B, &info) != MB_OK,
+          "the copy in flash doesn't verify: no header, b stays empty");
+
+    printf("LMS: key revocation\n");
+    static const mb_keyring_t revoke_ring = { 1, (const uint8_t (*)[32])s1_public };   // gen_signed's OTHER key
+    sim_reset();
+    sim_lms(lms_public, NULL);
+    sim_port.require_signature = true;
+    sim_port.revoke_keys = &revoke_ring;
+    put_lms(MB_SLOT_A, lms_good_hdr, lms_good_sig, sizeof lms_good_sig, LMS_GOOD_SEED, LMS_GOOD_SIZE);
+    put_signed(MB_SLOT_GOLDEN, signed_good_hdr, SIGNED_GOOD_SEED, SIGNED_GOOD_SIZE);
+    CHECK(boot() == MB_SLOT_A, "before: the LMS image boots");
+    CHECK(mb_key_revoke(&sim_port, LMS_KEY_ID, revoke_lms_sig) == MB_OK && mb_key_revoked(&sim_port, LMS_KEY_ID),
+          "the LMS key is revoked by its key id");
+    CHECK(boot() == MB_SLOT_GOLDEN && log_now().slot[MB_SLOT_A].bad_reason == MB_BAD_SIGNATURE,
+          "after: the LMS image is refused, the Ed25519 golden boots");
+    sim_port.revoke_keys = NULL;
+    sim_port.require_signature = false;
+
+    printf("LMS: stage 0 takes an LMS-signed stage 1 (stage-1 keys only)\n");
+    sim_reset();
+    sim_two_stage(true, s1_public);
+    sim_lms(lms_public, NULL);                  // an app LMS key: not enough for a stage 1
+    sim_port.require_signature = true;
+    put_lms(3, s1_lms_hdr, s1_lms_sig, sizeof s1_lms_sig, S1_LMS_SEED, S1_LMS_SIZE);
+    // (stage1_payload: the vector table in front, as test_two_stage builds them)
+    make_payload(S1_LMS_SEED, S1_LMS_SIZE);
+    uint32_t v[2] = { 0x20001000u, sim_port.layout->slot[3].offset + MB_IMG_PAYLOAD_OFF + 0x101 };
+    memcpy(sim_flash + sim_port.layout->slot[3].offset + MB_IMG_PAYLOAD_OFF, v, 8);
+    CHECK(choose(NULL) == -1, "an LMS stage 1, but no stage-1 LMS key: refused");
+    sim_lms(lms_public, lms_s1_public);
+    CHECK(choose(NULL) == 3, "with the stage-1 LMS key: started");
+    sim_port.require_signature = false;
+    sim_lms(NULL, NULL);
+    sim_two_stage(false, NULL);
+}
+#endif
 
 int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -2141,6 +2352,9 @@ int main(int argc, char** argv) {
     test_two_stage();
     test_store_compaction();
     test_smp();
+#if MB_FEAT_LMS
+    test_lms_images();
+#endif
     test_night();
     printf("\n%d checks, %d failed\n", checks + crypto_checks, fails + crypto_fails);
     return fails + crypto_fails ? 1 : 0;

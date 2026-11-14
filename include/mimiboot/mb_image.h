@@ -42,10 +42,13 @@
 #define MB_IMG_F_ENCRYPTED  0x0010  /* delivered encrypted: in the file, a key envelope (MCUboot TLV 0x33)
                                        sits at offset 256 of the header sector and the payload is AES-CTR.
                                        (Bytes 256.. of a file's header sector are a list of TLVs, type u8,
-                                       0, length u16 LE, ended by 0xFF; today the envelope is the only
-                                       kind, and anything else there is refused.)
+                                       0, length u16 LE, ended by 0xFF: the envelope, an LMS signature;
+                                       anything else there is refused. The envelope is dropped on install.)
                                        MimiBoot decrypts while installing, so a slot always holds plaintext;
                                        sha256 and the signature cover the plaintext. */
+#define MB_IMG_F_LMS        0x0020  /* with F_SIGNED: LMS (RFC 8554), key_id = the first 4 bytes of the key's I;
+                                       the signature (over the same bytes as Ed25519) is a TLV (type 0x4C) in
+                                       the header sector's list, and stays there in the slot. signature[] is 0. */
 
 #define MB_VERSION(maj, min, pat)   (((uint32_t)(maj) << 24) | ((uint32_t)(min) << 16) | (uint32_t)(pat))
 #define MB_VERSION_MAJOR(v)         ((v) >> 24)

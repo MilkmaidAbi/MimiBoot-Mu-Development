@@ -64,9 +64,13 @@ int mb_client_request_entry(const char *entry, const char *args); /* MB_REQ_ENTR
  * L4/G0/G4 ECC, SAM D21 rows) needs nothing from the caller.
  * install_abort() gives up: the slot is left empty (its header was erased at
  * begin), the library ready for a new begin.
+ * An LMS-signed image (MB_IMG_F_LMS) carries its signature in the file's header
+ * sector (a TLV at offset 256, mbtool's lms_sig_of): hand it over with
+ * install_sig() before begin; it is checked there and written into the slot.
  * Encrypted images (MB_IMG_F_ENCRYPTED) are refused with MB_E_UNSUPP, here
  * and in mb_client_recv(): only the bootloader holds the decryption key, so
  * they go to MimiBoot's console (mbtool install) or its SMP. */
+int mb_client_install_sig(const void *sig, size_t len); /* LMS-signed images: the signature, before begin */
 int mb_client_install_begin(int slot, const mb_image_hdr_t *hdr);
 int mb_client_install_write(uint32_t offset, const void *data, size_t len);
 int mb_client_install_end(void);

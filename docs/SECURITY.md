@@ -22,9 +22,10 @@ The code execution authority is whoever holds a private key whose public half
 is in the build's `KEYS` file.
 
 - With `REQUIRE_SIGNATURE` (the `secure` preset) only images signed by one of
-  those keys start: MimiBoot images (Ed25519 over the whole header, which
-  holds the payload's SHA-256, versions, target and handoff address) and
-  Zephyr/MCUboot images (Ed25519 TLV over imgtool's digest).
+  those keys start: MimiBoot images (Ed25519, ECDSA P-256 or LMS over the
+  whole header, which holds the payload's SHA-256, versions, target and
+  handoff address) and Zephyr/MCUboot images (Ed25519 or ECDSA TLV over
+  imgtool's digest).
 - Without it, signed images are checked when they carry a signature, and
   unsigned images boot. The console's security line says so in yellow.
 - The keys are compiled into the bootloader. Nothing in flash (config, log)
@@ -54,6 +55,59 @@ the security version with the board's floor (`log` on the console, or
 
 A failure marks the slot bad with the reason and the next candidate is tried
 (the other A/B slot, then golden).
+
+## Post-quantum signatures (LMS)
+
+With `LMS` on, images can be signed with LMS (RFC 8554, NIST SP 800-208), a
+hash-based scheme: forging a signature means breaking SHA-256, which a quantum
+computer doesn't do. CNSA 2.0 names LMS for firmware signing, and it is on the
+EU's agreed-mechanisms list.
+
+    python tools/mbtool.py keygen --type lms --out keys/pq      # H10 / W4: 1024 signatures
+    python tools/mbtool.py pack app.elf -o app.mimg --key keys/pq.key ...
+
+Put `keys/pq.pub` in the `KEYS` file. With `SIGNATURES` off and `LMS` on, the
+bootloader holds no Ed25519 code at all, and nothing a quantum computer could
+forge gets an image started. If Ed25519 or P-256 keys stay in `KEYS` next to
+the LMS ones, an image signed with either kind boots, so a quantum attacker
+would simply forge the classical one; the configurator warns about that mix.
+
+What is kept, and where:
+
+- The signature (1.3 to 3 KB) sits in the image's header sector as a TLV after
+  the header (type `0x4C`), and stays there in the slot. The header's flags say
+  `SIGNED | LMS`, its key id is the first 4 bytes of the key's `I`, and the
+  signed bytes are the same as for Ed25519.
+- At boot the signature is read from flash as it is checked: about 300 bytes
+  of stack, no buffer. Uploads (console `recv`, SMP, `mb_client_install_sig`)
+  hold the signature in one buffer the size of the largest signature the
+  build's keys make, check it before anything is erased, write it into the
+  header sector, and check the copy in flash once more before the header goes
+  in.
+- A check costs about 600 SHA-256 blocks with W4 keys (the default) and about
+  4400 with W8. Two-stage builds with LMS stage-1 keys check both stage-1 copies
+  on every boot, so the configurator warns about W8 stage-1 keys.
+
+LMS keys are stateful. Each signature uses up one of the key's one-time keys,
+and signing two different images with the same one gives the key away. mbtool
+keeps the next unused leaf in the key file and writes it to disk (synced)
+before a signature leaves; a crash between the two wastes a leaf and never
+reuses one. What it can't stop:
+
+- copying the key file, or restoring it from a backup, then signing from both;
+- two build machines sharing one key.
+
+Keep one key file in one place, and back up the public key and a record of
+what was signed, not the private file. A key signs 2^H images (1024 with the
+default H10), then mbtool refuses; make the next key before that and ship it in
+a bootloader update, or keep a second LMS key in `KEYS` from the start.
+
+What stays classical: console unlock (`CONSOLE_AUTH`), signed configs
+(`CFG_SIGNED`) and revocation statements (`REVOKE_KEYS`) use Ed25519, so they
+need `SIGNATURES` on. An LMS key can be revoked like any other (by its key id).
+
+Single-level LMS only, no HSS trees of trees. One-level HSS public keys and
+signatures from other tools (hash-sigs, pyhsslms) are read by mbtool.
 
 ## Rollback floors
 
@@ -388,7 +442,8 @@ falls back.
 |---|---|
 | Ed25519 (RFC 8032) | image signatures, console unlock, signed config |
 | ECDSA P-256 (FIPS 186, `ECDSA`) | image signatures: MimiBoot images and imgtool `ecdsa-p256` Zephyr images |
-| SHA-256 | payload hashes, the digest ECDSA signs; Ed25519 uses SHA-512 internally |
+| LMS (RFC 8554, SP 800-208, `LMS`) | image signatures, post-quantum: SHA-256 and SHA-256/192, H5 to H25, W1 to W8 |
+| SHA-256 | payload hashes, the digest ECDSA signs, LMS; Ed25519 uses SHA-512 internally |
 | X25519 (RFC 7748), HKDF / HMAC-SHA256 (RFC 5869 / 4231), AES-128/256-CTR (FIPS 197, SP 800-38A) | encrypted images (`ENCRYPTED_IMAGES`): MCUboot's ECIES-X25519 envelope |
 | CRC-32 | corruption checks only (headers, log, config, upload frames, the Lite core): not a security mechanism |
 
@@ -409,7 +464,18 @@ the point at infinity (tcId 60) or an extreme intermediate value (tcId 210).
 Those are false rejects, never false accepts, and an honest signer hits them
 with probability about 2^-256; the test pins them so any change shows. mbtool's
 own P-256 signer (`tools/mb_p256.py`, RFC 6979 deterministic nonces) gets all
-262 right and matches RFC 6979's published test vector. LMS support is planned.
+262 right and matches RFC 6979's published test vector.
+
+The LMS verifier is checked against RFC 8554's test cases (each level of the
+two-level examples on its own) and NIST's ACVP-Server LMS vectors (sigVer,
+including the ones that must fail, and sigGen), and against signatures from
+pyhsslms, an independent implementation, for the parameter sets the published
+vectors don't cover. Every vector that verifies is then broken in eight ways (a
+flipped bit in the leaf index, the type codes, the randomizer, a chain value
+and the path; a changed message; a wrong length; a read error; a leaf index past
+the tree; another key) and each is refused. mbtool's signer (`tools/mb_lms.py`)
+derives keys as RFC 8554 Appendix A says, matches the RFC's and ACVP's
+key-generation vectors, and its signatures verify in pyhsslms.
 
 The encryption primitives are checked against their published vectors:
 - FIPS-197 for AES-128 and AES-256;
@@ -473,6 +539,8 @@ needs a hardware RNG: not yet).
   as safe as the bootloader's flash (see above).
 - **No attestation.** `BOOT_RECORD` tells the image what was checked and
   measured, but nothing on the device signs it.
+- **LMS keys are stateful.** mbtool protects the counter on one machine; it
+  can't know about a copy of the key file somewhere else.
 
 ## Reporting a problem
 

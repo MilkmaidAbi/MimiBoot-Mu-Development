@@ -237,8 +237,16 @@ static void cmd_sha(const mb_port_t* p, uint32_t off, uint32_t len) {
 
 static void cmd_keys(const mb_port_t* p) {
     mb_printf(p, "signatures: %s\n", p->require_signature ? "REQUIRED (unsigned images are refused)" : "optional (checked when present)");
-    if (!p->keys || !p->keys->count) { put(p, "no trusted keys built in\n"); return; }
-    for (int k = 0; k < p->keys->count; k++) {
+    bool lms = MB_FEAT_LMS && p->lms_keys && p->lms_keys->count;
+    if ((!p->keys || !p->keys->count) && !lms) { put(p, "no trusted keys built in\n"); return; }
+    for (int k = 0; lms && k < p->lms_keys->count; k++) {
+        const uint8_t* key = p->lms_keys->keys[k];
+        uint32_t id = mb_lms_key_id(key);
+        mb_printf(p, "  LMS key %d  id %08lx  H%u W%u%s\n", k, (unsigned long)id,
+                  key[3] >= 0x0A ? 5u * (key[3] - 9u) : 5u * (key[3] - 4u), 1u << ((key[7] - 1u) & 3u),
+                  MB_FEAT_REVOKE && mb_key_revoked(p, id) ? "  REVOKED" : "");
+    }
+    for (int k = 0; p->keys && k < p->keys->count; k++) {
         const uint8_t* key = p->keys->keys[k];
         uint32_t id = (uint32_t)key[0] | (uint32_t)key[1] << 8 | (uint32_t)key[2] << 16 | (uint32_t)key[3] << 24;
         mb_printf(p, "  key %d  ", k);

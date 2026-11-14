@@ -459,6 +459,7 @@ def nrf51_tests(work: Path, db, check):
     revoke_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
     enc_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
     record_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
+    lms_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
 
 
 def smp_request(s, req, timeout=15.0):
@@ -768,6 +769,71 @@ def record_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
           bool(m) and m.group(4) == meas, f"{m.group(4) if m else None} vs {meas}")
 
 
+def lms_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
+    """12. LMS on the nRF51, a post-quantum-only build (no Ed25519 in it, signatures
+    required): an image written straight into flash with its signature in the header
+    sector boots (checked as it streams from flash on the M0); one with a flipped bit
+    in its signature doesn't; one uploaded with mbtool over the console ('S' frame)
+    goes in and boots after a power cycle."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import mbtool as mbt
+    for k, w in (("lms4", "4"), ("lms8", "8")):
+        mbtool("keygen", "--type", "lms", "--lms-height", "5", "--lms-w", w, "--out", str(work / k), "--force")
+    keys = work / "lms-keys.pub"
+    keys.write_text((work / "lms4.pub").read_text() + (work / "lms8.pub").read_text())
+    cfg = Config(db, board)
+    cfg.set("LAYOUT", "ab+golden")
+    for k, v in (("SIGNATURES", False), ("LMS", True), ("KEYS", str(keys)), ("REQUIRE_SIGNATURE", True)):
+        cfg.set(k, v)
+    out = work / f"{board}-lms"
+    info = mubuild.build(cfg, out, log=lambda *a: None)
+    lay = json.loads((out / "layout.json").read_text())
+    slot = {s["name"]: s for s in lay["slots"]}
+    fsize = lay["flash_size"]
+    print(f"{board} (LMS only): bootloader {info['flash_used']} B flash, {info['ram_used']} B RAM")
+
+    def packed(name, at, version, key):
+        elf = build_nrf_app(work, name, slot[at]["link_native"], ram_lo, ram_hi, probe)
+        p = work / f"{name}.mimg"
+        mbtool("pack", str(elf), "--target", lay["target"], "-o", str(p), "--version", version, "--key", str(work / f"{key}.key"))
+        return p.read_bytes()
+
+    a = packed("lms-a", "a", "6.0.0", "lms8")           # W8: the slow kind, checked on the M0
+    bad = bytearray(packed("lms-b", "b", "6.0.1", "lms4"))
+    bad[mbt.HDR_SIZE + 4 + 400] ^= 0x20
+    flash = flash_image(work, "lms", fsize, out / "mimiboot.bin", slot["a"]["offset"], a)
+    img = bytearray(flash.read_bytes())
+    img[slot["b"]["offset"]:slot["b"]["offset"] + len(bad)] = bad
+    flash.write_bytes(bytes(img))
+    o = boot(machine, flash, seconds=8)
+    check(f"{board}: LMS: a W8-signed image in a boots (no Ed25519 in this bootloader)", "MU-APP lms-a" in o, o[-1500:])
+    check(f"{board}: LMS: the newer one in b, a bit flipped in its signature, is refused", "MU-APP lms-b" not in o, o[-1500:])
+
+    up = packed("lms-up", "a", "6.1.0", "lms4")
+    prompt = r"mimiboot(?:\x1b\[0m)?> $"
+    flash2 = flash_image(work, "lms-up", fsize, out / "mimiboot.bin", slot["g"]["offset"], b"")   # empty: the menu
+    s = QemuSerial(machine, flash2, seconds=120, keep=True)
+    notes, done = [], False
+    try:
+        if not mbt.read_until(s, r"up/down \+ enter", 30)[1]:
+            raise RuntimeError("the menu never came up")
+        for _ in range(3):
+            s.write(b"c")
+            if mbt.read_until(s, prompt, 6)[1]:
+                break
+        s.write(b"recv a\r")
+        mbt.send_image(s, up, up[mbt.PAYLOAD_OFF:])
+        done = True
+        mbt.read_until(s, prompt, 5)
+        s.keep_flash(fsize)
+    except (SystemExit, TimeoutError, RuntimeError) as e:
+        notes.append(str(e))
+    o = s.close()
+    check(f"{board}: LMS: an LMS-signed image goes in over the console (MB SIG, 'S' frame)", done, f"{notes}\n{o[-1500:]}")
+    o = boot_keep(machine, flash2, fsize, seconds=8)
+    check(f"{board}: LMS: ... and boots after a power cycle", "MU-APP lms-up" in o, o[-1500:])
+
+
 def revoke_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
     """9. Key revocation on the nRF51: a statement from the revocation key, sent with
     mbtool's code, goes into the protected store; after a power cycle an image
@@ -1027,7 +1093,7 @@ def main():
 
     if not only or "microbit" in only:
         nrf51_tests(work, db, check)
-    elif "two-stage" in only or "smp" in only or "revoke" in only or "enc" in only or "record" in only:     # just cases 7-11 (nRF51)
+    elif any(k in only for k in ("two-stage", "smp", "revoke", "enc", "record", "lms")):     # just cases 7-12 (nRF51)
         flash = 256 * 1024
         args = (work, db, check, "microbit", "microbit", 0x20000008, 0x20004000, flash - 4)
         if "two-stage" in only:
@@ -1040,6 +1106,8 @@ def main():
             enc_tests(*args)
         if "record" in only:
             record_tests(*args)
+        if "lms" in only:
+            lms_tests(*args)
 
     for board in ("netduinoplus2", "stm32vldiscovery"):
         if only and board not in only:

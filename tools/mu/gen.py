@@ -18,10 +18,14 @@ NATIVE_HDR = 0x1000
 VECTOR_MODES = {"vtor": 0, "remap": 1, "relay": 2}
 
 
-def read_keys_any(path: str) -> tuple[list[bytes], list[bytes]]:
-    """(Ed25519 keys, P-256 keys): one public key per line, 64 hex digits (Ed25519)
-    or 128 hex digits (P-256 X || Y, as mbtool keygen --type p256 writes)"""
-    ed, p256 = [], []
+def read_keys_any(path: str) -> tuple[list[bytes], list[bytes], list[bytes]]:
+    """(Ed25519, P-256, LMS keys): one public key per line, 64 hex digits (Ed25519),
+    128 hex digits (P-256 X || Y, as mbtool keygen --type p256 writes), or an LMS key
+    (112 / 96 hex digits, or 120 / 104 with the one-level HSS prefix 00000001)"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import mb_lms
+    ed, p256, lms = [], [], []
     for line in Path(path).read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -31,19 +35,41 @@ def read_keys_any(path: str) -> tuple[list[bytes], list[bytes]]:
             ed.append(k)
         elif len(k) == 64:
             p256.append(k)
+        elif len(k) in (48, 52, 56, 60):
+            try:
+                lms.append(mb_lms.parse_public(k))
+            except ValueError as ex:
+                raise ValueError(f"{path}: {ex}")
         else:
-            raise ValueError(f"{path}: each key is 64 (Ed25519) or 128 (P-256) hex digits")
-    if not ed and not p256:
+            raise ValueError(f"{path}: each key is 64 (Ed25519), 128 (P-256) or 112 (LMS) hex digits")
+    if not ed and not p256 and not lms:
         raise ValueError(f"{path}: no keys")
-    return ed, p256
+    return ed, p256, lms
 
 
 def read_keys(path: str) -> list[bytes]:
     """Ed25519 keys only (console unlock, signed config)"""
-    ed, _ = read_keys_any(path)
+    ed, _, _ = read_keys_any(path)
     if not ed:
         raise ValueError(f"{path}: no Ed25519 keys (console unlock and signed configs use Ed25519)")
     return ed
+
+
+def lms_sig_max(cfg: Config) -> int:
+    """the largest LMS signature any of the build's LMS keys makes (0: no LMS keys)"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import mb_lms
+    n = 0
+    for k in ("KEYS", "S1_KEYS"):
+        if cfg.effective(k) and cfg.effective("LMS"):
+            for pub in read_keys_any(cfg.effective(k))[2]:
+                n = max(n, mb_lms.sig_len(int.from_bytes(pub[:4], "big"), int.from_bytes(pub[4:8], "big")))
+    return n
+
+
+def _lms_c(keys: list[bytes]) -> str:
+    return "{" + ",".join(_c_bytes(k + bytes(56 - len(k))) for k in keys) + "}"
 
 
 def _c_bytes(b: bytes) -> str:
@@ -74,9 +100,12 @@ def feature_macros(cfg: Config, overrides: dict | None = None) -> list[str]:
 
 def key_macros(cfg: Config) -> list[str]:
     out = []
-    s1 = cfg.effective("S1_KEYS") if cfg.effective("TWO_STAGE") and cfg.effective("SIGNATURES") else None
+    signing = cfg.effective("SIGNATURES") or cfg.effective("LMS")
+    s1 = cfg.effective("S1_KEYS") if cfg.effective("TWO_STAGE") and signing else None
     if s1:
-        keys, p256 = read_keys_any(s1)
+        keys, p256, lms = read_keys_any(s1)
+        if keys and not cfg.effective("SIGNATURES"):
+            raise ValueError(f"{s1} has Ed25519 keys: turn on SIGNATURES, or remove them")
         if keys:
             out += [f"#define MB_S1_KEY_COUNT {len(keys)}",
                     "#define MB_S1_KEYS {" + ",".join(_c_bytes(k) for k in keys) + "}"]
@@ -85,6 +114,10 @@ def key_macros(cfg: Config) -> list[str]:
                 raise ValueError(f"{s1} has P-256 keys: turn on ECDSA, or remove them")
             out += [f"#define MB_S1_P256_KEY_COUNT {len(p256)}",
                     "#define MB_S1_P256_KEYS {" + ",".join(_c_bytes(k) for k in p256) + "}"]
+        if lms:
+            if not cfg.effective("LMS"):
+                raise ValueError(f"{s1} has LMS keys: turn on LMS, or remove them")
+            out += [f"#define MB_S1_LMS_KEY_COUNT {len(lms)}", "#define MB_S1_LMS_KEYS " + _lms_c(lms)]
     ek = cfg.effective("ENC_KEY") if cfg.effective("ENCRYPTED_IMAGES") else None
     if ek:
         from mu.model import read_enc_key
@@ -95,10 +128,18 @@ def key_macros(cfg: Config) -> list[str]:
         rkeys = read_keys(rk)
         out += [f"#define MB_REVOKE_KEY_COUNT {len(rkeys)}",
                 "#define MB_REVOKE_KEYS {" + ",".join(_c_bytes(k) for k in rkeys) + "}"]
+    if lms_sig_max(cfg):
+        out.append(f"#define MB_LMS_SIG_MAX {lms_sig_max(cfg)}     /* upload buffer: the largest signature the keys make */")
     path = cfg.effective("KEYS")
-    if not path or not cfg.effective("SIGNATURES"):
+    if not path or not signing:
         return out
-    keys, p256 = read_keys_any(path)
+    keys, p256, lms = read_keys_any(path)
+    if lms:
+        if not cfg.effective("LMS"):
+            raise ValueError(f"{path} has LMS keys: turn on LMS, or remove them")
+        out += [f"#define MB_TRUSTED_LMS_KEY_COUNT {len(lms)}", "#define MB_TRUSTED_LMS_KEYS " + _lms_c(lms)]
+    if keys and not cfg.effective("SIGNATURES"):
+        raise ValueError(f"{path} has Ed25519 keys: turn on SIGNATURES, or remove them")
     if keys:
         out += [f"#define MB_TRUSTED_KEY_COUNT {len(keys)}",
                 "#define MB_TRUSTED_KEYS {" + ",".join(_c_bytes(k) for k in keys) + "}"]
@@ -508,7 +549,7 @@ def mcu_outputs(cfg: Config, lay: Layout, out: Path):
 
 VENDOR_FLASH = {"stm32": "port/stm32/stm32_flash.c", "nrf": "port/nrf/nrf_flash.c", "samd": "port/samd/samd_flash.c"}
 CLIENT_CORE = ["core/mb_hash.c", "core/mb_ed25519.c", "core/mb_image.c", "core/mb_bcl.c", "core/mb_config.c",
-               "core/mb_control.c", "core/mb_grub.c", "core/mb_recv.c", "core/mb_enc.c", "core/mb_formats.c", "core/mb_floor.c", "core/mb_ecdsa.c", "client/mb_client.c",
+               "core/mb_control.c", "core/mb_grub.c", "core/mb_recv.c", "core/mb_enc.c", "core/mb_lms.c", "core/mb_formats.c", "core/mb_floor.c", "core/mb_ecdsa.c", "client/mb_client.c",
                "port/cortexm/cm_port.c"]
 CHUNK = {"stm32": "8 bytes (L4/G0/G4 program 8 bytes once per erase)", "nrf": "4 bytes",
          "samd": "64 bytes on SAM D21 (a page is written once per erase), 16 on SAM D51 (ECC quad-words)"}

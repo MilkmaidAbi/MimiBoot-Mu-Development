@@ -8,6 +8,7 @@
  * bit 2 two-stage layout. Flash is the simulator's (uploads write it).
  */
 #include "tests/sim_port.h"
+#include "tests/gen_signed.h"
 #include <string.h>
 
 static uint8_t script[1 << 18];
@@ -80,6 +81,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* d, size_t n) {
         keyed = true;
     }
     sim_port.enc_key = (d[0] & 8) ? dev_key : NULL;
+    sim_lms((d[0] & 16) ? lms_public : NULL, NULL);     // bit 4: the board has gen_signed's LMS key
     mb_bcl_load(&log_, &sim_port);
     sn = 0;
     if (d[0] & 1) {

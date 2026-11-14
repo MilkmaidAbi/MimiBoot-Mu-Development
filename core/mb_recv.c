@@ -16,6 +16,7 @@ int mb_sink_slot_begin(void* ctx, const mb_image_hdr_t* hdr) { (void)ctx; (void)
 int mb_sink_slot_check(void* ctx, const mb_image_hdr_t* hdr) { (void)ctx; (void)hdr; return MB_E_UNSUPP; }
 int mb_sink_slot_data(void* ctx, uint32_t off, const void* d, size_t n) { (void)ctx; (void)off; (void)d; (void)n; return MB_E_UNSUPP; }
 int mb_sink_slot_end(void* ctx) { (void)ctx; return MB_E_UNSUPP; }
+int mb_sink_slot_tlvs(void* ctx) { (void)ctx; return MB_E_UNSUPP; }
 #else
 
 static int rd(const mb_recv_t* r, void* dst, size_t n, uint32_t ms) {
@@ -57,6 +58,25 @@ static int read_key(const mb_recv_t* r) {
     return rc;
 }
 
+// An LMS-signed image: ask for the signature ('S' u16 len, signature, u32 crc).
+// It is checked (with the header) before anything is erased, and kept for the slot.
+static int read_sig(const mb_recv_t* r) {
+    mb_upload_sig.len = 0;
+    if (!MB_FEAT_LMS) {
+        r->puts(r->ctx, "MB ERR LMS-signed image: this build has no LMS\n");
+        return MB_E_UNSUPP;
+    }
+    r->puts(r->ctx, "MB SIG\n");
+    uint8_t h[2], t[4];
+    if (r->getc(r->ctx, 5000) != 'S' || rd(r, h, 2, 2000) != MB_OK) return MB_E_TIMEOUT;
+    uint32_t len = (uint32_t)h[0] | (uint32_t)h[1] << 8;
+    if (len > sizeof(mb_upload_sig.buf)) return MB_E_CORRUPT;
+    if (rd(r, mb_upload_sig.buf, len, 2000) != MB_OK || rd(r, t, 4, 2000) != MB_OK) return MB_E_TIMEOUT;
+    if (mb_crc32(0, mb_upload_sig.buf, len) != le32(t)) return MB_E_CORRUPT;
+    mb_upload_sig.len = (uint16_t)len;
+    return MB_OK;
+}
+
 int mb_recv(const mb_recv_t* r, mb_image_hdr_t* hdr_out) {
     uint16_t max = r->max_frame && r->max_frame <= sizeof(data) ? r->max_frame : (uint16_t)sizeof(data);
     say(r, "MB READY %lu %s\n", max, r->where ? r->where : "-");
@@ -70,6 +90,7 @@ int mb_recv(const mb_recv_t* r, mb_image_hdr_t* hdr_out) {
     bool enc = MB_FEAT_ENC && (hdr.flags & MB_IMG_F_ENCRYPTED);
     // the envelope is checked before anything is erased (a build without the feature refuses here)
     int rc = (hdr.flags & MB_IMG_F_ENCRYPTED) ? read_key(r) : MB_OK;
+    if (rc == MB_OK && (hdr.flags & MB_IMG_F_LMS)) rc = read_sig(r);
     if (rc == MB_OK) rc = r->begin(r->ctx, &hdr);
     if (rc != MB_OK) {
         char line[48];
@@ -120,7 +141,15 @@ out:
 int mb_sink_slot_begin(void* ctx, const mb_image_hdr_t* hdr) {
     mb_slot_sink_t* s = ctx;
     int rc = mb_sink_slot_check(ctx, hdr);
-    return rc != MB_OK ? rc : mb_slot_erase(s->p, s->slot, hdr->payload_size);
+    if (rc == MB_OK) rc = mb_slot_erase(s->p, s->slot, hdr->payload_size);
+    return rc == MB_OK ? mb_sink_slot_tlvs(ctx) : rc;
+}
+
+// After the erase: an LMS signature goes into the header sector (the header itself comes last)
+int mb_sink_slot_tlvs(void* ctx) {
+    mb_slot_sink_t* s = ctx;
+    if (!(s->hdr.flags & MB_IMG_F_LMS)) return MB_OK;
+    return mb_slot_write_lms(s->p, s->slot, mb_upload_sig.buf, mb_upload_sig.len);
 }
 
 int mb_sink_slot_check(void* ctx, const mb_image_hdr_t* hdr) {
@@ -137,6 +166,10 @@ int mb_sink_slot_check(void* ctx, const mb_image_hdr_t* hdr) {
     memset(&tmp, 0, sizeof(tmp));
     tmp.hdr = *hdr;
     tmp.header_ok = true;
+    if (hdr->flags & MB_IMG_F_LMS) {            // the signature that came with it (nothing is erased yet)
+        tmp.sig_ram = mb_upload_sig.buf;
+        tmp.sig_ram_len = mb_upload_sig.len;
+    }
     bool s1 = mb_slot_role(s->p, s->slot) == MB_ROLE_STAGE1;
     if ((s1 ? mb_stage1_check_sig(s->p, &tmp) : mb_image_check_sig(s->p, &tmp)) != MB_OK) return MB_E_SIGNATURE;
     s->hdr = *hdr;
@@ -155,8 +188,14 @@ int mb_sink_slot_end(void* ctx) {
     tmp.hdr = s->hdr;
     tmp.header_ok = true;
     if (mb_image_verify(s->p, s->slot, &tmp) != MB_OK) return MB_E_CORRUPT;
-    if (mb_slot_role(s->p, s->slot) == MB_ROLE_STAGE1 && mb_stage1_vectors_ok(s->p, s->slot, &s->hdr) != MB_OK)
+    bool s1 = mb_slot_role(s->p, s->slot) == MB_ROLE_STAGE1;
+    if (s1 && mb_stage1_vectors_ok(s->p, s->slot, &s->hdr) != MB_OK)
         return MB_E_REFUSED;    // a stage 1 built for the other copy: left without a header (empty)
+    if (s->hdr.flags & MB_IMG_F_LMS) {          // the copy in flash is what boots: check that one
+        tmp.sig_state = 0;
+        tmp.tlv_flash = s->p->layout->slot[s->slot].offset + MB_IMG_HDR_SIZE;
+        if ((s1 ? mb_stage1_check_sig(s->p, &tmp) : mb_image_check_sig(s->p, &tmp)) != MB_OK) return MB_E_SIGNATURE;
+    }
     return mb_slot_write_header(s->p, s->slot, &s->hdr);
 }
 

@@ -125,11 +125,20 @@ static const mb_layout_t layout = MB_RP2350_LAYOUT;
 // Trusted keys: from mbtool keygen's header, at build time only
 #ifdef MB_KEYS_HEADER
 #include MB_KEYS_HEADER
+#endif
+#ifdef MB_TRUSTED_KEY_COUNT
 static const uint8_t trusted[MB_TRUSTED_KEY_COUNT][32] = MB_TRUSTED_KEYS;
 static const mb_keyring_t keyring = {MB_TRUSTED_KEY_COUNT, trusted};
 #define KEYRING (&keyring)
 #else
 #define KEYRING NULL
+#endif
+#if MB_FEAT_LMS && defined(MB_TRUSTED_LMS_KEY_COUNT)
+static const uint8_t trusted_lms[MB_TRUSTED_LMS_KEY_COUNT][MB_LMS_PUB_MAX] = MB_TRUSTED_LMS_KEYS;
+static const mb_keyring_lms_t lms_ring = {MB_TRUSTED_LMS_KEY_COUNT, trusted_lms};
+#define LMS_RING (&lms_ring)
+#else
+#define LMS_RING NULL
 #endif
 #ifndef MB_REQUIRE_SIGNATURE
 #define MB_REQUIRE_SIGNATURE 0
@@ -573,7 +582,7 @@ const mb_port_t mb_rp2350_port = {
     .target = MB_RP2350_TARGET,
     .layout = &layout,
     .arch = MY_ARCH,
-    .keys = KEYRING,
+    .keys = KEYRING, .lms_keys = LMS_RING,
     .require_signature = MB_REQUIRE_SIGNATURE,
     .flash_read = f_read,
     .flash_erase = f_erase,
@@ -632,7 +641,7 @@ const mb_port_t mb_rp2350_port = {
     .target = MB_RP2350_TARGET,
     .layout = &layout,
     .arch = MY_ARCH,
-    .keys = KEYRING,
+    .keys = KEYRING, .lms_keys = LMS_RING,
     .require_signature = MB_REQUIRE_SIGNATURE,
     .flash_read = f_read,
     .flash_erase = f_erase,

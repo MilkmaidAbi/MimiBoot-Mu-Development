@@ -110,6 +110,9 @@
 #ifndef MB_FEAT_ENC
 #define MB_FEAT_ENC             0   /* take encrypted images (core/mb_enc.c): decrypted as they are installed */
 #endif
+#ifndef MB_FEAT_LMS
+#define MB_FEAT_LMS             0   /* LMS (hash-based, post-quantum) image signatures (core/mb_lms.c) */
+#endif
 #ifndef MB_FEAT_BOOT_RECORD
 #define MB_FEAT_BOOT_RECORD     0   /* measured boot: a record of what was checked and run (mimiboot/mb_record.h) */
 #endif
@@ -208,8 +211,8 @@
 #if !MB_FEAT_IMG_NATIVE && !MB_FEAT_IMG_MCUBOOT && !MB_FEAT_IMG_RAW
 #error "enable at least one image format (MB_FEAT_IMG_NATIVE / _MCUBOOT / _RAW)"
 #endif
-#if defined(MB_REQUIRE_SIGNATURE) && MB_REQUIRE_SIGNATURE && !MB_FEAT_SIGNATURES
-#error "MB_REQUIRE_SIGNATURE needs MB_FEAT_SIGNATURES"
+#if defined(MB_REQUIRE_SIGNATURE) && MB_REQUIRE_SIGNATURE && !MB_FEAT_SIGNATURES && !MB_FEAT_LMS
+#error "MB_REQUIRE_SIGNATURE needs MB_FEAT_SIGNATURES or MB_FEAT_LMS"
 #endif
 #if MB_DEFAULT_TRIES < 1 || MB_DEFAULT_TRIES > 255
 #error "MB_DEFAULT_TRIES must be 1..255"

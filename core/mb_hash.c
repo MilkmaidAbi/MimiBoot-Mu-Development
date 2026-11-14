@@ -36,7 +36,14 @@ static const uint32_t K[64] = {
 
 #define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 
+#ifdef MB_SHA256_STATS
+uint32_t mb_sha256_blocks;      /* host tests: what a check costs */
+#endif
+
 static void block(mb_sha256_t* s, const uint8_t* p) {
+#ifdef MB_SHA256_STATS
+    mb_sha256_blocks++;
+#endif
     uint32_t w[64];
     for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
     for (int i = 16; i < 64; i++) {

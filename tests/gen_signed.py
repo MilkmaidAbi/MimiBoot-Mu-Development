@@ -132,3 +132,61 @@ for seed in (7,):
     der = b"\x30" + bytes([len(body)]) + body
     print("#define MCUBOOT_ECDSA_SEED %d" % seed)
     print(c_array("mcuboot_ecdsa_der", der))
+
+# LMS (tests/test_mimiboot.c test_lms_images): small deterministic keys (H5 / W4: 32 leaves),
+# signatures made with mbtool's own LMS code, leaf and randomizer fixed so this file is stable
+import hashlib  # noqa: E402
+import mb_lms  # noqa: E402
+
+
+class FixedLms:
+    """an mbtool.Secret-compatible LMS signer with a fixed key and fixed leaves (tests only)"""
+    def __init__(self, tag, h=5, w=4):
+        self.lt, self.ot = mb_lms.lms_type_for(h, w)
+        self.I = hashlib.sha256(b"I " + tag).digest()[:16]
+        self.seed = hashlib.sha256(b"SEED " + tag).digest()
+        self.pub, self.T = mb_lms.public_from_seed(self.lt, self.ot, self.I, self.seed)
+        self.q = 0
+
+    def secret(self):
+        sec = mbtool.Secret.__new__(mbtool.Secret)
+        sec.kind, sec.raw, sec.ecdsa, sec.lms, sec.pending_tlv = "lms", self, False, True, b""
+        sec.public, sec.key_id = self.pub, mb_lms.key_id(self.pub)
+        return sec
+
+    @property
+    def public(self):
+        return self.pub
+
+    @property
+    def remaining(self):
+        return 32 - self.q
+
+    def sign(self, msg):
+        sig = mb_lms.sign_leaf(self.lt, self.ot, self.I, self.seed, self.T, self.q, msg,
+                               hashlib.sha256(b"C %d " % self.q + msg).digest())
+        self.q += 1
+        assert mb_lms.verify(self.pub, msg, sig)
+        return sig
+
+
+LMS_KEY, LMS_OTHER, LMS_S1 = FixedLms(b"app"), FixedLms(b"other"), FixedLms(b"stage1")
+print(c_array("lms_public", LMS_KEY.pub))
+print(c_array("lms_s1_public", LMS_S1.pub))
+print("#define LMS_KEY_ID 0x%08xu" % mb_lms.key_id(LMS_KEY.pub))
+for name, seed, key, version, secver in (("lms_good", 41, LMS_KEY, "5.0.0", 1), ("lms_other_key", 42, LMS_OTHER, "5.0.1", 1),
+                                          ("lms_newer", 43, LMS_KEY, "5.1.0", 2)):
+    sec = key.secret()
+    hdr = mbtool.build_header(payload(seed, 30000), name, mbtool.parse_version(version), secver, target="sim",
+                              arch=mbtool.ARCH_ARM, secret=sec, build_time=0)
+    assert hdr[mbtool.SIGNED_BYTES:mbtool.SIGNED_BYTES + 64] == bytes(64)
+    print("#define %s_SEED %d\n#define %s_SIZE 30000" % (name.upper(), seed, name.upper()))
+    print(c_array(name + "_hdr", hdr))
+    print(c_array(name + "_sig", sec.pending_tlv[4:]))
+sec = LMS_S1.secret()
+hdr = mbtool.build_header(stage1_payload(22, 30000, S1A_LINK), "s1_lms", mbtool.parse_version("2.1.0"), 0, target="sim",
+                          arch=mbtool.ARCH_ARM, secret=sec, build_time=0, entry=S1A_LINK, stage1=True)
+print("#define S1_LMS_SEED 22\n#define S1_LMS_SIZE 30000")
+print(c_array("s1_lms_hdr", hdr))
+print(c_array("s1_lms_sig", sec.pending_tlv[4:]))
+print(c_array("revoke_lms_sig", mbtool.revoke_signature(OTHER_SECRET, b"sim", mb_lms.key_id(LMS_KEY.pub))))
