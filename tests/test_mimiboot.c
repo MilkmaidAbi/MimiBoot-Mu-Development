@@ -1870,6 +1870,105 @@ static void test_two_stage(void) {
 }
 
 // ---------------------------------------------------------------------------
+// the protected store as two units: compaction (core/mb_floor.c)
+// ---------------------------------------------------------------------------
+
+#define REV1 0x11111111u
+#define REV2 0x22222222u
+
+// What has to survive any compaction (the "before" state of store_scene())
+static bool store_holds(uint32_t floor_at_least, uint32_t ida, uint32_t idb, char* why) {
+    uint32_t fl[MB_FLOOR_COUNT];
+    mb_floor_get(&sim_port, fl);
+    int ga = mb_store_count(&sim_port, MB_STORE_S1_GOOD, ida), tb = mb_store_count(&sim_port, MB_STORE_S1_ATTEMPT, idb);
+    int r1 = mb_store_count(&sim_port, MB_STORE_KEY_REVOKED, REV1), r2 = mb_store_count(&sim_port, MB_STORE_KEY_REVOKED, REV2);
+    sprintf(why, "floor %lu golden %lu stage1 %lu, good(a) %d, tries(b) %d, revoked %d %d", (unsigned long)fl[0],
+            (unsigned long)fl[1], (unsigned long)fl[3], ga, tb, r1, r2);
+    return fl[MB_FLOOR_SECURITY] >= floor_at_least && fl[MB_FLOOR_GOLDEN] == 7 && fl[MB_FLOOR_STAGE1] == 2 &&
+           ga == 1 && tb == 2 && r1 >= 1 && r2 >= 1;
+}
+
+// Two installed stage-1 copies with records, two revoked keys, other floors,
+// and records of copies long gone
+static void store_scene(uint32_t* ida, uint32_t* idb) {
+    two_stage_fresh();
+    sim_store_two(true);
+    put_stage1(S1A, MB_VERSION(1, 0, 0), 0, 31);
+    put_stage1(S1B, MB_VERSION(1, 1, 0), 0, 32);
+    *ida = s1_id(S1A);
+    *idb = s1_id(S1B);
+    for (uint32_t gone = 1; gone <= 10; gone++) {               // earlier copies: good, then replaced
+        mb_store_append(&sim_port, MB_STORE_S1_ATTEMPT, 0xD0000000u + gone);
+        mb_store_append(&sim_port, MB_STORE_S1_GOOD, 0xD0000000u + gone);
+    }
+    mb_store_append(&sim_port, MB_STORE_S1_GOOD, *ida);
+    mb_store_append(&sim_port, MB_STORE_S1_ATTEMPT, *idb);
+    mb_store_append(&sim_port, MB_STORE_S1_ATTEMPT, *idb);
+    mb_store_append(&sim_port, MB_STORE_KEY_REVOKED, REV1);
+    mb_store_append(&sim_port, MB_STORE_KEY_REVOKED, REV2);
+    mb_floor_raise(&sim_port, MB_FLOOR_GOLDEN, 7);
+    mb_floor_raise(&sim_port, MB_FLOOR_STAGE1, 2);
+}
+
+static void test_store_compaction(void) {
+    uint32_t ida, idb;
+    char why[160];
+    printf("store, two units: a full unit is compacted, nothing that matters is lost\n");
+    store_scene(&ida, &idb);
+    uint32_t e0 = sim.erases, v = 1;
+    bool ok = true;
+    for (; v <= 1000 && ok; v++) {                              // a thousand releases, each raising the floor
+        raise_t r = { MB_FLOOR_SECURITY, v, 0 };
+        raise_fn(&r);
+        ok = r.rc == MB_OK;
+    }
+    CHECK(ok && hw_floor(MB_FLOOR_SECURITY) == 1000, "1000 floor raises in 128-entry units (stopped at %lu)", (unsigned long)v - 1);
+    CHECK(sim.erases - e0 >= 16, "compacted along the way (%lu erases)", (unsigned long)(sim.erases - e0));
+    CHECK(store_holds(1000, ida, idb, why), "after it all: %s", why);
+    CHECK(mb_store_count(&sim_port, MB_STORE_S1_GOOD, 0xD0000001u) == 0, "records of copies no longer installed: gone");
+    for (int i = 0; i < 300; i++)                               // attempts of an installed copy stay capped, not lost
+        mb_store_append(&sim_port, MB_STORE_S1_ATTEMPT, idb);
+    CHECK(mb_store_count(&sim_port, MB_STORE_S1_ATTEMPT, idb) >= MB_STAGE1_TRIES, "counted attempts survive compactions");
+
+    printf("store, two units: a power cut at every step of a compaction\n");
+    store_scene(&ida, &idb);
+    static uint8_t snap[0x1000];
+    uint32_t fl_before = 0;
+    int cuts = 0, bad = 0;
+    for (v = 1; v <= 200; v++) {                                // find the raise that compacts
+        memcpy(snap, sim_flash + 0xF000, sizeof snap);
+        uint32_t e = sim.erases;
+        raise_t r = { MB_FLOOR_SECURITY, v, 0 };
+        raise_fn(&r);
+        if (sim.erases != e) break;
+        fl_before = v;
+    }
+    CHECK(v <= 200, "a compaction happened (at raise %lu)", (unsigned long)v);
+    for (uint32_t k = 1; k < 400; k++) {
+        memcpy(sim_flash + 0xF000, snap, sizeof snap);
+        sim.cut_at = sim.ops + k;
+        raise_t r = { MB_FLOOR_SECURITY, v, 0 };
+        sim_outcome_t o = sim_guard(raise_fn, &r);
+        sim.cut_at = 0;
+        bool held = store_holds(fl_before, ida, idb, why);
+        if (!held) { bad++; printf("    cut at op %lu: %s\n", (unsigned long)k, why); }
+        if (o != SIM_POWERCUT) break;
+        cuts++;
+        raise_t again = { MB_FLOOR_SECURITY, v, 0 };            // and the next boot carries on
+        raise_fn(&again);
+        if (again.rc != MB_OK || !store_holds(v, ida, idb, why)) { bad++; printf("    after cut %lu: rc %d, %s\n", (unsigned long)k, again.rc, why); }
+    }
+    // erase, 3 floors + 5 records copied, the commit, the old unit's erase, the raise itself: 12 operations
+    CHECK(cuts == 12 && bad == 0, "%d cuts, each leaving the old or the new store whole, and the next raise working (%d bad)", cuts, bad);
+
+    printf("store, one unit (no erase): append-only as before\n");
+    store_scene(&ida, &idb);
+    sim_store_two(false);
+    CHECK(mb_floor_raise(&sim_port, MB_FLOOR_SECURITY, 5) == MB_OK, "still works");
+    sim_two_stage(false, NULL);
+}
+
+// ---------------------------------------------------------------------------
 // mcumgr / SMP (core/mb_smp.c), with requests made by the smp package (tests/gen_smp.h)
 // ---------------------------------------------------------------------------
 #if MB_FEAT_SMP
@@ -2040,6 +2139,7 @@ int main(int argc, char** argv) {
     test_boot_record();
     test_power_cuts();
     test_two_stage();
+    test_store_compaction();
     test_smp();
     test_night();
     printf("\n%d checks, %d failed\n", checks + crypto_checks, fails + crypto_fails);

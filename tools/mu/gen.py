@@ -331,11 +331,29 @@ def floor_region(cfg: Config, lay: Layout) -> tuple[int, int] | None:
     bootloader region, which the bootloader's code must leave free"""
     if not cfg.effective("PROTECTED_FLOOR") and not cfg.effective("TWO_STAGE"):
         return None
+    off, size, unit = _floor(lay)
+    return off, size
+
+
+FLOOR_TWO_UNITS_MAX = 8 * 1024     # erase units up to this size: two of them, compacted (core/mb_floor.c)
+
+
+def _floor(lay: Layout) -> tuple[int, int, int]:
+    """(offset, size, unit): the last two erase units of the bootloader region when
+    they are small and alike (a full one is compacted into the other), else the last
+    one alone (unit 0: append-only; a big sector holds thousands of entries)"""
     end = lay.boot.offset + lay.boot.size
-    for off, size in lay.sectors:
-        if off + size == end:
-            return off, size
-    raise ValueError("bootloader region doesn't end on a sector boundary")
+    last = next(((o, s) for o, s in lay.sectors if o + s == end), None)
+    if last is None:
+        raise ValueError("bootloader region doesn't end on a sector boundary")
+    prev = next(((o, s) for o, s in lay.sectors if o + s == last[0]), None)
+    if last[1] <= FLOOR_TWO_UNITS_MAX and prev and prev[1] == last[1] and prev[0] >= lay.boot.offset:
+        return prev[0], 2 * last[1], last[1]
+    return last[0], last[1], 0
+
+
+def floor_unit(cfg: Config, lay: Layout) -> int:
+    return _floor(lay)[2] if floor_region(cfg, lay) else 0
 
 
 def code_room(cfg: Config, lay: Layout) -> int:
@@ -383,7 +401,7 @@ def mcu_header(cfg: Config, lay: Layout, loader_ram: int, overrides: dict | None
         if t.get("vendor") == "samd" and t.get("series") == 21:
             entry = 64                          # a SAM D21 page is written once per erase
         lines += [f"#define MB_FLOOR_OFF 0x{fr[0]:x}u", f"#define MB_FLOOR_SIZE 0x{fr[1]:x}u",
-                  f"#define MB_FLOOR_ENTRY {entry}u"]
+                  f"#define MB_FLOOR_ENTRY {entry}u", f"#define MB_FLOOR_UNIT 0x{floor_unit(cfg, lay):x}u"]
     lines += VENDOR_MACROS[t.get("vendor")](cfg)
     lines += ["", "/* flash layout (offsets from MB_FLASH_BASE) */", layout_init(lay), "", "#endif", ""]
     return "\n".join(lines)

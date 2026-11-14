@@ -322,7 +322,12 @@ def two_stage_checks(db):
     check([s.name for s in lay.slots[:3]] == ["a", "b", "g"], "A, B, golden keep slots 0..2")
     check(all(s.size >= 52 * 1024 and s.offset % 4096 == 0 for s in s1), "copies sized and sector aligned")
     check(s1[0].offset > lay.log[1].offset, "copies after the log (small sectors go to the log first)")
-    check(gen.floor_region(cfg, lay) == (12 * 1024, 4096), "two-stage: the store is the boot region's last unit")
+    check(gen.floor_region(cfg, lay) == (8 * 1024, 8192) and gen.floor_unit(cfg, lay) == 4096,
+          "two-stage: the store is the boot region's last two 4 KB units (they compact)")
+    f4 = Config(db, "nucleo-f411re")
+    lay4 = gen.mcu_layout(f4, boot_bytes=48 * 1024)
+    check(gen._floor(lay4)[2] == 0 and gen._floor(lay4)[1] >= 16 * 1024,
+          "big sectors (F4): one append-only unit")
     check(gen.stage1_bytes(cfg, 40000) == (4096 + 50000 + 4095) // 4096 * 4096, "STAGE1_SIZE auto: measured + 25% + header")
     cfg.set("AUX_SLOTS", 2)
     check(any("at most 6 slots" in m for lvl, m in cfg.problems() if lvl == "error"), "two-stage + 5 slots refused")

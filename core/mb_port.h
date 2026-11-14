@@ -56,13 +56,18 @@ typedef struct {
 #define MB_STORE_KEY_REVOKED 13     /* value = key_id of a signing key no longer trusted (REVOKE_KEYS) */
 #define MB_STORE_S1_GOOD    14      /* this stage 1 started an image: it works */
 #define MB_STORE_S1_ATTEMPT 15      /* one boot of an unconfirmed stage 1 */
+#define MB_STORE_GEN        12      /* two-unit stores: first entry of a compacted unit, value = generation */
 #define MB_STORE_RESERVE    8       /* attempts never take the last entries: floors still fit */
-_Static_assert(MB_FLOOR_COUNT <= MB_STORE_KEY_REVOKED, "floor tags would overlap the counted ones");
+_Static_assert(MB_FLOOR_COUNT <= MB_STORE_GEN, "floor tags would overlap the counted ones");
 typedef struct mb_floor_store {
-    uint32_t off, size;         /* flash offset and size of the store (one erase unit) */
+    uint32_t off, size;         /* flash offset and size of the store */
     uint32_t entry;             /* bytes per entry: 16, or the chip's program unit if larger */
     int (*read)(uint32_t off, void* buf, size_t len);
     int (*program)(uint32_t off, const void* buf, size_t len);
+    /* Two erase units (size = 2 * unit) and an erase: a full unit is compacted
+     * into the other (core/mb_floor.c). unit 0 or no erase: one append-only unit. */
+    uint32_t unit;
+    int (*erase)(uint32_t off, size_t len);
 } mb_floor_store_t;
 
 typedef struct mb_port {

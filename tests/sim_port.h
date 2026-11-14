@@ -58,6 +58,7 @@ extern const uint8_t sim_test_secret[32], sim_test_public[32];
 
 void sim_reset(void);
 void sim_two_stage(bool on, const uint8_t s1_public[32]);   /* slots c, d -> s1a, s1b; NULL key: keep */
+void sim_store_two(bool on);    /* the protected store as two 2 KB units that compact (sim_reset: one) */
 void sim_input(const void* data, size_t len);
 sim_outcome_t sim_power_on(void);
 sim_outcome_t sim_guard(void (*fn)(void* ctx), void* ctx);

@@ -297,10 +297,25 @@ static int floor_program(uint32_t off, const void* b, size_t n) {
     return mcu_flash_program(off, b, n);
 }
 #define FLOOR_PROGRAM floor_program
+#if defined(MB_FLOOR_UNIT) && MB_FLOOR_UNIT
+// two erase units: a full one is compacted into the other (core/mb_floor.c)
+static int floor_erase(uint32_t off, size_t n) {
+    if (off % MB_FLOOR_UNIT || n != MB_FLOOR_UNIT || (uint32_t)(off - MB_FLOOR_OFF) > MB_FLOOR_SIZE - n) return MB_E_BADARG;
+    return mcu_flash_erase(off, n);
+}
+#define FLOOR_ERASE floor_erase
+#define FLOOR_UNIT MB_FLOOR_UNIT
+#endif
 #else
 #define FLOOR_PROGRAM NULL
 #endif
-static const mb_floor_store_t floor_store = { MB_FLOOR_OFF, MB_FLOOR_SIZE, MB_FLOOR_ENTRY, f_read, FLOOR_PROGRAM };
+#ifndef FLOOR_ERASE
+#define FLOOR_ERASE NULL
+#define FLOOR_UNIT 0
+#endif
+static const mb_floor_store_t floor_store = { .off = MB_FLOOR_OFF, .size = MB_FLOOR_SIZE, .entry = MB_FLOOR_ENTRY,
+                                              .read = f_read, .program = FLOOR_PROGRAM, .unit = FLOOR_UNIT,
+                                              .erase = FLOOR_ERASE };
 #define FLOOR (&floor_store)
 #else
 #define FLOOR NULL

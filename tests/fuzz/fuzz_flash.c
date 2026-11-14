@@ -6,7 +6,9 @@
  * and the protected store; what it doesn't reach stays erased.
  * Byte 0: bit 0 fix up the CRCs of MimiBoot headers and log records (so the
  * fuzzer gets past them), bit 1 signatures required, bit 2 two-stage layout
- * (slots c/d become stage-1 copies, stage 0's choice runs too).
+ * (slots c/d become stage-1 copies, stage 0's choice runs too), bit 3 the
+ * store as two units, then a floor raise and a counted entry (which compact a
+ * full unit, whatever the fuzzer put in it).
  */
 #include "tests/sim_port.h"
 #include <stddef.h>
@@ -19,7 +21,7 @@ static const struct { uint32_t off, len; } region[] = {
     { 0x080000, 0x2000 },       /* slot b */
     { 0x0E0000, 0x2000 },       /* golden */
     { 0x140000, 0x2000 },       /* c (two-stage: s1a) */
-    { 0x00F000, 0x1000 },       /* the protected store */
+    { 0x00F000, 0x1000 },       /* the protected store (one unit, or two of 2 KB) */
 };
 
 static void fix_crcs(void) {
@@ -58,6 +60,7 @@ int LLVMFuzzerTestOneInput(const uint8_t* d, size_t n) {
     sim.reset_cause = MB_RESET_POWER;
     sim.out_len = 0;
     sim_two_stage((d[0] & 4) != 0, NULL);
+    sim_store_two((d[0] & 8) != 0);
     sim_port.require_signature = (d[0] & 2) != 0;
     size_t i = 1;
     for (size_t r = 0; r < sizeof(region) / sizeof(region[0]) && i < n; r++) {
@@ -72,8 +75,17 @@ int LLVMFuzzerTestOneInput(const uint8_t* d, size_t n) {
     }
     uint32_t fl[MB_FLOOR_COUNT];
     mb_floor_get(&sim_port, fl);
+    if (d[0] & 8) {
+        mb_floor_raise(&sim_port, MB_FLOOR_SECURITY, fl[MB_FLOOR_SECURITY] + 1);
+        mb_store_append(&sim_port, MB_STORE_S1_ATTEMPT, 0x12345678u);
+        uint32_t after[MB_FLOOR_COUNT];
+        mb_floor_get(&sim_port, after);
+        for (int w = 0; w < MB_FLOOR_COUNT; w++)     // a compaction never lowers a floor
+            if (after[w] < fl[w]) __builtin_trap();
+    }
     sim_guard(decide, NULL);
     sim_two_stage(false, NULL);
+    sim_store_two(false);
     sim_port.require_signature = false;
     return 0;
 }

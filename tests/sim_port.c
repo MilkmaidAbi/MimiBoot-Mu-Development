@@ -138,7 +138,24 @@ static int floor_program(uint32_t off, const void* buf, size_t len) {
     sim.programs++;
     return MB_OK;
 }
-static const mb_floor_store_t floor_store = { 0xF000, 0x1000, 16, f_read, floor_program };
+static const mb_floor_store_t floor_store = { .off = 0xF000, .size = 0x1000, .entry = 16, .read = f_read, .program = floor_program };
+
+// The same 4 KB as two 2 KB units that can be erased: compacting stores. A power
+// cut in an erase leaves the first half of the range erased, the rest as it was.
+static int floor_erase(uint32_t off, size_t len) {
+    if (off < 0xF000 || off + len > 0x10000 || off % 0x800 || len % 0x800) return MB_E_BADARG;
+    if (sim.fail_writes || sim.floor_locked) return MB_E_IO;
+    if (cut_now()) {
+        memset(sim_flash + off, 0xFF, len / 2);
+        power_fail();
+    }
+    memset(sim_flash + off, 0xFF, len);
+    sim.erases++;
+    return MB_OK;
+}
+static const mb_floor_store_t floor_store2 = { .off = 0xF000, .size = 0x1000, .entry = 16, .read = f_read,
+                                               .program = floor_program, .unit = 0x800, .erase = floor_erase };
+void sim_store_two(bool on) { sim_port.floor = on ? &floor_store2 : &floor_store; }
 
 static int f_fault_slot(void) {
     int s = sim.fault_slot;

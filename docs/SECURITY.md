@@ -63,16 +63,33 @@ newest golden version live in two places:
 
 - **The boot log.** Ordinary flash. The app library raises the floor when the
   app confirms itself. A compromised app could also lower it here.
-- **The protected store** (`PROTECTED_FLOOR`, nRF): an append-only list in the
-  last 4 KB of the bootloader region, which `BOOT_LOCK` write-protects before
-  the app runs. The bootloader raises it only to the security version of a
+- **The protected store** (`PROTECTED_FLOOR`, nRF): a list of entries at the
+  end of the bootloader region, which `BOOT_LOCK` write-protects before the app
+  runs. Entries are only ever added, except when a full unit is compacted
+  (see below). The bootloader raises it only to the security version of a
   confirmed image it is about to start, so a hostile log can't push it to some
   silly value either.
 
 The floor that counts is the higher of the two. `boot <slot> force` on the
 console doesn't get past it, and neither does `ramboot` when signatures are
-required. The store has room for 256 raises; when it is full the floors stay
-where they are and the log copy carries on.
+required.
+
+The store takes the last two erase units of the bootloader region when they
+are small (8 KB or less: nRF, SAM D, STM32 F0/F1/F3/G0/G4/L4). When one unit
+fills up, its contents are compacted into the other:
+- carried over: the highest value of each floor, every revoked key, and the
+  records of the two stage-1 copies installed now (attempts capped at the try
+  limit);
+- dropped: records of stage-1 copies that are gone.
+
+The new unit's first entry, a generation number, is written last. It is the
+commit, and only after it is the old unit erased. A power cut anywhere leaves
+either the old unit or the complete new one in force (the host tests cut
+power at every step).
+
+Parts with big sectors (STM32 F2/F4/F7) keep one append-only unit of 16 KB or
+more: over a thousand entries. When that is full, the floors stay where they
+are and the log copy carries on.
 
 ## Revoking a signing key
 
@@ -257,11 +274,12 @@ What it doesn't do:
   or slowed once it runs, so it would follow stage 1 into the app. A stage 1
   that faults resets itself (the fault handler); one that hangs is counted by
   power cycles.
-- **The store is finite.** It is append-only, one erase unit (4 KB: 256 entries
-  of 16 bytes). A stage-1 update costs at most 5 entries (3 boots, "it works",
-  a floor). Boot counting stops 8 entries short of full so floors still fit.
-  Nothing erases the store in the field yet, so after about 50 stage-1 updates
-  new copies start without trials.
+- **The store compacts where it can.** A stage-1 update costs at most 5 entries
+  (3 boots, "it works", a floor), and boot counting stops 8 entries short of
+  full so floors still fit. On parts with small erase units a full unit is
+  compacted into the other (see "Rollback floors"), so updates go on. On big-sector
+  STM32 parts (F2/F4/F7) the one unit holds over 200 updates, after which new
+  copies start without trials.
 - **A stage-1 copy that is damaged, unsigned or below the floor is skipped, not
   repaired.** If both are unusable, stage 0 has nothing to start: STM32 parts
   fall into their ROM loader, others wait for a debug probe.
