@@ -531,7 +531,41 @@ def build_variants():
                 print(f"  {name:20} {variant:9} FAILED: {msg}")
     print(f"build-variants: {built} built, {refused} refused as too small, {len(bad)} failed"
           + (f" ({', '.join(bad)})" if bad else ""))
-    return len(bad)
+    return len(bad) + lms_two_stage(db, out)
+
+
+def lms_two_stage(db, out: Path) -> int:
+    """Two-stage builds whose stage 0 checks stage 1 with LMS (the stage-1 copies signed with an
+    LMS key by the build), with and without Ed25519 in the build"""
+    import mb_lms
+    from mu import build as mubuild
+    sys.path.insert(0, str(ROOT / "tools"))
+    import mbtool
+    key = out / "s1-lms.key"
+    if not key.exists():
+        mb_lms.generate(str(key), h=5, w=4)
+    pub = mb_lms.PrivateKey(str(key)).public
+    (out / "s1-lms.pub").write_text(pub.hex() + "\n")
+    bad = 0
+    for board in ("microbit", "nucleo-l476rg"):
+        for ed in (True, False):
+            cfg = Config(db, board)
+            for k, v in (("TWO_STAGE", True), ("LMS", True), ("SIGNATURES", ed), ("S1_KEYS", str(out / "s1-lms.pub")),
+                         ("STAGE1_SIGN_KEY", str(key)), ("KEYS", str(out / "s1-lms.pub")), ("REQUIRE_SIGNATURE", True)):
+                cfg.set(k, v)
+            name = f"{board}-two-stage-lms{'+ed' if ed else ''}"
+            try:
+                info = mubuild.build(cfg, out / name, log=lambda *a: None)
+                img = (out / name / "stage1-s1a.img").read_bytes()
+                h = mbtool.parse_header(img)
+                ok = h["flags"] & mbtool.F_LMS and mb_lms.verify(pub, img[:mbtool.SIGNED_BYTES], mbtool.lms_sig_of(img))
+                print(f"  {name:32} stage 0 {info['stage0_used']} B, stage 1 {info['flash_used']} B, "
+                      f"s1a LMS signature {'OK' if ok else 'BAD'}")
+                bad += 0 if ok else 1
+            except Exception as e:  # noqa: BLE001
+                bad += 1
+                print(f"  {name:32} FAILED: {str(e).splitlines()[-1] if str(e) else traceback.format_exc()}")
+    return bad
 
 
 if __name__ == "__main__":
