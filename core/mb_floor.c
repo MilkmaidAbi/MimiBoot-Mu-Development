@@ -41,6 +41,16 @@
 
 #define FLOOR_TAG(w) (0x3046424Du + ((uint32_t)(w) << 24)) /* "MBF0", "MBF1" */
 
+// Compaction is compiled only where a store can have two units: board builds
+// say so (MB_FLOOR_UNIT from the configurator), host tests and fuzzing have it
+#if defined(MB_FLOOR_UNIT)
+#define COMPACT (MB_FLOOR_UNIT != 0)
+#elif defined(MB_FLASH_BASE)
+#define COMPACT 0
+#else
+#define COMPACT 1
+#endif
+
 typedef struct {
     uint32_t tag, value, inv, ntag;
 } entry_t;
@@ -52,7 +62,7 @@ static bool valid(const entry_t *e) { return e->inv == ~e->value && e->ntag == ~
 
 static bool store_ok(const mb_floor_store_t *s) { return s && s->read && s->entry >= sizeof(entry_t) && s->entry <= 256; }
 static bool two_units(const mb_floor_store_t *s) {
-    return s->erase && s->unit && s->unit % s->entry == 0 && s->size >= 2 * s->unit;
+    return COMPACT && s->erase && s->unit && s->unit % s->entry == 0 && s->size >= 2 * s->unit;
 }
 
 // The unit in force: [*base + *first, *base + *end) holds its entries (offsets in the store)
@@ -140,6 +150,7 @@ static int put(const mb_floor_store_t *s, uint32_t at, int tag, uint32_t value) 
     return s->program(s->off + at, buf, s->entry);
 }
 
+#if COMPACT
 // The stage-1 copies installed now (their records are the ones stage 0 looks up)
 static int live_stage1(const mb_port_t *p, uint32_t ids[2]) {
     int n = 0;
@@ -226,6 +237,12 @@ static int compact(const mb_port_t *p) {
     s->erase(s->off + base, s->unit); // a failure here only leaves a stale, lower generation
     return MB_OK;
 }
+#else
+static int compact(const mb_port_t *p) {
+    (void)p;
+    return MB_E_NOSPACE;
+}
+#endif
 
 // Room for one more entry (`keep` bytes held back), compacting once if needed
 static int room(const mb_port_t *p, uint32_t keep, uint32_t cur[MB_FLOOR_COUNT], uint32_t *at) {
