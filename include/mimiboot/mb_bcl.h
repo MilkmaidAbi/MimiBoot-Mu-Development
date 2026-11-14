@@ -60,7 +60,8 @@
 #define MB_REQ_BOOT_ONCE    2   /* boot slot request_arg once */
 #define MB_REQ_BOOTSEL      3   /* reboot into the ROM USB bootloader */
 #define MB_REQ_ENTRY_ONCE   4   /* boot config entry request_arg once (with args[] if set) */
-#define MB_REQ_NIGHT        6   /* versioned command in reserved[24], consumed once */
+#define MB_REQ_CONTROL      6   /* versioned control-service command in reserved[24], consumed once */
+#define MB_REQ_NIGHT        MB_REQ_CONTROL  /* (its old name) */
 #define MB_REQ_FLASH        5   /* flash mode: console up, no countdown, waiting for mbtool */
 
 /* how the last boot was chosen */

@@ -823,6 +823,10 @@ int mb_boot_ram(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg,
     memset(&tmp, 0, sizeof(tmp));
     tmp.hdr = *hdr;
     tmp.header_ok = true;
+    if (hdr->flags & MB_IMG_F_LMS) { // a RAM image's LMS signature: the one its upload brought
+        tmp.sig_ram = mb_upload_sig.buf;
+        tmp.sig_ram_len = mb_upload_sig.len;
+    }
     if (mb_image_check_sig(p, &tmp) != MB_OK)
         return MB_E_SIGNATURE;
     const uint8_t *mem = p->ram_ptr(hdr->load_addr, hdr->payload_size);
@@ -886,7 +890,7 @@ void mb_main(const mb_port_t *p) {
         }
 #ifdef MB_BOOT_DIAGNOSTICS
         if(log.cur.request==MB_REQ_NONE)flags|=MB_F_MENU;
-        else if(log.cur.request==MB_REQ_BOOT_ONCE||log.cur.request==MB_REQ_ENTRY_ONCE||log.cur.request==MB_REQ_NIGHT)flags&=~MB_F_MENU;
+        else if(log.cur.request==MB_REQ_BOOT_ONCE||log.cur.request==MB_REQ_ENTRY_ONCE||log.cur.request==MB_REQ_CONTROL)flags&=~MB_F_MENU;
 #endif
         mb_boot_progress(3);
         mb_config_load(p, &cfg);

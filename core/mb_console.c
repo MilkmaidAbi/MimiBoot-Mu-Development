@@ -398,6 +398,10 @@ static int ram_begin(void* ctx, const mb_image_hdr_t* hdr) {
     memset(&tmp, 0, sizeof(tmp));
     tmp.hdr = *hdr;
     tmp.header_ok = true;
+    if (hdr->flags & MB_IMG_F_LMS) {            // the signature that came with it ('S' frame)
+        tmp.sig_ram = mb_upload_sig.buf;
+        tmp.sig_ram_len = mb_upload_sig.len;
+    }
     if (mb_image_check_sig(s->p, &tmp) != MB_OK) return MB_E_SIGNATURE;
     s->hdr = *hdr;
     return MB_OK;

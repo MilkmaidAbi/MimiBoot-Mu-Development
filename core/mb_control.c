@@ -55,7 +55,7 @@ int mb_control_submit(const mb_port_t *p, const mb_control_request_t *q) { (void
 int mb_control_reboot(const mb_port_t *p, const mb_control_request_t *q) { (void)p; (void)q; return MB_E_UNSUPP; }
 int mb_control_consume(const mb_port_t *p, mb_bcl_rec_t *r, const mb_config_t *cfg, mb_topology_t *t, int *action) {
     (void)p; (void)cfg; (void)t; (void)action;
-    if (r->request == MB_REQ_NIGHT) { memset(r->reserved, 0, sizeof r->reserved); r->request = MB_REQ_NONE; }
+    if (r->request == MB_REQ_CONTROL) { memset(r->reserved, 0, sizeof r->reserved); r->request = MB_REQ_NONE; }
     return 0;
 }
 void mb_control_requeue(mb_bcl_rec_t *r, const mb_config_t *cfg, const struct mb_choice *c) { (void)r; (void)cfg; (void)c; }
@@ -70,7 +70,7 @@ static void store(mb_bcl_rec_t *r, unsigned action, mb_topology_t t, const char 
     if (entry)
         snprintf(s.entry, sizeof s.entry, "%s", entry);
     memcpy(r->reserved, &s, sizeof s);
-    r->request = MB_REQ_NIGHT;
+    r->request = MB_REQ_CONTROL;
 }
 int mb_control_submit(const mb_port_t *p, const mb_control_request_t *q) {
     if (!p || !q || q->version != MB_CONTROL_API_VERSION || q->size != sizeof *q || q->action > MB_CONTROL_SLOT ||
@@ -119,7 +119,7 @@ int mb_control_reboot(const mb_port_t *p, const mb_control_request_t *q) {
     return MB_E_UNSUPP;
 }
 int mb_control_consume(const mb_port_t *p, mb_bcl_rec_t *r, const mb_config_t *cfg, mb_topology_t *t, int *action) {
-    if (r->request != MB_REQ_NIGHT)
+    if (r->request != MB_REQ_CONTROL)
         return 0;
     stored_t s;
     memcpy(&s, r->reserved, sizeof s);

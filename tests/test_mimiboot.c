@@ -2253,6 +2253,29 @@ static void test_lms_images(void) {
     console_run(n);
     CHECK(strstr(sim.out, "MB DONE"), "a build without LMS keys takes it as unsigned (signatures optional)");
 
+    printf("LMS: ramboot (the signature from the 'S' frame), signatures required\n");
+    good_a();
+    sim_lms(lms_public, NULL);
+    sim_port.require_signature = true;
+    make_payload(LMS_RAM_SEED, LMS_RAM_SIZE);
+    memcpy(bad, lms_ram_sig, sizeof lms_ram_sig);
+    bad[333] ^= 2;
+    n = (size_t)sprintf((char*)script, "c\rramboot\r");
+    n = put_lms_upload(script, n, lms_ram_hdr, bad, sizeof lms_ram_sig, LMS_RAM_SIZE);
+    console_run(n);
+    CHECK(!sim.booted_ram && strstr(sim.out, "MB ERR refused"), "a bad signature: refused");
+    n = (size_t)sprintf((char*)script, "c\rramboot\r");
+    n = put_lms_upload(script, n, lms_ram_hdr, lms_ram_sig, sizeof lms_ram_sig, LMS_RAM_SIZE);
+    sim.console = true;
+    sim.button = true;
+    sim_input(script, n);
+    sim_outcome_t ro = sim_power_on();
+    sim.button = false;
+    sim.console = false;
+    CHECK(ro == SIM_BOOTED && sim.booted_ram && !memcmp(sim_ram + (LMS_RAM_ADDR - SIM_RAM_BASE), payload, LMS_RAM_SIZE),
+          "the good one: checked again at launch, started from RAM");
+    sim_port.require_signature = false;
+
     printf("LMS: client install (install_sig, begin, write, end)\n");
     good_a();
     sim_lms(lms_public, NULL);
