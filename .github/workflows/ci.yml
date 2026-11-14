@@ -50,6 +50,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-avr avr-libc
       - name: configurator checks, then build every board (Pico SDK boards excepted)
         run: python tests/test_mimiconf.py --build-all
+      - name: the same boards with two stages and with SMP (where they fit)
+        run: python tests/test_mimiconf.py --build-variants
 
   qemu:
     name: STM32 + nRF51 in QEMU
@@ -65,10 +67,10 @@ jobs:
           echo "$ARM_TC_SHA256  tc.tar.xz" | sha256sum -c -
           mkdir -p "$HOME/arm" && tar -xJf tc.tar.xz -C "$HOME/arm"
           echo "$HOME/arm/$ARM_TC/bin" >> "$GITHUB_PATH"
-      - name: QEMU, imgtool (for the Zephyr/MCUboot cases), pyserial
+      - name: QEMU, imgtool (for the Zephyr/MCUboot cases), pyserial, smp (the SMP client the mcumgr cases talk through)
         run: |
           sudo apt-get update && sudo apt-get install -y qemu-system-arm
-          pip install imgtool pyserial
+          pip install imgtool pyserial smp==4.3.0
       - name: boot tests
         run: python tests/qemu/test_qemu.py
 

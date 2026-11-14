@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
-        "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0"]
+        "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp"]
 OFF_ALL = dict(CONSOLE=0, SHELL=0, SHELL_DIAG=0, RECV=0, CFG_FILE=0, GRUB=0, CONTROL=0, SIGNATURES=0, ANTI_ROLLBACK=0,
                RAM_IMAGES=0, HANDOFF=0, CRASH_GUARD=0, TRIAL_WATCHDOG=0)
 NO_TRIAL = dict(AB_TRIAL=0, TRIAL_WATCHDOG=0)
@@ -26,6 +26,9 @@ PROFILES = {
     "verify-once": dict(**NO_TRIAL, MB_BOOT_VERIFY=1, MB_MENU_SECS=3),
     "verify-never": dict(**NO_TRIAL, MB_BOOT_VERIFY=2),
     "verify-once+mcuboot": dict(**NO_TRIAL, MB_BOOT_VERIFY=1, IMG_MCUBOOT=1),
+    "smp": dict(SMP=1, IMG_MCUBOOT=1),
+    "smp-small-buffer": dict(SMP=1, MB_SMP_BUF=256, SHELL_DIAG=0),
+    "two-stage+smp": dict(TWO_STAGE=1, SMP=1),
 }
 INVALID = {
     "recv-without-console": dict(CONSOLE=0, SHELL=0, SHELL_DIAG=0, RECV=1),
@@ -35,6 +38,7 @@ INVALID = {
     "no-image-format": dict(IMG_NATIVE=0),
     "required-signature-hash-once": dict(MB_REQUIRE_SIGNATURE=1, MB_BOOT_VERIFY=1),
     "verify-out-of-range": dict(MB_BOOT_VERIFY=7),
+    "smp-without-recv": dict(SMP=1, RECV=0),
 }
 
 

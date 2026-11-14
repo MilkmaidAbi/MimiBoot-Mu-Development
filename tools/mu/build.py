@@ -19,7 +19,7 @@ from . import gen
 from .model import ROOT, Config, parse_sectors, parse_size
 
 NIGHT_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
-              "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0"]
+              "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp"]
 # a two-stage build's stage 0: check MimiBoot images, keep its records, start one
 STAGE0_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_floor", "mb_ecdsa", "mb_stage0"]
 VENDOR_SOURCES = {"stm32": ["port/stm32/stm32_flash.c", "port/stm32/stm32_periph.c"],

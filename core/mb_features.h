@@ -94,6 +94,9 @@
 #ifndef MB_FEAT_BOOT_LOCK
 #define MB_FEAT_BOOT_LOCK       0   /* write-protect the bootloader region until reset before starting an image */
 #endif
+#ifndef MB_FEAT_SMP
+#define MB_FEAT_SMP             0   /* mcumgr / SMP over the console (core/mb_smp.c) */
+#endif
 #ifndef MB_FEAT_TWO_STAGE
 #define MB_FEAT_TWO_STAGE       0   /* fixed stage 0 + two updatable stage-1 copies (core/mb_stage0.c) */
 #endif
@@ -166,6 +169,9 @@
 #endif
 #if MB_MENU_SECS < 1 || MB_MENU_SECS > 600
 #error "MB_MENU_SECS must be 1..600"
+#endif
+#if MB_FEAT_SMP && (!MB_FEAT_RECV || !MB_FEAT_CONSOLE)
+#error "MB_FEAT_SMP needs MB_FEAT_RECV (its uploads write slots the same way) and the console"
 #endif
 #if MB_FEAT_TWO_STAGE && !MB_FEAT_IMG_NATIVE
 #error "MB_FEAT_TWO_STAGE needs MB_FEAT_IMG_NATIVE: stage-1 copies are MimiBoot images"

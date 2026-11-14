@@ -6,6 +6,10 @@
  */
 #include "tests/sim_port.h"
 #include "tests/gen_signed.h"
+#if MB_FEAT_SMP
+#include "tests/gen_smp.h"
+#include "tests/smp_rx.h"
+#endif
 #include <stdio.h>
 #include <string.h>
 
@@ -96,6 +100,33 @@ int main(void) {
     CHECK(!strstr(sim.out, "erase slot g?"), "still locked");
     console("c\runlock\r");
     CHECK(strstr(sim.out, "MB ERR locked out until reset") != NULL, "lockout holds for the session (no reset in the sim)");
+
+#if MB_FEAT_SMP
+    printf("console lock: SMP (mcumgr)\n");
+    {
+        // requests from the smp package (tests/gen_smp.h): echo, list, then an upload and an erase
+        static uint8_t s[20000];
+        size_t n = 0;
+        memcpy(s + n, smp_echo, sizeof smp_echo); n += sizeof smp_echo;
+        memcpy(s + n, smp_list, sizeof smp_list); n += sizeof smp_list;
+        memcpy(s + n, smp_upload_cut, sizeof smp_upload_cut); n += sizeof smp_upload_cut;
+        memcpy(s + n, smp_erase_b, sizeof smp_erase_b); n += sizeof smp_erase_b;
+        sim.console = true;
+        sim.button = true;
+        sim_input(s, n);
+        sim_power_on();
+        sim.console = false;
+        sim.button = false;
+        smp_collect();
+        CHECK(smp_rx_n == 6, "every request answered (%d)", smp_rx_n);
+        CHECK(SMP_HAS(0, "\x61r\x6bhi from smp") && SMP_HAS(1, "\x66images"), "reading is allowed: echo, list");
+        int denied = 0;
+        for (int k = 2; k < smp_rx_n; k++) denied += SMP_HAS(k, "\x62rc\x0b");     // {"rc": 11}: access denied
+        CHECK(denied == 4, "the three upload chunks and the erase: access denied (%d)", denied);
+        mb_slot_info_t in;
+        CHECK(mb_image_read_header(&sim_port, MB_SLOT_B, &in) != MB_OK, "nothing written");
+    }
+#endif
 
 #if MB_FEAT_CFG_SIGNED
     printf("signed boot config\n");

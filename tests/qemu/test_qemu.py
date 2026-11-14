@@ -453,6 +453,171 @@ def nrf51_tests(work: Path, db, check):
           "MB ERR bad response (1 of 5)" in o and "MB UNLOCKED" not in o, note + o[-1500:])
 
     two_stage_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
+    smp_tests(work, db, check, board, machine, ram_lo, ram_hi, probe, os.environ.get("IMGTOOL") or shutil.which("imgtool"))
+
+
+def smp_request(s, req, timeout=15.0):
+    """Send one SMP request (the smp package's message) over a QemuSerial and return
+    (header, body dict) of the reply, parsed by the smp package's framing and cbor2."""
+    import cbor2
+    from smp import header as smphdr
+    from smp import packet
+    for line in packet.encode(req.BYTES, line_length=127):
+        s.write(line)
+    dec = packet.decode()
+    next(dec)
+    buf, end = b"", time.time() + timeout
+    while time.time() < end:
+        buf += s.read(4096)
+        while True:
+            starts = [i for i in (buf.find(b"\x06\x09"), buf.find(b"\x04\x14")) if i >= 0]
+            if not starts or buf.find(b"\n", min(starts)) < 0:
+                break
+            i = min(starts)
+            j = buf.find(b"\n", i)
+            line, buf = buf[i:j + 1], buf[j + 1:]
+            try:
+                dec.send(line)
+            except StopIteration as e:
+                frame = e.value
+                return smphdr.Header.loads(frame[:8]), cbor2.loads(frame[8:])
+    raise TimeoutError(f"no SMP reply to {type(req).__name__}")
+
+
+def smp_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe, imgtool):
+    """8. SMP (mcumgr) on the nRF51: requests and replies by the smp package, uploads
+    written through the real NVMC, then booted after a power cycle."""
+    try:
+        from smp import image_management as img
+        from smp import os_management as osm
+    except ImportError:
+        print("[SKIP] SMP cases: pip install smp (the independent client the test talks through)")
+        return
+    import hashlib
+    sys.path.insert(0, str(ROOT / "tools"))
+    import mbtool as mbt
+    cfg = Config(db, board)
+    cfg.set("LAYOUT", "ab+golden")
+    cfg.set("SMP", True)
+    cfg.set("IMG_MCUBOOT", True)
+    out = work / f"{board}-smp"
+    info = mubuild.build(cfg, out, log=lambda *a: None)
+    lay = json.loads((out / "layout.json").read_text())
+    slot = {s["name"]: s for s in lay["slots"]}
+    fsize = lay["flash_size"]
+    print(f"{board} (SMP): bootloader {info['flash_used']} B flash, {info['ram_used']} B RAM (+{info['stack']} stack)")
+    elf = build_nrf_app(work, "smp-app", slot["a"]["link_native"], ram_lo, ram_hi, probe)   # a fresh board: "image 0" is a
+    app = work / "smp-app.mimg"
+    mbtool("pack", str(elf), "--target", lay["target"], "-o", str(app), "--version", "2.0.0")
+    image = app.read_bytes()
+
+    def upload(s, data, image_no=0, chunk=600):
+        sha, last = hashlib.sha256(data).digest(), None
+        for off in range(0, len(data), chunk):
+            extra = {"image": image_no, "len": len(data), "sha": sha} if off == 0 else {}
+            h, d = smp_request(s, img.ImageUploadWriteRequest(off=off, data=data[off:off + chunk], **extra))
+            if "err" in d or d.get("rc", 0) or d.get("off") != min(off + chunk, len(data)):
+                return d
+            last = d
+        return last
+
+    flash = flash_image(work, "smp", fsize, out / "mimiboot.bin", slot["g"]["offset"], b"")   # nothing: the menu stays up
+    s = QemuSerial(machine, flash, seconds=120, keep=True)
+    notes, got = [], {}
+    try:
+        if not mbt.read_until(s, r"up/down \+ enter", 30)[1]:
+            raise RuntimeError("the menu never came up")    # sent earlier, a request would be the break-in key
+        h, got["params"] = smp_request(s, osm.MCUMgrParametersReadRequest())
+        h, got["echo"] = smp_request(s, osm.EchoWriteRequest(d="mimiboot smp"))
+        h, got["boot"] = smp_request(s, osm.BootloaderInformationReadRequest())
+        h, got["list0"] = smp_request(s, img.ImageStatesReadRequest())
+        got["up"] = upload(s, image)
+        h, got["list1"] = smp_request(s, img.ImageStatesReadRequest())
+        got["golden"] = upload(s, image, image_no=3)
+        s.keep_flash(fsize)
+    except (SystemExit, TimeoutError, RuntimeError) as e:
+        notes.append(str(e))
+    o = s.close()
+    note = "\n".join(notes) + f"\n{got}\n"
+    check(f"{board}: SMP: MCUmgr parameters (buf_size 1024)", got.get("params", {}).get("buf_size") == 1024, note + o[-1500:])
+    check(f"{board}: SMP: echo", got.get("echo", {}).get("r") == "mimiboot smp", note)
+    check(f"{board}: SMP: bootloader info", got.get("boot", {}).get("bootloader") == "MimiBoot", note)
+    check(f"{board}: SMP: image list of an empty board", got.get("list0", {}).get("images") == [], note)
+    check(f"{board}: SMP: a MimiBoot image uploaded through the NVMC driver, sha matched",
+          (got.get("up") or {}).get("off") == len(image) and (got.get("up") or {}).get("match") is True, note)
+    lst = (got.get("list1") or {}).get("images") or []
+    check(f"{board}: SMP: the list shows it in slot a (no active slot yet), 2.0.0, pending",
+          any(i.get("slot") == 0 and i.get("version") == "2.0.0" and i.get("pending") is True and
+              i.get("hash") == hashlib.sha256(image[0x1000:]).digest() for i in lst), note)
+    check(f"{board}: SMP: golden (image 3) refused", "err" in (got.get("golden") or {}), note)
+    o = boot_keep(machine, flash, fsize)                   # power on with what SMP wrote
+    check(f"{board}: SMP: after a power cycle the uploaded image boots from a",
+          "MU-APP smp-app" in o and "slot=a" in o, o[-1500:])
+
+    # signatures required: Ed25519 runs inside menu -> SMP -> upload on the M0 and its 6 KB stack.
+    # An unsigned image is refused at its first page; a signed one goes in and boots.
+    cfg_s = Config(db, board)
+    cfg_s.set("LAYOUT", "ab+golden")
+    cfg_s.set("SMP", True)
+    cfg_s.set("KEYS", str(work / "trusted.pub"))
+    cfg_s.set("REQUIRE_SIGNATURE", True)
+    out_s = work / f"{board}-smp-signed"
+    info_s = mubuild.build(cfg_s, out_s, log=lambda *a: None)
+    lay_s = json.loads((out_s / "layout.json").read_text())
+    sa = next(x for x in lay_s["slots"] if x["name"] == "a")
+    print(f"{board} (SMP, signatures required): bootloader {info_s['flash_used']} B flash")
+    elf = build_nrf_app(work, "smp-signed", sa["link_native"], ram_lo, ram_hi, probe)
+    simg = work / "smp-signed.mimg"
+    mbtool("pack", str(elf), "--target", lay_s["target"], "-o", str(simg), "--version", "2.1.0", "--key", str(work / "trusted.key"))
+    uimg = work / "smp-unsigned.mimg"
+    mbtool("pack", str(elf), "--target", lay_s["target"], "-o", str(uimg), "--version", "2.1.0")
+    flash3 = flash_image(work, "smp-signed", fsize, out_s / "mimiboot.bin", slot["g"]["offset"], b"")
+    s = QemuSerial(machine, flash3, seconds=120, keep=True)
+    res_u = res_s = None
+    notes = []
+    try:
+        if not mbt.read_until(s, r"up/down \+ enter", 30)[1]:
+            raise RuntimeError("the menu never came up")
+        res_u = upload(s, uimg.read_bytes())
+        res_s = upload(s, simg.read_bytes())
+        s.keep_flash(fsize)
+    except (SystemExit, TimeoutError, RuntimeError) as e:
+        notes.append(str(e))
+    o = s.close()
+    check(f"{board}: SMP signed: an unsigned image is refused at the first chunk", "err" in (res_u or {}),
+          f"{notes} {res_u}\n{o[-800:]}")
+    check(f"{board}: SMP signed: a signed image goes in (Ed25519 on the M0, inside the console)",
+          (res_s or {}).get("off") == len(simg.read_bytes()) and (res_s or {}).get("match") is True, f"{notes} {res_s}\n{o[-800:]}")
+    o = boot_keep(machine, flash3, fsize)
+    check(f"{board}: SMP signed: ... and boots after a power cycle", "MU-APP smp-signed" in o and "slot=a" in o, o[-1500:])
+
+    if not imgtool:
+        print("[SKIP] SMP + imgtool image: set IMGTOOL")
+        return
+    # an imgtool-signed Zephyr/MCUboot image, uploaded with mcumgr's own image numbering (2 = slot b)
+    mc = build_nrf_app(work, "smp-mcuboot", slot["b"]["link_mcuboot"], ram_lo, ram_hi, probe)
+    mc_bin = work / "smp-mcuboot.bin"
+    run([OBJCOPY, "-O", "binary", mc, mc_bin])
+    signed = work / "smp-mcuboot.signed.bin"
+    run([imgtool, "sign", "--header-size", "0x200", "--pad-header", "--align", "4", "--version", "3.1.0",
+         "--slot-size", hex(slot["b"]["size"]), mc_bin, signed])
+    data = signed.read_bytes()
+    flash2 = flash_image(work, "smp-mc", fsize, out / "mimiboot.bin", slot["g"]["offset"], b"")
+    s = QemuSerial(machine, flash2, seconds=120, keep=True)
+    res, notes = None, []
+    try:
+        if not mbt.read_until(s, r"up/down \+ enter", 30)[1]:
+            raise RuntimeError("the menu never came up")
+        res = upload(s, data, image_no=2, chunk=480)
+        s.keep_flash(fsize)
+    except (SystemExit, TimeoutError, RuntimeError) as e:
+        notes.append(str(e))
+    o = s.close()
+    check(f"{board}: SMP: an imgtool (MCUboot) image uploaded as image 2",
+          (res or {}).get("off") == len(data) and (res or {}).get("match") is True, f"{notes} {res}\n{o[-800:]}")
+    o = boot_keep(machine, flash2, fsize)
+    check(f"{board}: SMP: ... and it boots after a power cycle (vector table at b + 0x200)",
+          "MU-APP smp-mcuboot" in o and f"relay={slot['b']['link_mcuboot']:08x}" in o, o[-1500:])
 
 
 def two_stage_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
@@ -648,9 +813,13 @@ def main():
 
     if not only or "microbit" in only:
         nrf51_tests(work, db, check)
-    elif "two-stage" in only:                # just case 7 (nRF51)
+    elif "two-stage" in only or "smp" in only:     # just case 7 or 8 (nRF51)
         flash = 256 * 1024
-        two_stage_tests(work, db, check, "microbit", "microbit", 0x20000008, 0x20004000, flash - 4)
+        args = (work, db, check, "microbit", "microbit", 0x20000008, 0x20004000, flash - 4)
+        if "two-stage" in only:
+            two_stage_tests(*args)
+        if "smp" in only:
+            smp_tests(*args, imgtool)
 
     for board in ("netduinoplus2", "stm32vldiscovery"):
         if only and board not in only:

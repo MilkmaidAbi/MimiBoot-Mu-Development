@@ -197,6 +197,23 @@ to be on the bench. The domain prefix means an unlock signature can never be
 mistaken for an image signature, or the other way round. Each wrong answer
 costs a growing delay; after five the console stays locked until a reset.
 
+### mcumgr (SMP)
+
+With `SMP` on, the same UART also speaks the Simple Management Protocol, so
+Zephyr's tools (mcumgr, smpmgr, smpclient) can list, upload, test, confirm and
+erase images. It is the console by another route, and held to the same rules:
+
+- Uploads are checked exactly as `recv` checks them (target, signature,
+  stage-1 rules, the hash), and the image's header is written last, so an
+  upload that stops halfway leaves an empty slot.
+- It never writes golden (mcumgr has no `force`), never the stage 1 that is
+  running, and never erases the active, confirmed A/B image.
+- With `CONSOLE_AUTH` and the console locked, every write is refused (access
+  denied). Unlock first with `mbtool --unlock-key`; reading, echo, the
+  parameters and reset still work while locked.
+- SMP itself has no authentication. A board that accepts unsigned images
+  accepts them over SMP too: require signatures on anything that ships.
+
 The challenge comes from the hardware RNG on nRF. Other chips don't have one
 wired up yet: there it is a hash of the boot count, a session counter and the
 clock, which is unique but predictable to someone who can also reset the boot

@@ -59,6 +59,35 @@ static void fmt_version(char* out, size_t cap, uint32_t v) {
 
 static int getc_wait(const mb_port_t* p, uint32_t ms) { return p->getc ? p->getc(ms) : -1; }
 
+/* One key for the menu or the line editor. With SMP, a line starting with an
+ * SMP marker is mcumgr talking: it goes to mb_smp_frame and the caller sees
+ * KEY_SMP (activity, not a key). A line that starts with 0x09 or 0x14 is what
+ * is left of a frame whose first byte was eaten as the break-in key: dropped,
+ * so none of its base64 reaches the menu's hotkeys. */
+#define KEY_SMP (-3)
+#if MB_FEAT_SMP
+static mb_bcl_t* smp_log;
+static bool console_locked(void);
+static int con_getc(const mb_port_t* p, uint32_t ms) {
+    int c = getc_wait(p, ms);
+    if (c == 0x06 || c == 0x04) {
+        int d = getc_wait(p, 50);
+        if ((c == 0x06 && d == 0x09) || (c == 0x04 && d == 0x14)) {
+            mb_smp_frame(p, smp_log, console_locked(), c == 0x06);
+            return KEY_SMP;
+        }
+        c = d;
+    }
+    if (c == 0x09 || c == 0x14) {
+        for (int n = 0; n < 4096 && (c = getc_wait(p, 50)) >= 0 && c != '\n'; n++) {}
+        return KEY_SMP;
+    }
+    return c;
+}
+#else
+#define con_getc getc_wait
+#endif
+
 __attribute__((unused)) static void refresh_headers(const mb_port_t* p, mb_slot_info_t* info) {
     for (int i = 0; i < p->layout->n_slots; i++) {
         mb_slot_info_t fresh;
@@ -249,7 +278,8 @@ static int read_line(const mb_port_t* p, char* buf, int cap, const char* init) {
         put(p, buf);
     }
     for (;;) {
-        int c = getc_wait(p, 1000);
+        int c = con_getc(p, 1000);
+        if (c == KEY_SMP) { idle = 0; continue; }           // mcumgr is talking: not idle, not typing
         if (c < 0) {
             idle += 1000;
             if (idle_limit_ms && idle >= idle_limit_ms) { buf[0] = 0; return -2; }
@@ -528,7 +558,8 @@ static menu_result_t menu(const mb_port_t* p, const mb_bcl_t* log, const mb_conf
     if (secs == 0) secs = 1;                            // the menu was asked for: show it at least briefly
     draw_menu(p, log, cfg, info, sel, dflt, secs);
     for (;;) {
-        int c = getc_wait(p, 1000);
+        int c = con_getc(p, 1000);
+        if (c == KEY_SMP) { secs = -1; continue; }         // mcumgr: stop the countdown, don't redraw over it
         if (c < 0) {
             if (secs > 0 && --secs == 0) { *pick = dflt; return MENU_AUTO; }
             if (secs > 0) draw_menu(p, log, cfg, info, sel, dflt, secs);
@@ -809,6 +840,9 @@ static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_i
 
 void mb_console(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_info_t info[MB_MAX_SLOTS], const mb_plan_t* plan) {
     bool bootable = plan->choice.slot != MB_SLOT_NONE;
+#if MB_FEAT_SMP
+    smp_log = log;
+#endif
     // Wait for someone to open the console. With an image to boot, give up
     // after a while and boot it; with nothing, hand over to the ROM loader
     // so the device can still be flashed.

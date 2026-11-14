@@ -1537,6 +1537,111 @@ static void test_two_stage(void) {
     sim_two_stage(false, NULL);
 }
 
+// ---------------------------------------------------------------------------
+// mcumgr / SMP (core/mb_smp.c), with requests made by the smp package (tests/gen_smp.h)
+// ---------------------------------------------------------------------------
+#if MB_FEAT_SMP
+#include "tests/gen_smp.h"
+#include "tests/smp_rx.h"
+#define HAS SMP_HAS
+
+static size_t smp_n;
+static void smp_add(const uint8_t* d, size_t n) { memcpy(script + smp_n, d, n); smp_n += n; }
+#define SMP_ADD(a) smp_add(a, sizeof(a))
+static sim_outcome_t smp_run(void) {
+    sim.console = true;
+    sim.button = true;
+    sim_input(script, smp_n);
+    sim_outcome_t o = sim_power_on();
+    sim.console = false;
+    sim.button = false;
+    smp_n = 0;
+    smp_collect();
+    return o;
+}
+
+static void test_smp(void) {
+    printf("SMP: echo (v2 and v1), parameters, bootloader info, list, an unknown command\n");
+    good_a();
+    SMP_ADD(smp_echo); SMP_ADD(smp_echo_v1); SMP_ADD(smp_params); SMP_ADD(smp_bootinfo); SMP_ADD(smp_list); SMP_ADD(smp_slot_info);
+    CHECK(smp_run() == SIM_CONSOLE_IDLE, "the console stays up");
+    CHECK(smp_rx_n == 6, "six replies (%d)", smp_rx_n);
+    CHECK(HAS(0, "\x61r\x6bhi from smp") && smp_rx[0].m[0] == ((1 << 3) | 3), "echo: the text back, a v2 write reply");
+    CHECK(HAS(1, "\x61r\x67v1 talk") && smp_rx[1].m[0] == 3, "a v1 request gets a v1 reply");
+    CHECK(HAS(2, "\x68" "buf_size\x19\x04\x00") && HAS(2, "\x69" "buf_count\x01"), "parameters: 1024-byte buffer, one of it");
+    CHECK(HAS(3, "\x6a" "bootloader\x68MimiBoot"), "bootloader info");
+    CHECK(HAS(4, "\x66images") && HAS(4, "\x67version\x65" "1.0.0") && HAS(4, "\x69" "confirmed\xf5"), "list: slot a, 1.0.0, confirmed");
+    CHECK(HAS(5, "\x62rc\x08"), "slot info: not supported");
+    int clears = 0;
+    for (const char* s = sim.out; (s = strstr(s, "\033[2J")) != NULL; s++) clears++;
+    CHECK(clears == 1, "the menu drew once: SMP traffic doesn't redraw it (%d)", clears);
+
+    printf("SMP: upload a MimiBoot image in odd-sized chunks, with a resync, then boot and confirm it\n");
+    good_a();
+    SMP_ADD(smp_upload);
+    smp_run();
+    const mb_slot_def_t* b = &sim_port.layout->slot[MB_SLOT_B];
+    CHECK(smp_rx_n > 10 && HAS(1, "\x63off\x19\x01\x2c"), "the chunk at the wrong offset is answered with where we are (300)");
+    CHECK(HAS(smp_rx_n - 1, "\x65match\xf5") && HAS(smp_rx_n - 1, "\x63off\x19\x23\x88"), "the last reply: all 9096 bytes, sha matches");
+    bool any_err = false;
+    for (int k = 0; k < smp_rx_n; k++) any_err |= HAS(k, "\x63" "err") || HAS(k, "\x62rc");
+    CHECK(!any_err, "no errors along the way");
+    CHECK(!memcmp(sim_flash + b->offset, smp_img_hdr, 256) && slot_intact(MB_SLOT_B), "slot b holds the image (header from mbtool)");
+    int bs = boot();
+    CHECK(bs == MB_SLOT_B && sim.watchdog_ms, "it boots as a trial (slot %d, b state %d reason %d, watchdog %u)", bs,
+          log_now().slot[MB_SLOT_B].state, log_now().slot[MB_SLOT_B].bad_reason, (unsigned)sim.watchdog_ms);
+    SMP_ADD(smp_confirm);
+    smp_run();
+    CHECK(log_now().slot[MB_SLOT_B].state == MB_ST_GOOD && log_now().active == MB_SLOT_B, "confirm by hash: GOOD, active");
+    CHECK(HAS(0, "\x66images"), "the reply is the new list");
+
+    printf("SMP: refused or failed uploads leave the slot empty\n");
+    good_a();
+    install_raw(MB_SLOT_GOLDEN, "rescue", MB_VERSION(1, 0, 0), 0, 7, 20000);
+    SMP_ADD(smp_upload_golden);
+    smp_run();
+    CHECK(HAS(0, "\x63" "err") && slot_intact(MB_SLOT_GOLDEN), "image 3 (golden): refused, golden untouched");
+    SMP_ADD(smp_upload_bad);
+    smp_run();
+    mb_slot_info_t in;
+    CHECK(HAS(smp_rx_n - 1, "\x63" "err") && mb_image_read_header(&sim_port, MB_SLOT_B, &in) != MB_OK,
+          "a payload that doesn't match: error on the last chunk, b has no header");
+    SMP_ADD(smp_upload_cut);
+    smp_run();
+    CHECK(smp_rx_n == 3 && mb_image_read_header(&sim_port, MB_SLOT_B, &in) != MB_OK, "an upload that stops: b stays empty");
+    CHECK(boot() == MB_SLOT_A, "and the board boots a as before");
+
+    printf("SMP: with signatures required, as recv checks them\n");
+    good_a();
+    sim_port.require_signature = true;
+    install_raw(MB_SLOT_B, "previous", MB_VERSION(2, 0, 0), 1, 9, 20000);
+    SMP_ADD(smp_upload_unsigned_first);
+    smp_run();
+    CHECK(HAS(0, "\x63" "err") && slot_intact(MB_SLOT_B), "an unsigned image is refused at its first page, before b is erased");
+    SMP_ADD(smp_upload_signed);
+    smp_run();
+    any_err = false;
+    for (int k = 0; k < smp_rx_n; k++) any_err |= HAS(k, "\x63" "err") || HAS(k, "\x62rc");
+    CHECK(!any_err && HAS(smp_rx_n - 1, "\x65match\xf5") && slot_intact(MB_SLOT_B), "the signed one goes in");
+    bs = boot();
+    CHECK(bs == MB_SLOT_B && sim.booted_hdr.flags & MB_IMG_F_SIGNED, "and boots (signature checked again at boot)");
+    sim_port.require_signature = false;
+
+    printf("SMP: erase, reset\n");
+    good_a();
+    install_raw(MB_SLOT_B, "other", MB_VERSION(2, 0, 0), 1, 8, 20000);
+    SMP_ADD(smp_erase_a);
+    SMP_ADD(smp_erase_b);
+    smp_run();
+    CHECK(HAS(0, "\x63" "err") && slot_intact(MB_SLOT_A), "erasing the active good slot is refused");
+    CHECK(!HAS(1, "\x63" "err") && mb_image_read_header(&sim_port, MB_SLOT_B, &in) != MB_OK, "slot b erased");
+    SMP_ADD(smp_reset);
+    CHECK(smp_run() == SIM_REBOOT && smp_rx_n == 1, "reset: the reply goes out, then the reboot");
+}
+#else
+static void test_smp(void) {}
+#endif
+
 #include "tests/test_night.inc"
 
 int main(int argc, char** argv) {
@@ -1569,6 +1674,7 @@ int main(int argc, char** argv) {
     test_ota();
     test_power_cuts();
     test_two_stage();
+    test_smp();
     test_night();
     printf("\n%d checks, %d failed\n", checks + crypto_checks, fails + crypto_fails);
     return fails + crypto_fails ? 1 : 0;

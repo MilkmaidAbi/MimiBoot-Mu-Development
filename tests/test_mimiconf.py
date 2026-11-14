@@ -364,8 +364,44 @@ def build_all():
     return len(bad)
 
 
+def build_variants():
+    """Every bare-metal board again, as two-stage and with SMP, where the configurator
+    says the variant fits (small parts are refused up front, and that is checked too)"""
+    from mu import build as mubuild
+    db = Db()
+    bad, built, refused = [], 0, 0
+    out = Path(tempfile.mkdtemp(prefix="mu-variants-"))
+    for name in db.boards:
+        if Config(db, name).t.build != "mcu":
+            continue
+        for variant, opts in (("two-stage", {"TWO_STAGE": True}), ("smp", {"SMP": True})):
+            cfg = Config(db, name)
+            for k, v in opts.items():
+                cfg.set(k, v)
+            if [m for lvl, m in cfg.problems() if lvl == "error"]:
+                refused += 1        # e.g. two-stage on a part under 192 KB: said so before building
+                continue
+            try:
+                info = mubuild.build(cfg, out / f"{name}-{variant}", log=lambda *a: None)
+                built += 1
+                print(f"  {name:20} {variant:9} {info['flash_used']:6} / {info['flash_region']} bytes")
+            except Exception as e:  # noqa: BLE001
+                msg = str(e).splitlines()[-1] if str(e) else traceback.format_exc()
+                if "RAM" in msg or "has room for" in msg or "flash layout" in msg:
+                    refused += 1    # doesn't fit the part's default region or sectors, and the build says so
+                    print(f"  {name:20} {variant:9} doesn't fit: {msg[:100]}")
+                    continue
+                bad.append(f"{name}/{variant}")
+                print(f"  {name:20} {variant:9} FAILED: {msg}")
+    print(f"build-variants: {built} built, {refused} refused as too small, {len(bad)} failed"
+          + (f" ({', '.join(bad)})" if bad else ""))
+    return len(bad)
+
+
 if __name__ == "__main__":
     rc = main()
     if "--build-all" in sys.argv:
         rc += build_all()
+    if "--build-variants" in sys.argv:
+        rc += build_variants()
     sys.exit(1 if rc else 0)

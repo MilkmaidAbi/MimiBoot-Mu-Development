@@ -262,6 +262,12 @@ int mb_sink_slot_end(void* ctx);
  * (console `ramboot`): signature + hash re-checked, handoff, launch. */
 int mb_boot_ram(const mb_port_t* p, const mb_bcl_t* log, const mb_config_t* cfg, const mb_image_hdr_t* hdr, const char* args);
 
+/* ---- mcumgr / SMP over the console (core/mb_smp.c, MB_FEAT_SMP) -----------------------
+ * The console calls this for each line that starts with an SMP marker (0x06 0x09
+ * first, 0x04 0x14 continuation), with the two marker bytes already read. It reads
+ * the rest of the line; when a packet is complete it runs it and replies. */
+void mb_smp_frame(const mb_port_t* p, mb_bcl_t* log, bool locked, bool first);
+
 /* ---- console ---------------------------------------------------------------------- */
 /* Boot menu + command line. Returns when the caller should decide again;
  * boots directly when the user picks something. */

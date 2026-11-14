@@ -59,6 +59,8 @@ On the 32-bit chips (the "full" core):
   the debug port shut. A console lock makes uploads and changes wait for a signed
   unlock. `mbtool provision` prints the fuse / option-byte steps for the other chips.
   What holds against whom is in [docs/SECURITY.md](docs/SECURITY.md).
+- Talk mcumgr / SMP on the console (`SMP`): Zephyr's tools (mcumgr, smpmgr, smpclient)
+  can list, upload, test, confirm and erase images, MimiBoot's own and imgtool-signed ones.
 - Update itself in the field (`TWO_STAGE`, Cortex-M parts with 192 KB+): a small fixed
   stage 0 picks between two signed copies of the rest, tries a new one for a few boots
   and goes back to the old one if it never gets as far as starting an app.

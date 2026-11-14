@@ -300,6 +300,24 @@ Receive images in CRC-checked frames and write them to a slot.
 
 C macro: `MB_FEAT_RECV`
 
+### `SMP`: mcumgr / SMP on the console (Zephyr's update tools)
+
+default **off**; needs `RECV`. (full core)
+
+Speak the Simple Management Protocol on the console's UART, the subset MCUboot's serial recovery offers: image list, upload, test/confirm, erase, reset, echo, MCUmgr parameters. mcumgr, smpmgr, AuTerm and smpclient can then update the board: MimiBoot images and imgtool-signed Zephyr images alike. Open the console first (button, a key right after reset, or the app's request); SMP lines and the menu share the UART.
+
+"image" 0 means the A/B slot an update goes to, "image" N the Nth slot (as in MCUboot's direct upload). Golden is never written over SMP. With CONSOLE_AUTH, writes need the console unlocked. About 4 KB of code and SMP_BUF + 1.5 KB of RAM.
+
+C macro: `MB_FEAT_SMP`
+
+### `SMP_BUF`: SMP packet buffer (bytes)
+
+default **1024**; 256..4096; needs `SMP`. (full core)
+
+The largest SMP message the board takes (told to clients as buf_size). Bigger uploads faster, costs RAM.
+
+C macro: `MB_SMP_BUF`
+
 ### `CFG_FILE`: Boot config file in flash (entries, args, default, timeout)
 
 default **on**; off on STM32/nRF/SAMD. (full core)
