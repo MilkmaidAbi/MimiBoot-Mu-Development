@@ -22,6 +22,131 @@ static void unhex(const char* h, uint8_t* out) {
 
 static void tohex(const uint8_t* b, int n, char* out) { for (int i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", b[i]); }
 
+#if MB_FEAT_ENC
+#include "tests/gen_enc.h"
+
+static bool eqhex(const uint8_t* b, size_t n, const char* want) {
+    uint8_t w[128];
+    unhex(want, w);
+    return strlen(want) == 2 * n && memcmp(b, w, n) == 0;
+}
+
+// The encrypted-image primitives against published vectors (each also checked
+// against pyca/cryptography when this was written), then envelopes made by
+// imgtool and by the generator (tests/gen_enc.py, an independent implementation).
+static void test_crypto_enc(void) {
+    printf("AES (FIPS-197 C.1, C.3), AES-CTR (SP 800-38A F.5.1, F.5.5)\n");
+    uint8_t k[32], in[64], out[64], nonce[16];
+    mb_aes_t a;
+    unhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", k);
+    unhex("00112233445566778899aabbccddeeff", in);
+    CK(mb_aes_init(&a, k, 16), "AES-128 key schedule");
+    mb_aes_block(&a, in, out);
+    CK(eqhex(out, 16, "69c4e0d86a7b0430d8cdb78070b4c55a"), "FIPS-197 C.1");
+    CK(mb_aes_init(&a, k, 32), "AES-256 key schedule");
+    mb_aes_block(&a, in, out);
+    CK(eqhex(out, 16, "8ea2b7ca516745bfeafc49904b496089"), "FIPS-197 C.3");
+    CK(!mb_aes_init(&a, k, 24), "AES-192 is not offered");
+    static const char* pt = "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51"
+                            "30c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710";
+    struct { const char* key; const char* ct; } ctr[] = {
+        { "2b7e151628aed2a6abf7158809cf4f3c",
+          "874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff5ae4df3edbd5d35e5b4f09020db03eab1e031dda2fbe03d1792170a0f3009cee" },
+        { "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+          "601ec313775789a5b7a7f504bbf3d228f443e3ca4d62b59aca84e990cacaf5c52b0930daa23de94ce87017ba2d84988ddfc9c58db67aada613c2dd08457941a6" },
+    };
+    unhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", nonce);
+    for (unsigned i = 0; i < 2; i++) {
+        unhex(ctr[i].key, k);
+        CK(mb_aes_init(&a, k, strlen(ctr[i].key) / 2), "CTR key %u", i);
+        unhex(pt, out);
+        mb_aes_ctr(&a, nonce, 0, out, 64);
+        CK(eqhex(out, 64, ctr[i].ct), "SP 800-38A CTR vector %u", i);
+        // the same keystream from any starting offset, in any piece sizes
+        unhex(pt, out);
+        static const uint32_t cuts[] = { 0, 1, 15, 16, 17, 31, 33, 47, 64 };
+        for (unsigned c = 0; c + 1 < sizeof cuts / sizeof cuts[0]; c++)
+            mb_aes_ctr(&a, nonce, cuts[c], out + cuts[c], cuts[c + 1] - cuts[c]);
+        CK(eqhex(out, 64, ctr[i].ct), "SP 800-38A CTR vector %u, in odd pieces", i);
+    }
+    mb_aes_clear(&a);
+
+    printf("HMAC-SHA256 (RFC 4231), HKDF-SHA256 (RFC 5869 case 3)\n");
+    unhex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b", k);
+    mb_hmac_sha256(k, 20, "Hi There", 8, out);
+    CK(eqhex(out, 32, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"), "RFC 4231 case 1");
+    mb_hmac_sha256((const uint8_t*)"Jefe", 4, "what do ya want for nothing?", 28, out);
+    CK(eqhex(out, 32, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"), "RFC 4231 case 2");
+    {                                            // RFC 4231 case 6: a key longer than the block
+        uint8_t big[131];
+        memset(big, 0xaa, sizeof big);
+        mb_hmac_sha256(big, sizeof big, "Test Using Larger Than Block-Size Key - Hash Key First", 54, out);
+        CK(eqhex(out, 32, "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"), "RFC 4231 case 6");
+    }
+    mb_hkdf_sha256(k, 22, "", 0, out, 42);
+    CK(eqhex(out, 42, "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8"), "RFC 5869 case 3");
+
+    printf("X25519 (RFC 7748 sections 5.2 and 6.1)\n");
+    struct { const char* k; const char* u; const char* r; } xv[] = {
+        { "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4", "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
+          "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552" },
+        { "4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d", "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493",
+          "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957" },
+        { "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+          "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742" },
+        { "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb", "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+          "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742" },
+    };
+    for (unsigned i = 0; i < 4; i++) {
+        uint8_t s[32], u[32];
+        unhex(xv[i].k, s);
+        unhex(xv[i].u, u);
+        CK(mb_x25519(out, s, u) && eqhex(out, 32, xv[i].r), "X25519 vector %u", i + 1);
+    }
+    {
+        uint8_t kk[32] = { 9 }, uu[32] = { 9 }, r[32];
+        for (int i = 1; i <= 1000; i++) {
+            mb_x25519(r, kk, uu);
+            memcpy(uu, kk, 32);
+            memcpy(kk, r, 32);
+            if (i == 1) CK(eqhex(kk, 32, "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079"), "X25519 iterated once");
+        }
+        CK(eqhex(kk, 32, "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51"), "X25519 iterated 1000 times");
+        uint8_t zero_u[32] = { 0 }, one_u[32] = { 1 };
+        CK(!mb_x25519(r, kk, zero_u), "X25519: u = 0 (low order) gives no shared secret");
+        CK(!mb_x25519(r, kk, one_u), "X25519: u = 1 (low order) gives no shared secret");
+    }
+
+    printf("Envelopes (imgtool and tests/gen_enc.py)\n");
+    for (unsigned i = 0; i < sizeof enc_vec / sizeof enc_vec[0]; i++) {
+        const enc_vec_t* v = &enc_vec[i];
+        CK(mb_enc_unwrap(&a, v->env, v->env_len, enc_priv) == MB_OK, "%s: unwraps", v->name);
+        static uint8_t buf[ENC_BODY_MAX];
+        memcpy(buf, v->body, v->body_len);
+        static const uint8_t zn[16];
+        mb_aes_ctr(&a, zn, 0, buf, v->body_len);
+        mb_sha256_t sh;
+        uint8_t d[32];
+        mb_sha256_init(&sh);
+        mb_sha256_update(&sh, buf, v->body_len);
+        mb_sha256_final(&sh, d);
+        CK(!memcmp(d, v->plain_sha, 32), "%s: decrypts to the plaintext", v->name);
+        CK(mb_enc_unwrap(&a, v->env, v->env_len, enc_other_priv) == MB_E_SIGNATURE, "%s: another device's key is refused", v->name);
+        uint8_t env[MB_ENC_ENV_MAX];
+        for (size_t at = 4; at < v->env_len; at += 7) {             // any flipped byte: refused
+            memcpy(env, v->env, v->env_len);
+            env[at] ^= 0x20;
+            CK(mb_enc_unwrap(&a, env, v->env_len, enc_priv) != MB_OK, "%s: byte %u flipped is refused", v->name, (unsigned)at);
+        }
+        memcpy(env, v->env, v->env_len);
+        env[0] = 0x32;
+        CK(mb_enc_unwrap(&a, env, v->env_len, enc_priv) == MB_E_CORRUPT, "%s: another TLV type is not an envelope", v->name);
+        CK(mb_enc_unwrap(&a, v->env, v->env_len - 1, enc_priv) == MB_E_CORRUPT, "%s: short is not an envelope", v->name);
+    }
+    mb_aes_clear(&a);
+}
+#endif
+
 void test_crypto(void) {
     printf("SHA-512\n");
     struct { const char* m; const char* h; } s[] = {
@@ -119,5 +244,8 @@ void test_crypto(void) {
         CK(ok == (t->result == 1), "Wycheproof P-256 tcId %d: expected %s, got %s", t->id, t->result ? "valid" : "invalid",
            ok ? "accepted" : "refused");
     }
+#endif
+#if MB_FEAT_ENC
+    test_crypto_enc();
 #endif
 }

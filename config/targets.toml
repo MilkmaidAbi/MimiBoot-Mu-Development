@@ -214,7 +214,8 @@ flash = "128K"
 ram = "16K"
 sectors = "64x2K"
 boot = "32K"
-defaults = { SIGNATURES = false }
+# 32 KB of boot region and two 48 KB slots: the diagnostics don't fit beside the rest
+defaults = { SIGNATURES = false, SHELL_DIAG = false }
 sysmem = 0x1FFFC800
 [chip.stm32f100rb]
 family = "stm32f1"
@@ -347,7 +348,8 @@ flash = "128K"
 ram = "36K"
 sectors = "64x2K"
 boot = "32K"
-defaults = { SIGNATURES = false }
+# 32 KB of boot region and two 48 KB slots: the diagnostics don't fit beside the rest
+defaults = { SIGNATURES = false, SHELL_DIAG = false }
 [chip.stm32g0b1re]
 family = "stm32g0"
 flash = "512K"

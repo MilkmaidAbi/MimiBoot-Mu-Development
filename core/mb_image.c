@@ -169,11 +169,11 @@ static uint32_t key_id_of(const uint8_t* key) {
 // Revocation counts only on a board built to take it (REVOKE_KEYS): elsewhere
 // an entry in the store (an app can write one on chips that can't lock it) means nothing.
 bool mb_key_revoked(const mb_port_t* p, uint32_t key_id) {
-    return p->revoke_keys && p->revoke_keys->count && p->floor &&
+    return MB_FEAT_REVOKE && p->revoke_keys && p->revoke_keys->count && p->floor &&
            mb_store_count(p, MB_STORE_KEY_REVOKED, key_id) > 0;
 }
 
-#if MB_FEAT_SIGNATURES
+#if MB_FEAT_SIGNATURES && MB_FEAT_REVOKE
 // Keys in one family (image keys, or stage-1 keys) still trusted, leaving `except` out
 static int usable(const mb_port_t* p, const mb_keyring_t* ed, const mb_keyring_p256_t* ec, uint32_t except, bool* has) {
     int n = 0;
@@ -192,7 +192,7 @@ static int usable(const mb_port_t* p, const mb_keyring_t* ed, const mb_keyring_p
 #endif
 
 int mb_key_revoke(const mb_port_t* p, uint32_t key_id, const uint8_t sig[64]) {
-#if MB_FEAT_SIGNATURES
+#if MB_FEAT_SIGNATURES && MB_FEAT_REVOKE
     if (!p->revoke_keys || !p->revoke_keys->count || !p->floor) return MB_E_UNSUPP;
     bool in_image = false, in_s1 = false;
     int left_image = usable(p, p->keys, p->p256_keys, key_id, &in_image);

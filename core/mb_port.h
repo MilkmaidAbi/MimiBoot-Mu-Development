@@ -77,6 +77,7 @@ typedef struct mb_port {
     bool require_signature;     /* refuse unsigned images */
     const mb_keyring_t* unlock_keys;    /* MB_FEAT_CONSOLE_AUTH: who may unlock the console */
     const mb_keyring_t* revoke_keys;    /* who may revoke a signing key (NULL: revocation off, entries ignored) */
+    const uint8_t* enc_key;             /* MB_FEAT_ENC: X25519 private key for image envelopes (NULL: encrypted uploads refused) */
 
     /* flash: offsets from the start of flash. erase/program take whole
      * sectors / pages (the core aligns); read takes anything. */

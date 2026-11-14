@@ -243,14 +243,14 @@ static void cmd_keys(const mb_port_t* p) {
         uint32_t id = (uint32_t)key[0] | (uint32_t)key[1] << 8 | (uint32_t)key[2] << 16 | (uint32_t)key[3] << 24;
         mb_printf(p, "  key %d  ", k);
         for (int i = 0; i < 32; i++) mb_printf(p, "%02x", key[i]);
-        mb_printf(p, "  id %08lx%s\n", (unsigned long)id, mb_key_revoked(p, id) ? "  REVOKED" : "");
+        mb_printf(p, "  id %08lx%s\n", (unsigned long)id, MB_FEAT_REVOKE && mb_key_revoked(p, id) ? "  REVOKED" : "");
     }
     for (int k = 0; p->p256_keys && k < p->p256_keys->count; k++) {
         const uint8_t* key = p->p256_keys->keys[k];
         uint32_t id = (uint32_t)key[0] | (uint32_t)key[1] << 8 | (uint32_t)key[2] << 16 | (uint32_t)key[3] << 24;
-        mb_printf(p, "  P-256 key %d  id %08lx%s\n", k, (unsigned long)id, mb_key_revoked(p, id) ? "  REVOKED" : "");
+        mb_printf(p, "  P-256 key %d  id %08lx%s\n", k, (unsigned long)id, MB_FEAT_REVOKE && mb_key_revoked(p, id) ? "  REVOKED" : "");
     }
-    if (p->revoke_keys && p->revoke_keys->count)
+    if (MB_FEAT_REVOKE && p->revoke_keys && p->revoke_keys->count)
         mb_printf(p, "%d revocation key(s): 'revoke <id>' takes a statement from mbtool revoke\n", p->revoke_keys->count);
 }
 
@@ -420,7 +420,7 @@ static void cmd_recv(const mb_port_t* p, int slot, bool force) {
     }
     mb_slot_sink_t sink = { .p = p, .slot = slot };
     mb_recv_t r = { .ctx = &sink, .getc = io_getc, .puts = io_puts, .max_frame = 1024, .where = mb_slot_name(p, slot),
-                    .begin = mb_sink_slot_begin, .data = mb_sink_slot_data, .end = mb_sink_slot_end };
+                    .enc_key = p->enc_key, .begin = mb_sink_slot_begin, .data = mb_sink_slot_data, .end = mb_sink_slot_end };
     mb_recv(&r, NULL);
 }
 
@@ -428,7 +428,7 @@ static void cmd_ramboot(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, con
     if (!p->ram_ptr || !p->launch_ram) { put(p, "this port can't run RAM images\n"); return; }
     ram_sink_t sink = { .p = p };
     mb_recv_t r = { .ctx = &sink, .getc = io_getc, .puts = io_puts, .max_frame = 1024, .where = "ram",
-                    .begin = ram_begin, .data = ram_data, .end = ram_end };
+                    .enc_key = p->enc_key, .begin = ram_begin, .data = ram_data, .end = ram_end };
     mb_image_hdr_t hdr;
     if (mb_recv(&r, &hdr) != MB_OK) return;
     mb_printf(p, "starting %s from RAM at 0x%08lx...\n", hdr.name, (unsigned long)hdr.load_addr);
@@ -619,7 +619,9 @@ static const char* help =
 #if MB_FEAT_SHELL_DIAG
     "  md <off> [len]          dump flash        sha <off> <len>   hash a flash range\n"
 #endif
+#if MB_FEAT_REVOKE
     "  revoke <keyid>          stop trusting a signing key (mbtool revoke)\n"
+#endif
     "  menu | reboot | bootsel | exit\n"
 #if MB_FEAT_CONSOLE_AUTH
     "  unlock                  answer a signed challenge (mbtool does it); until then only\n"
@@ -715,6 +717,7 @@ static bool console_locked(void) { return false; }
 #endif
 
 #if MB_FEAT_SHELL
+#if MB_FEAT_REVOKE
 // revoke <keyid>: stop trusting a signing key. The statement comes on the next
 // line (128 hex digits), signed by a REVOKE_KEYS key; mbtool revoke makes it.
 static void cmd_revoke(const mb_port_t* p, const char* arg) {
@@ -743,6 +746,7 @@ static void cmd_revoke(const mb_port_t* p, const char* arg) {
            : rc == MB_E_BADARG ? "MB ERR no such key in this build\n"
            : rc == MB_E_UNSUPP ? "MB ERR this build takes no revocations (REVOKE_KEYS)\n" : "MB ERR store write\n");
 }
+#endif /* MB_FEAT_REVOKE */
 
 // returns true for "exit" (boot normally), false for "menu"
 static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_info_t* info) {
@@ -868,7 +872,9 @@ static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_i
             }else{valid=argc==2;if(valid){if(!strcmp(argv[1],"restart"))q.action=MB_CONTROL_RESTART;else if(!strcmp(argv[1],"menu"))q.action=MB_CONTROL_MENU;else if(!strcmp(argv[1],"config"))q.action=MB_CONTROL_CONFIG;else if(!strcmp(argv[1],"flash"))q.action=MB_CONTROL_FLASH;else if(!strcmp(argv[1],"bootsel"))q.action=MB_CONTROL_ROM;else valid=false;}}
             int rc=valid?mb_control_submit(p,&q):MB_E_BADARG;mb_printf(p,"control: %d\n",rc);if(!rc&&p->reboot)p->reboot();
         }
+#if MB_FEAT_REVOKE
         else if (!strcmp(cmd, "revoke")) cmd_revoke(p, argc > 1 ? argv[1] : NULL);
+#endif
         else if (!strcmp(cmd, "version")) {
             mb_printf(p, "MimiBoot-Night %s \"%s\" on %s (%s)\n", MIMIBOOT_VERSION, MIMIBOOT_CODENAME, p->name, arch_name(p->arch));
             security_line(p);

@@ -262,6 +262,7 @@ void sim_reset(void) {
     sim_port.stage1_slot = NULL;
     sim_port.stage1_keys = NULL;
     sim_port.revoke_keys = NULL;
+    sim_port.enc_key = NULL;
 }
 
 void sim_input(const void* data, size_t len) {

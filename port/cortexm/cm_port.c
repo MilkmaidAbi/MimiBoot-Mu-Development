@@ -78,6 +78,12 @@ static const mb_keyring_t revoke_ring = { MB_REVOKE_KEY_COUNT, revoke_trusted };
 #else
 #define REVOKE_RING NULL
 #endif
+#if defined(MB_ENC_KEY) && MB_FEAT_ENC && !defined(MB_CM_CLIENT) && !defined(MB_CM_STAGE0)
+static const uint8_t enc_key[32] = MB_ENC_KEY;     // the board's X25519 decryption key (ENC_KEY)
+#define ENC_KEY enc_key
+#else
+#define ENC_KEY NULL
+#endif
 #if defined(MB_VENDOR_NRF) && MB_FEAT_CONSOLE_AUTH && !defined(MB_CM_CLIENT) && !defined(MB_CM_STAGE0)
 #define RANDOM mcu_random
 #else
@@ -573,6 +579,7 @@ const mb_port_t mb_mcu_port = {
     .reboot = reboot, .reboot_rom = REBOOT_ROM, .reset_cause = cause, .reset_reason = reason,
     .capabilities = caps, .floor = FLOOR, .fault_slot = fault_slot, .lockdown = LOCK_TXT DEBUG_TXT,
     .stage1_slot = STAGE1_SLOT, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING, .flash_base = MB_FLASH_BASE, .revoke_keys = REVOKE_RING,
+    .enc_key = ENC_KEY,
 };
 
 int main(void) {

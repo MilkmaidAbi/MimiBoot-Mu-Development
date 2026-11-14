@@ -100,6 +100,20 @@
 #ifndef MB_FEAT_SMP
 #define MB_FEAT_SMP             0   /* mcumgr / SMP over the console (core/mb_smp.c) */
 #endif
+#ifndef MB_FEAT_REVOKE                  /* key revocation (REVOKE_KEYS): on when the build has revocation keys */
+#ifdef MB_REVOKE_KEY_COUNT
+#define MB_FEAT_REVOKE          1
+#else
+#define MB_FEAT_REVOKE          0
+#endif
+#endif
+#ifndef MB_FEAT_ENC
+#define MB_FEAT_ENC             0   /* take encrypted images (core/mb_enc.c): decrypted as they are installed */
+#endif
+#if defined(MB_CM_CLIENT) || defined(MB_RP2040_CLIENT) || defined(MB_RP2350_CLIENT)
+#undef MB_FEAT_ENC                  /* an app never decrypts: the key stays in the bootloader */
+#define MB_FEAT_ENC             0
+#endif
 #ifndef MB_FEAT_TWO_STAGE
 #define MB_FEAT_TWO_STAGE       0   /* fixed stage 0 + two updatable stage-1 copies (core/mb_stage0.c) */
 #endif
@@ -172,6 +186,9 @@
 #endif
 #if MB_MENU_SECS < 1 || MB_MENU_SECS > 600
 #error "MB_MENU_SECS must be 1..600"
+#endif
+#if MB_FEAT_ENC && !MB_FEAT_RECV
+#error "MB_FEAT_ENC needs MB_FEAT_RECV: encrypted images are decrypted as they are uploaded"
 #endif
 #if MB_FEAT_SMP && (!MB_FEAT_RECV || !MB_FEAT_CONSOLE)
 #error "MB_FEAT_SMP needs MB_FEAT_RECV (its uploads write slots the same way) and the console"

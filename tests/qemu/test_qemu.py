@@ -455,6 +455,7 @@ def nrf51_tests(work: Path, db, check):
     two_stage_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
     smp_tests(work, db, check, board, machine, ram_lo, ram_hi, probe, os.environ.get("IMGTOOL") or shutil.which("imgtool"))
     revoke_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
+    enc_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
 
 
 def smp_request(s, req, timeout=15.0):
@@ -619,6 +620,113 @@ def smp_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe, imgt
     o = boot_keep(machine, flash2, fsize)
     check(f"{board}: SMP: ... and it boots after a power cycle (vector table at b + 0x200)",
           "MU-APP smp-mcuboot" in o and f"relay={slot['b']['link_mcuboot']:08x}" in o, o[-1500:])
+
+
+def enc_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
+    """10. Encrypted images on the nRF51, signed and encrypted (signatures required):
+    X25519, HKDF and AES-CTR on the M0 inside the console. One goes in with
+    mbtool over the console, one over SMP (the smp package as the client);
+    one made for another board is refused. Each boots after a power cycle."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import mbtool as mbt
+    for k in ("board", "otherboard"):
+        mbtool("keygen", "--type", "x25519", "--out", str(work / f"enc-{k}"), "--force")
+    try:
+        from smp import image_management as img
+    except ImportError:
+        img = None
+        print("[SKIP] the SMP half of the encrypted-image cases: pip install smp")
+    cfg = Config(db, board)
+    cfg.set("LAYOUT", "ab+golden")
+    for k, v in (("ENCRYPTED_IMAGES", True), ("ENC_KEY", str(work / "enc-board.key")), ("SHELL_DIAG", False),
+                 ("KEYS", str(work / "trusted.pub")), ("REQUIRE_SIGNATURE", True), ("SMP", img is not None)):
+        cfg.set(k, v)
+    out = work / f"{board}-enc"
+    info = mubuild.build(cfg, out, log=lambda *a: None)
+    lay = json.loads((out / "layout.json").read_text())
+    slot = {s["name"]: s for s in lay["slots"]}
+    fsize = lay["flash_size"]
+    print(f"{board} (encrypted images): bootloader {info['flash_used']} B flash, {info['ram_used']} B RAM")
+    check(f"{board}: ENC: the builder says this build leaves no RAM for a handoff",
+          any("no room for the boot handoff" in n for n in info["notes"]), str(info["notes"]))
+
+    def packed(name, at, version, pub, bits=128):
+        elf = build_nrf_app(work, name, slot[at]["link_native"], ram_lo, ram_hi, probe)
+        p = work / f"{name}.mimg"
+        mbtool("pack", str(elf), "--target", lay["target"], "-o", str(p), "--version", version, "--key",
+               str(work / "trusted.key"), "--encrypt", str(work / f"enc-{pub}.pub"), "--encrypt-keylen", str(bits))
+        return p.read_bytes()
+
+    prompt = r"mimiboot(?:\x1b\[0m)?> $"
+
+    def shell(s):
+        if not mbt.read_until(s, r"up/down \+ enter", 30)[1]:
+            raise RuntimeError("the menu never came up")
+        for _ in range(3):
+            s.write(b"c")
+            if mbt.read_until(s, prompt, 6)[1]:
+                return
+        raise RuntimeError("no prompt")
+
+    def payload(image):
+        return image[mbt.PAYLOAD_OFF:]
+
+    con = packed("enc-con", "a", "3.0.0", "board")
+    stranger = packed("enc-other", "b", "3.0.1", "otherboard")
+    flash = flash_image(work, "enc", fsize, out / "mimiboot.bin", slot["g"]["offset"], b"")
+    s = QemuSerial(machine, flash, seconds=180, keep=True)
+    notes, done = [], []
+    try:
+        shell(s)
+        s.write(b"recv a\r")
+        mbt.send_image(s, con, payload(con))
+        done.append("a")
+        mbt.read_until(s, prompt, 5)
+        s.write(b"recv b\r")
+        try:
+            mbt.send_image(s, stranger, payload(stranger))
+            done.append("b")
+        except SystemExit as e:
+            notes.append(f"b: {e}")
+        mbt.read_until(s, prompt, 5)
+        s.keep_flash(fsize)
+    except (SystemExit, TimeoutError, RuntimeError) as e:
+        notes.append(str(e))
+    o = s.close()
+    note = f"{notes} {done}\n{o[-1500:]}"
+    check(f"{board}: ENC: a signed + encrypted image goes in over the console (mbtool install)", "a" in done, note)
+    check(f"{board}: ENC: one encrypted for another board is refused before the erase",
+          "b" not in done and "not encrypted for this device" in o, note)
+    o = boot_keep(machine, flash, fsize)
+    # (this build needs all 16 KB of RAM, so there is no handoff: where it runs from is the relay address)
+    check(f"{board}: ENC: ... and after a power cycle the decrypted image boots from a",
+          "MU-APP enc-con" in o and f"relay={slot['a']['link_native']:08x}" in o, o[-1500:])
+
+    if img is None:
+        return
+    import hashlib
+    smp_img = packed("enc-smp", "a", "3.1.0", "board", bits=256)
+    flash2 = flash_image(work, "enc-smp", fsize, out / "mimiboot.bin", slot["g"]["offset"], b"")
+    s = QemuSerial(machine, flash2, seconds=180, keep=True)
+    res, notes = None, []
+    try:
+        if not mbt.read_until(s, r"up/down \+ enter", 30)[1]:
+            raise RuntimeError("the menu never came up")
+        sha, chunk = hashlib.sha256(smp_img).digest(), 600
+        for off in range(0, len(smp_img), chunk):
+            extra = {"image": 0, "len": len(smp_img), "sha": sha} if off == 0 else {}
+            _, res = smp_request(s, img.ImageUploadWriteRequest(off=off, data=smp_img[off:off + chunk], **extra))
+            if "err" in res or res.get("rc", 0):
+                break
+        s.keep_flash(fsize)
+    except (SystemExit, TimeoutError, RuntimeError) as e:
+        notes.append(str(e))
+    o = s.close()
+    check(f"{board}: ENC: an AES-256 one goes in over SMP (sha of the encrypted file matched)",
+          (res or {}).get("off") == len(smp_img) and (res or {}).get("match") is True, f"{notes} {res}\n{o[-800:]}")
+    o = boot_keep(machine, flash2, fsize)
+    check(f"{board}: ENC: ... and boots after a power cycle",
+          "MU-APP enc-smp" in o and f"relay={slot['a']['link_native']:08x}" in o, o[-1500:])
 
 
 def revoke_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
@@ -880,7 +988,7 @@ def main():
 
     if not only or "microbit" in only:
         nrf51_tests(work, db, check)
-    elif "two-stage" in only or "smp" in only or "revoke" in only:     # just case 7, 8 or 9 (nRF51)
+    elif "two-stage" in only or "smp" in only or "revoke" in only or "enc" in only:     # just case 7, 8, 9 or 10 (nRF51)
         flash = 256 * 1024
         args = (work, db, check, "microbit", "microbit", 0x20000008, 0x20004000, flash - 4)
         if "two-stage" in only:
@@ -889,6 +997,8 @@ def main():
             smp_tests(*args, imgtool)
         if "revoke" in only:
             revoke_tests(*args)
+        if "enc" in only:
+            enc_tests(*args)
 
     for board in ("netduinoplus2", "stm32vldiscovery"):
         if only and board not in only:

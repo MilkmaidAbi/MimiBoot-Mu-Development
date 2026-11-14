@@ -102,6 +102,74 @@ bootloader. With `REVOKE_KEYS` a board can drop one of its keys in the field:
   A board built without `REVOKE_KEYS` ignores revocation entries altogether,
   so an app can't plant one.
 
+## Encrypted images
+
+With `ENCRYPTED_IMAGES` an update file can be kept private on its way to the
+board. The scheme is MCUboot's, so imgtool and MimiBoot agree on it:
+
+- The payload is encrypted with AES-128 or AES-256 in counter mode, under a
+  fresh random key for each image. The counter block is 12 zero bytes and
+  the big-endian block number, counted from the start of the payload.
+- That key travels in an envelope for the board (ECIES-X25519, MCUboot's TLV
+  0x33). The envelope holds an ephemeral X25519 public key, an HMAC-SHA256
+  tag, and the AES key encrypted with a zero counter. Both keys come from
+  HKDF-SHA256 with no salt and the info string `MCUBoot_ECIES_v1`.
+- In a MimiBoot image file the envelope sits right after the 256-byte header,
+  in the header sector. The header's `MB_IMG_F_ENCRYPTED` flag says it is
+  there.
+- The hash and the signature cover the plaintext, so a signed and encrypted
+  image is checked exactly like a signed one.
+
+`mbtool keygen --type x25519` makes a board key: `board.key` goes into the
+build as `ENC_KEY`, and `mbtool pack --encrypt board.pub` encrypts for it.
+
+MimiBoot decrypts while the image comes in, over the console (`mbtool
+install`) or SMP:
+
+- The envelope is opened and its tag checked before the slot is erased. An
+  image made for another board, or a damaged envelope, is refused with the
+  old image still in place.
+- Tampered ciphertext decrypts to the wrong payload. It fails the hash at the
+  end and leaves the slot empty, as any bad upload does.
+- Slots hold plaintext, as MCUboot's primary slot does.
+
+**What this protects:** update files, the link they travel over, and anywhere
+the files sit before they reach the board.
+
+**What it doesn't protect:**
+
+- **The chip's flash.** The decryption key is compiled into the bootloader, so:
+  - every board built from the same binary shares it;
+  - whoever has `mimiboot.bin`, or the build folder with its generated
+    config header, has the key;
+  - on a chip whose debug port is open, a probe reads the key and the
+    decrypted images.
+
+  Lock the debug port (`DEBUG_LOCK` on nRF; read protection from `mbtool
+  provision` on the others). The configurator warns when you haven't.
+- **The app.** On chips without a runtime read lock, a running app can read the
+  key from the bootloader's flash.
+- **Anyone at the console.** The `md` memory dump would hand out a decrypted
+  image, so the configurator refuses `SHELL_DIAG` without `CONSOLE_AUTH`.
+
+**Limits:**
+
+- Only MimiBoot's console and SMP decrypt. The client library refuses
+  encrypted images, because an app would need the key.
+- An imgtool-encrypted Zephyr image isn't taken into a slot either: its
+  envelope comes after the payload, so it can't be opened before the slot is
+  written. The envelope format is the same, though, and the tests check
+  MimiBoot's decryption against envelopes imgtool made.
+- Stage-1 images can't be encrypted, because stage 0 has no key.
+- `ramboot` takes encrypted RAM images and decrypts them into RAM.
+
+On the device, AES is BearSSL's constant-time bitsliced code (MIT, adapted to
+encryption only). X25519 is a Montgomery ladder on the same field arithmetic
+as Ed25519: branch-free, a fixed 255 steps, conditional swaps by mask. An
+all-zero shared secret (a low-order point) is refused. The tag is compared in
+constant time. On Cortex-M0/M0+ the 64-bit multiplies are libgcc calls, which
+have no data-dependent branches.
+
 ## Updating the bootloader itself (two-stage)
 
 A one-stage MimiBoot can't replace itself: a bug in it is fixed with a debug
@@ -263,6 +331,7 @@ falls back.
 | Ed25519 (RFC 8032) | image signatures, console unlock, signed config |
 | ECDSA P-256 (FIPS 186, `ECDSA`) | image signatures: MimiBoot images and imgtool `ecdsa-p256` Zephyr images |
 | SHA-256 | payload hashes, the digest ECDSA signs; Ed25519 uses SHA-512 internally |
+| X25519 (RFC 7748), HKDF / HMAC-SHA256 (RFC 5869 / 4231), AES-128/256-CTR (FIPS 197, SP 800-38A) | encrypted images (`ENCRYPTED_IMAGES`): MCUboot's ECIES-X25519 envelope |
 | CRC-32 | corruption checks only (headers, log, config, upload frames, the Lite core): not a security mechanism |
 
 Ed25519 isn't on the EU's ECCG agreed-mechanisms list (ECDSA P-256 and LMS
@@ -283,6 +352,20 @@ Those are false rejects, never false accepts, and an honest signer hits them
 with probability about 2^-256; the test pins them so any change shows. mbtool's
 own P-256 signer (`tools/mb_p256.py`, RFC 6979 deterministic nonces) gets all
 262 right and matches RFC 6979's published test vector. LMS support is planned.
+
+The encryption primitives are checked against their published vectors:
+- FIPS-197 for AES-128 and AES-256;
+- SP 800-38A for CTR, both key sizes, also fed in odd-sized pieces;
+- RFC 4231 for HMAC, including a key longer than the block;
+- RFC 5869 for HKDF;
+- RFC 7748 for X25519: both function vectors, the Diffie-Hellman example, and
+  1 and 1000 iterations.
+
+Each vector was also run through pyca/cryptography before it went into the
+tests. Envelopes made by imgtool (AES-128 and AES-256) and by mbtool open on
+the device code, and every flipped envelope byte is refused. mbtool's own
+implementation (`tools/mb_enc.py`, plain Python) is checked against
+pyca/cryptography and imgtool.
 
 The AVR Lite core does no cryptography at all.
 
@@ -327,7 +410,9 @@ needs a hardware RNG: not yet).
 - **RP2350 secure boot isn't automated.** It means burning OTP, which can't be
   undone; `mbtool provision` points at the datasheet instead of printing
   steps.
-- **No encryption.** Images are stored in the clear.
+- **Encryption covers the way in, not the flash.** With `ENCRYPTED_IMAGES`,
+  update files and links are private. Slots hold plaintext, and the key is only
+  as safe as the bootloader's flash (see above).
 - **No measured boot or attestation.**
 
 ## Reporting a problem

@@ -17,6 +17,7 @@ if(NOT TARGET mimiboot_client)
         ${_MB}/core/mb_grub.c
         ${_MB}/core/mb_config.c
         ${_MB}/core/mb_recv.c
+        ${_MB}/core/mb_enc.c
         ${_MB}/client/mb_client.c
     )
     target_include_directories(mimiboot_client INTERFACE ${_MB} ${_MB}/include)

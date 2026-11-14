@@ -345,20 +345,27 @@ static bool slot_ok_for_writes(const mb_port_t* p, int slot) {
 
 /* the upload in progress */
 static struct {
-    bool on, mimg, has_sha, head_done;
+    bool on, mimg, enc, has_sha, head_done;
     int slot;
     uint32_t len, off;          /* total, next expected */
     uint8_t head[PAGE];         /* the first page, written last */
     uint8_t page[PAGE];         /* the page being filled */
     uint32_t page_at;           /* its offset in the image */
     uint8_t sha[32];
+    mb_sha256_t fsha;           /* of the file as it arrives (flash holds plaintext when it came encrypted) */
+    uint8_t env[MB_ENC_ENV_MAX];/* an encrypted image's key envelope: header sector, from byte 256 */
     mb_slot_sink_t sink;
 } up;
+static const uint8_t zero_nonce[16];
 
 // Program one whole page of the image at image offset `at` (>= PAGE)
 static int write_page(const mb_port_t* p, uint32_t at) {
     if (up.mimg) {
         if (at < MB_IMG_PAYLOAD_OFF) return MB_OK;      // the rest of the header sector: blank
+        if (up.enc) {                                   // only the image's bytes: the tail stays 0xFF
+            uint32_t n = up.len - at < PAGE ? up.len - at : PAGE;
+            mb_aes_ctr(&mb_upload_key, zero_nonce, at - MB_IMG_PAYLOAD_OFF, up.page, n);
+        }
         return mb_sink_slot_data(&up.sink, at - MB_IMG_PAYLOAD_OFF, up.page, PAGE);
     }
     return p->flash_program(p->layout->slot[up.slot].offset + at, up.page, PAGE);
@@ -375,14 +382,20 @@ static int begin(const mb_port_t* p) {
         memcpy(&h, up.head, sizeof(h));
         if (h.payload_offset != MB_IMG_PAYLOAD_OFF || up.len != MB_IMG_PAYLOAD_OFF + h.payload_size) return IE_INVALID_LENGTH;
         up.mimg = true;
+        up.enc = (h.flags & MB_IMG_F_ENCRYPTED) != 0;
+        if (up.enc && (!MB_FEAT_ENC || !p->enc_key)) return IE_BAD_HEADER;   // no key here to open it
         up.sink.p = p;
         up.sink.slot = up.slot;
-        int rc = mb_sink_slot_begin(&up.sink, &h);      // header, target, stage-1 rules, signature, erase
-        return rc == MB_OK ? 0 : rc == MB_E_IO ? IE_FLASH_ERASE : IE_BAD_HEADER;
+        // header, target, stage-1 rules, signature: the erase waits for the end of the
+        // header sector (payload_start), where an encrypted image's envelope has arrived
+        return mb_sink_slot_check(&up.sink, &h) == MB_OK ? 0 : IE_BAD_HEADER;
     }
 #if MB_FEAT_IMG_MCUBOOT
     if (magic == 0x96f3b83du) {
         if (mb_slot_role(p, up.slot) == MB_ROLE_STAGE1) return IE_BAD_HEADER;
+        uint32_t flags;
+        memcpy(&flags, up.head + 16, 4);
+        if (flags & 0x0Cu) return IE_BAD_HEADER;       // imgtool --encrypt: ciphertext can't run from a slot
         up.mimg = false;
         return mb_slot_erase(p, up.slot, up.len > MB_IMG_PAYLOAD_OFF ? up.len - MB_IMG_PAYLOAD_OFF : 0) == MB_OK
                    ? 0 : IE_FLASH_ERASE;
@@ -395,16 +408,8 @@ static int begin(const mb_port_t* p) {
 static int finish(const mb_port_t* p) {
     const mb_slot_def_t* d = &p->layout->slot[up.slot];
     if (up.has_sha) {                                   // the whole file, as the client hashed it
-        mb_sha256_t s;
-        uint8_t got[32], buf[PAGE];
-        mb_sha256_init(&s);
-        mb_sha256_update(&s, up.head, up.len < PAGE ? up.len : PAGE);
-        for (uint32_t at = PAGE; at < up.len; at += PAGE) {
-            uint32_t n = up.len - at < PAGE ? up.len - at : PAGE;
-            if (p->flash_read(d->offset + at, buf, n) != MB_OK) return IE_FLASH_READ;
-            mb_sha256_update(&s, buf, n);
-        }
-        mb_sha256_final(&s, got);
+        uint8_t got[32];
+        mb_sha256_final(&up.fsha, got);
         if (mb_ct_diff(got, up.sha, 32)) return IE_INVALID_HASH;
     }
     if (up.mimg) {
@@ -421,6 +426,19 @@ static int finish(const mb_port_t* p) {
         return IE_INVALID_HASH;
     }
     return 0;
+}
+
+// A MimiBoot image's header sector is all in: open an encrypted image's
+// envelope (a wrong one is refused before anything is erased), then erase.
+static int payload_start(const mb_port_t* p) {
+    if (up.enc) {
+        size_t n = 4 + ((size_t)up.env[2] | (size_t)up.env[3] << 8);
+        if (n > MB_ENC_ENV_MAX) return IE_BAD_HEADER;
+        for (size_t i = n; i < MB_ENC_ENV_MAX; i++)
+            if (up.env[i] != 0xFF) return IE_BAD_HEADER;
+        if (mb_enc_unwrap(&mb_upload_key, up.env, n, p->enc_key) != MB_OK) return IE_BAD_HEADER;
+    }
+    return mb_slot_erase(p, up.slot, up.sink.hdr.payload_size) == MB_OK ? 0 : IE_FLASH_ERASE;
 }
 
 // Feed image bytes at image offset `at`
@@ -440,10 +458,16 @@ static int feed(const mb_port_t* p, uint32_t at, const uint8_t* data, uint32_t n
             }
             continue;
         }
-        if (up.mimg && at < MB_IMG_PAYLOAD_OFF) {       // header sector padding: must be blank
-            for (; n && at < MB_IMG_PAYLOAD_OFF; at++, data++, n--)
-                if (*data != 0xFF) return IE_BAD_HEADER;
-            if (at == MB_IMG_PAYLOAD_OFF) up.page_at = MB_IMG_PAYLOAD_OFF;
+        if (up.mimg && at < MB_IMG_PAYLOAD_OFF) {       // header sector padding: blank (but an envelope)
+            for (; n && at < MB_IMG_PAYLOAD_OFF; at++, data++, n--) {
+                if (up.enc && at - PAGE < MB_ENC_ENV_MAX) up.env[at - PAGE] = *data;
+                else if (*data != 0xFF) return IE_BAD_HEADER;
+            }
+            if (at == MB_IMG_PAYLOAD_OFF) {
+                int rc = payload_start(p);
+                if (rc) return rc;
+                up.page_at = MB_IMG_PAYLOAD_OFF;
+            }
             continue;
         }
         uint32_t in_page = at - up.page_at;
@@ -469,6 +493,8 @@ static int image_upload(const mb_port_t* p, const mb_bcl_t* log, const req_t* q,
         if (!slot_ok_for_writes(p, up.slot)) { *mgmt = E_ACCESS; return IE_INVALID_SLOT; }
         up.len = q->len;
         if (q->has_sha && q->sha_n == 32) { memcpy(up.sha, q->sha, 32); up.has_sha = true; }
+        mb_sha256_init(&up.fsha);
+        mb_aes_clear(&mb_upload_key);
         up.on = true;
     } else if (!up.on) {
         return IE_INVALID_OFFSET;
@@ -481,12 +507,14 @@ static int image_upload(const mb_port_t* p, const mb_bcl_t* log, const req_t* q,
     }
     if (q->data_n > up.len - up.off) { up.on = false; return IE_INVALID_LENGTH; }
     int rc = feed(p, up.off, q->data, q->data_n);
-    if (rc) { up.on = false; *mgmt = E_CORRUPT; return rc; }
+    if (rc) { up.on = false; mb_aes_clear(&mb_upload_key); *mgmt = E_CORRUPT; return rc; }
+    mb_sha256_update(&up.fsha, q->data, q->data_n);
     up.off += q->data_n;
     bool done = up.off == up.len;
     if (done) {
         if (up.page_at < up.len && (rc = write_page(p, up.page_at)) != MB_OK) { up.on = false; return IE_FLASH_WRITE; }
         up.on = false;
+        mb_aes_clear(&mb_upload_key);
         if ((rc = finish(p)) != 0) { *mgmt = E_CORRUPT; return rc; }
     }
     rsp_n = 8;

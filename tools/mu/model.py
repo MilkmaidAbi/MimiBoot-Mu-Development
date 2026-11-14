@@ -14,6 +14,21 @@ ROOT = Path(__file__).resolve().parents[2]
 SIZE_RE = re.compile(r"^\s*(\d+)\s*([KM]?)\s*$", re.I)
 
 
+def read_enc_key(path) -> bytes:
+    """An X25519 device key file: 64 hex digits (# comments allowed), or 32 raw bytes"""
+    raw = Path(path).read_bytes()
+    if len(raw) == 32:
+        return raw
+    try:
+        text = "".join(line.split("#")[0] for line in raw.decode("ascii").splitlines()).strip()
+        key = bytes.fromhex(text)
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError(f"{path}: not 64 hex digits")
+    if len(key) != 32:
+        raise ValueError(f"{path}: an X25519 key is 32 bytes, this is {len(key)}")
+    return key
+
+
 def parse_size(v) -> int:
     """'64K' -> 65536, '1M' -> 1048576, 4096 -> 4096"""
     if isinstance(v, int):
@@ -449,6 +464,28 @@ class Config:
                                         "so a revoked key protects nothing"))
                 if e("KEYS") and Path(str(e("REVOKE_KEYS"))).resolve() == Path(str(e("KEYS"))).resolve():
                     out.append(("warn", "REVOKE_KEYS is the KEYS file: a leaked image key could then revoke the others"))
+            if e("ENCRYPTED_IMAGES"):
+                if not e("ENC_KEY"):
+                    out.append(("error", "encrypted images need the board's decryption key: ENC_KEY "
+                                         "(mbtool keygen --type x25519)"))
+                else:
+                    p = Path(str(e("ENC_KEY")))
+                    p = p if p.is_absolute() else Path.cwd() / p
+                    if not p.exists():
+                        out.append(("error", f"ENC_KEY file not found: {e('ENC_KEY')}"))
+                    else:
+                        try:
+                            read_enc_key(p)
+                        except ValueError as ex:
+                            out.append(("error", f"ENC_KEY: {ex}"))
+                if e("SHELL_DIAG") and not e("CONSOLE_AUTH"):
+                    out.append(("error", "encrypted images with the diagnostic commands open to anyone: 'md' would dump a "
+                                         "decrypted image (and the key) to whoever has the UART. Turn on CONSOLE_AUTH or "
+                                         "turn off SHELL_DIAG"))
+                if not e("DEBUG_LOCK"):
+                    out.append(("warn", "the decryption key sits in the bootloader's flash: lock the debug port "
+                                        "(DEBUG_LOCK on nRF; read protection from 'mbtool provision' on other chips), "
+                                        "or a probe reads it"))
             if e("LAYOUT") == "single" and e("AB_TRIAL"):
                 out.append(("warn", "one slot + 'Updates must confirm': an app that never confirms stops booting after "
                                     f"{e('TRIES')} tries (nothing to roll back to)"))

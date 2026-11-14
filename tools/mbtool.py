@@ -48,6 +48,7 @@ import zlib
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mb_ed25519 as ed25519  # noqa: E402
 import mb_p256 as p256  # noqa: E402
+import mb_enc as enc  # noqa: E402
 
 MAGIC = 0x474D494D
 HDR_VERSION = 2
@@ -57,7 +58,7 @@ PAYLOAD_OFF = 4096
 LOAD_CHAIN, LOAD_RAM = 1, 2
 ARCH_ANY, ARCH_ARM, ARCH_RISCV = 0, 1, 2
 ARCH_NAMES = {ARCH_ANY: "any", ARCH_ARM: "arm", ARCH_RISCV: "riscv"}
-F_GOLDEN, F_SIGNED, F_ECDSA, F_STAGE1 = 0x1, 0x2, 0x4, 0x8
+F_GOLDEN, F_SIGNED, F_ECDSA, F_STAGE1, F_ENCRYPTED = 0x1, 0x2, 0x4, 0x8, 0x10
 TARGET = "rp2350"
 XIP_BASE = 0x10000000
 SRAM_BASE, SRAM_END = 0x20000000, 0x20082000
@@ -227,9 +228,10 @@ def read_input(path, load_addr=None, target=TARGET):
 
 def build_header(payload, name, version, secver=0, golden=False, trial_ms=0, target=TARGET, arch=ARCH_ARM,
                  load_type=LOAD_CHAIN, load_addr=0, handoff_addr=0, secret=None, build_time=None, entry=None,
-                 stage1=False):
-    """stage1: a two-stage build's stage 1 (entry = the flash offset of its vector table)"""
-    flags = (F_GOLDEN if golden else 0) | (F_STAGE1 if stage1 else 0)
+                 stage1=False, encrypted=False):
+    """stage1: a two-stage build's stage 1 (entry = the flash offset of its vector table).
+    encrypted: the file will carry the payload encrypted (the header still describes the plaintext)"""
+    flags = (F_GOLDEN if golden else 0) | (F_STAGE1 if stage1 else 0) | (F_ENCRYPTED if encrypted else 0)
     key_id = 0
     if secret is not None and not isinstance(secret, Secret):
         secret = Secret("ed25519", secret)
@@ -276,11 +278,33 @@ def image_file(path):
     if not h["crc_ok"]:
         problems.append("header CRC mismatch")
     payload = img[h["payload_offset"]:h["payload_offset"] + h["payload_size"]]
+    h["envelope"] = None
+    if h["flags"] & F_ENCRYPTED:
+        try:
+            h["envelope"] = envelope_of(img)
+        except ValueError as e:
+            problems.append(str(e))
     if len(payload) != h["payload_size"]:
         problems.append("file shorter than the payload")
-    elif hashlib.sha256(payload).digest() != h["sha256"]:
-        problems.append("payload SHA-256 mismatch")
+    elif not h["flags"] & F_ENCRYPTED and hashlib.sha256(payload).digest() != h["sha256"]:
+        problems.append("payload SHA-256 mismatch")      # (encrypted: only the board can check it)
     return img, h, payload, problems
+
+
+def envelope_of(img):
+    """An encrypted image's key envelope: a TLV at offset 256 of the header sector, 0xFF after it"""
+    t, z, n = struct.unpack_from("<BBH", img, HDR_SIZE)
+    if t != enc.TLV_X25519 or z or n not in (80, 96):
+        raise ValueError("encrypted, but no key envelope after the header")
+    if img[HDR_SIZE + 4 + n:PAYLOAD_OFF].strip(b"\xff"):
+        raise ValueError("header sector not blank after the key envelope")
+    return img[HDR_SIZE:HDR_SIZE + 4 + n]
+
+
+def not_encrypted(h, what):
+    if h["flags"] & F_ENCRYPTED:
+        die("%s writes the file into flash as it is, and an encrypted image has to be decrypted on the way: "
+            "use `mbtool install` (MimiBoot's console) or SMP" % what)
 
 
 class Secret:
@@ -404,15 +428,25 @@ def cmd_pack(a):
         if a.target.startswith("rp2") or lo is None or load_type != LOAD_CHAIN:
             die("--stage1 is for a Cortex-M MCU's flash-linked stage 1")
         entry = base - lo
+    encrypt = getattr(a, "encrypt", None)
     hdr = build_header(payload, name, parse_version(a.version), a.secver, a.golden, a.trial_ms, a.target, arch,
-                       load_type, load_addr, handoff, secret, entry=entry, stage1=stage1)
-    img = hdr + b"\xff" * (PAYLOAD_OFF - HDR_SIZE) + payload
+                       load_type, load_addr, handoff, secret, entry=entry, stage1=stage1, encrypted=bool(encrypt))
+    plain_sha = hashlib.sha256(payload).hexdigest()
+    env = b""
+    if encrypt:
+        if stage1:
+            die("--encrypt: a stage 1 is installed by stage 0, which has no decryption key")
+        key = os.urandom(getattr(a, "encrypt_keylen", 128) // 8)
+        env = enc.wrap(enc.load_key(encrypt), key)
+        payload = enc.aes_ctr(key, payload)
+    img = hdr + env + b"\xff" * (PAYLOAD_OFF - HDR_SIZE - len(env)) + payload
     out = a.output or os.path.splitext(a.input)[0] + ".mimg"
     open(out, "wb").write(img)
-    print("%s: %s v%s, %s %s%s, %d bytes, sha256 %s%s%s" % (
+    print("%s: %s v%s, %s %s%s, %d bytes, sha256 %s%s%s%s" % (
         out, name, a.version, ARCH_NAMES[arch], "xip" if load_type == LOAD_CHAIN else "ram@0x%08x" % load_addr,
-        " (golden)" if a.golden else "", len(payload), hashlib.sha256(payload).hexdigest()[:16],
-        ", handoff @0x%08x" % handoff if handoff else "", ", signed" if secret else ""))
+        " (golden)" if a.golden else "", len(payload), plain_sha[:16],
+        ", handoff @0x%08x" % handoff if handoff else "", ", signed" if secret else "",
+        ", encrypted (AES-%d)" % ((len(env) - 68) * 8) if encrypt else ""))
 
 
 def cmd_info(a):
@@ -444,6 +478,20 @@ def cmd_info(a):
         print(line)
     else:
         print("signed    no")
+    if h["envelope"]:
+        line ="encrypted AES-%d (ECIES-X25519 envelope, MCUboot TLV 0x33)" % ((len(h["envelope"]) - 68) * 8)
+        dec = getattr(a, "enc_key", None)
+        if dec:
+            try:
+                plain = enc.aes_ctr(enc.unwrap(enc.load_key(dec), h["envelope"]), payload)
+                ok = hashlib.sha256(plain).digest() == h["sha256"]
+                line += ": decrypts %s" % ("OK" if ok else "to the WRONG payload")
+                if not ok:
+                    problems.append("decrypted payload SHA-256 mismatch")
+            except ValueError as e:
+                line += ": " + str(e)
+                problems.append(str(e))
+        print(line)
     for s in SLOTS:
         if s in LAYOUTS[a.layout]:
             fits = len(payload) + PAYLOAD_OFF <= LAYOUTS[a.layout][s][1]
@@ -467,6 +515,17 @@ def cmd_keygen(a):
     if os.path.exists(base + ".key") and not a.force:
         die("%s.key exists (--force to replace it; images signed with it would stop booting)" % base)
     os.makedirs(os.path.dirname(base) or ".", exist_ok=True)
+    if a.type == "x25519":
+        secret = os.urandom(32)
+        open(base + ".key", "w").write(secret.hex() + "\n")
+        open(base + ".pub", "w").write(enc.public_key(secret).hex() + "\n")
+        gi = os.path.join(os.path.dirname(base) or ".", ".gitignore")
+        lines = open(gi).read().split() if os.path.exists(gi) else []
+        if "*.key" not in lines:
+            open(gi, "a").write("*.key\n")
+        print("device %s.key: the bootloader's decryption key (mimiconf ENC_KEY; keep it private)\n"
+              "public %s.pub: encrypt with `mbtool pack --encrypt %s.pub`" % (base, base, base))
+        return
     if a.type == "p256":
         secret = p256.generate()
         pub = p256.public_key(secret)
@@ -493,6 +552,7 @@ def cmd_uf2(a):
     img, h, _, problems = image_file(a.image)
     if problems:
         die("refusing a broken image: " + ", ".join(problems))
+    not_encrypted(h, "uf2")
     off, size = slot_region(a.slot, a.layout)
     if len(img) > size:
         die("image is %d bytes, slot %s holds %d" % (len(img), a.slot, size))
@@ -520,6 +580,7 @@ def cmd_flash(a):
     img, h, _, problems = image_file(a.image)
     if problems:
         die("refusing a broken image: " + ", ".join(problems))
+    not_encrypted(h, "flash")
     off, size = slot_region(a.slot, a.layout)
     if len(img) > size:
         die("image doesn't fit slot %s" % a.slot)
@@ -644,7 +705,11 @@ def send_image(s, img, payload, ready_timeout=10):
         die("device refused: " + ANSI.sub("", out)[-300:])
     max_frame, where = int(m.group(1)), m.group(2)
     s.write(b"H" + img[:HDR_SIZE])
-    out, m = read_until(s, r"MB (OK|ERR[^\r\n]*)\r?\n", 180)        # erasing a big slot takes a while
+    out, m = read_until(s, r"MB (OK|KEY|ERR[^\r\n]*)\r?\n", 180)    # erasing a big slot takes a while
+    if m and m.group(1) == "KEY":                                   # an encrypted image: the envelope next
+        env = envelope_of(img)
+        s.write(b"K" + struct.pack("<H", len(env)) + env + struct.pack("<I", zlib.crc32(env) & 0xFFFFFFFF))
+        out, m = read_until(s, r"MB (OK|ERR[^\r\n]*)\r?\n", 180)
     if not m or m.group(1) != "OK":
         die("header rejected: " + (m.group(0) if m else out[-200:]))
     t0 = time.time()
@@ -911,13 +976,18 @@ def main():
                                                                                     help="refuse to pack anything else")
     p.add_argument("--load-addr", help=".bin only: where it runs (default flash)")
     p.add_argument("--stage1", action="store_true", help="a two-stage build's stage 1 (mimiconf builds these itself)")
+    p.add_argument("--encrypt", metavar="PUB", help="encrypt the payload for the board whose key is PUB (mbtool keygen --type x25519)")
+    p.add_argument("--encrypt-keylen", type=int, choices=[128, 256], default=128, help="AES key size (default 128)")
     p.add_argument("--target", default=TARGET, help="target as the bootloader names it: rp2040, rp2350, or the chip from mimiconf (e.g. stm32f411ce); RP2040 requires a RAM-linked payload"); p.set_defaults(fn=cmd_pack)
-    p = sub.add_parser("info"); p.add_argument("image"); p.add_argument("--pub"); p.set_defaults(fn=cmd_info)
+    p = sub.add_parser("info"); p.add_argument("image"); p.add_argument("--pub")
+    p.add_argument("--enc-key", help="an encrypted image: decrypt with this device key and check the payload")
+    p.set_defaults(fn=cmd_info)
     p = sub.add_parser("sign"); p.add_argument("image"); p.add_argument("--key", required=True); p.add_argument("-o", "--output")
     p.set_defaults(fn=cmd_sign)
     p = sub.add_parser("keygen"); p.add_argument("--out", default="keys/mimiboot"); p.add_argument("--force", action="store_true")
-    p.add_argument("--type", choices=["ed25519", "p256"], default="ed25519",
-                   help="ed25519 (default) or p256 (ECDSA P-256: boards built with ECDSA)")
+    p.add_argument("--type", choices=["ed25519", "p256", "x25519"], default="ed25519",
+                   help="ed25519 (default) or p256 (ECDSA P-256: boards built with ECDSA) signing keys; "
+                        "x25519: a board's decryption key (ENC_KEY) for encrypted images")
     p.set_defaults(fn=cmd_keygen)
     p = sub.add_parser("uf2"); p.add_argument("image"); p.add_argument("--slot", required=True); p.add_argument("-o", "--output")
     p.set_defaults(fn=cmd_uf2)

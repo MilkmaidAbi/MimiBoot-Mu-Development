@@ -13,6 +13,7 @@
 #if !MB_FEAT_RECV
 int mb_recv(const mb_recv_t* r, mb_image_hdr_t* hdr_out) { (void)r; (void)hdr_out; return MB_E_UNSUPP; }
 int mb_sink_slot_begin(void* ctx, const mb_image_hdr_t* hdr) { (void)ctx; (void)hdr; return MB_E_UNSUPP; }
+int mb_sink_slot_check(void* ctx, const mb_image_hdr_t* hdr) { (void)ctx; (void)hdr; return MB_E_UNSUPP; }
 int mb_sink_slot_data(void* ctx, uint32_t off, const void* d, size_t n) { (void)ctx; (void)off; (void)d; (void)n; return MB_E_UNSUPP; }
 int mb_sink_slot_end(void* ctx) { (void)ctx; return MB_E_UNSUPP; }
 #else
@@ -35,8 +36,28 @@ static void say(const mb_recv_t* r, const char* fmt, unsigned long v, const char
     r->puts(r->ctx, line);
 }
 
+static const uint8_t zero_nonce[16];
+static uint8_t data[1024];
+
+// An encrypted image: ask for the envelope ('K' u16 len, envelope, u32 crc) and open it
+static int read_key(const mb_recv_t* r) {
+    if (!MB_FEAT_ENC || !r->enc_key) {
+        r->puts(r->ctx, "MB ERR encrypted image: no decryption key in this build\n");
+        return MB_E_UNSUPP;
+    }
+    r->puts(r->ctx, "MB KEY\n");
+    uint8_t h[2], t[4];
+    if (r->getc(r->ctx, 5000) != 'K' || rd(r, h, 2, 2000) != MB_OK) return MB_E_TIMEOUT;
+    uint32_t len = (uint32_t)h[0] | (uint32_t)h[1] << 8;
+    if (len > MB_ENC_ENV_MAX) return MB_E_CORRUPT;
+    if (rd(r, data, len, 2000) != MB_OK || rd(r, t, 4, 2000) != MB_OK) return MB_E_TIMEOUT;
+    if (mb_crc32(0, data, len) != le32(t)) return MB_E_CORRUPT;
+    int rc = mb_enc_unwrap(&mb_upload_key, data, len, r->enc_key);
+    if (rc == MB_E_SIGNATURE) r->puts(r->ctx, "MB ERR key: not encrypted for this device\n");
+    return rc;
+}
+
 int mb_recv(const mb_recv_t* r, mb_image_hdr_t* hdr_out) {
-    static uint8_t data[1024];
     uint16_t max = r->max_frame && r->max_frame <= sizeof(data) ? r->max_frame : (uint16_t)sizeof(data);
     say(r, "MB READY %lu %s\n", max, r->where ? r->where : "-");
     mb_image_hdr_t hdr;
@@ -46,29 +67,36 @@ int mb_recv(const mb_recv_t* r, mb_image_hdr_t* hdr_out) {
         r->puts(r->ctx, "MB ERR bad header\n");
         return MB_E_CORRUPT;
     }
-    int rc = r->begin(r->ctx, &hdr);
+    bool enc = MB_FEAT_ENC && (hdr.flags & MB_IMG_F_ENCRYPTED);
+    // the envelope is checked before anything is erased (a build without the feature refuses here)
+    int rc = (hdr.flags & MB_IMG_F_ENCRYPTED) ? read_key(r) : MB_OK;
+    if (rc == MB_OK) rc = r->begin(r->ctx, &hdr);
     if (rc != MB_OK) {
         char line[48];
         snprintf(line, sizeof(line), "MB ERR refused (%d)\n", rc);
         r->puts(r->ctx, line);
+        mb_aes_clear(&mb_upload_key);
         return rc;
     }
     r->puts(r->ctx, "MB OK\n");
     for (;;) {
         c = r->getc(r->ctx, 5000);
-        if (c == 'X' || c < 0) { r->puts(r->ctx, "MB ERR aborted (nothing installed)\n"); return MB_E_TIMEOUT; }
+        if (c == 'X' || c < 0) { r->puts(r->ctx, "MB ERR aborted (nothing installed)\n"); rc = MB_E_TIMEOUT; goto out; }
         if (c == 'E') break;
         if (c != 'D') { r->puts(r->ctx, "MB ERR frame\n"); continue; }
         uint8_t h[6], t[4];
-        if (rd(r, h, 6, 2000) != MB_OK) { r->puts(r->ctx, "MB ERR timeout\n"); return MB_E_TIMEOUT; }
+        if (rd(r, h, 6, 2000) != MB_OK) { r->puts(r->ctx, "MB ERR timeout\n"); rc = MB_E_TIMEOUT; goto out; }
         uint32_t off = le32(h);
         uint32_t len = (uint32_t)h[4] | (uint32_t)h[5] << 8;
-        if (len > max || off > hdr.payload_size || len > hdr.payload_size - off) { r->puts(r->ctx, "MB ERR range\n"); return MB_E_BADARG; }
-        if (rd(r, data, len, 2000) != MB_OK || rd(r, t, 4, 2000) != MB_OK) { r->puts(r->ctx, "MB ERR timeout\n"); return MB_E_TIMEOUT; }
+        if (len > max || off > hdr.payload_size || len > hdr.payload_size - off) { r->puts(r->ctx, "MB ERR range\n"); rc = MB_E_BADARG; goto out; }
+        if (rd(r, data, len, 2000) != MB_OK || rd(r, t, 4, 2000) != MB_OK) { r->puts(r->ctx, "MB ERR timeout\n"); rc = MB_E_TIMEOUT; goto out; }
         if (mb_crc32(0, data, len) != le32(t)) { say(r, "MB ERR crc %lu%s\n", off, ""); continue; }
-        if ((rc = r->data(r->ctx, off, data, len)) != MB_OK) { r->puts(r->ctx, "MB ERR write\n"); return rc; }
+        if (enc) mb_aes_ctr(&mb_upload_key, zero_nonce, off, data, len);     // by offset, so a resent frame decrypts the same
+        if ((rc = r->data(r->ctx, off, data, len)) != MB_OK) { r->puts(r->ctx, "MB ERR write\n"); goto out; }
         say(r, "MB OK %lu%s\n", off, "");
     }
+    mb_aes_clear(&mb_upload_key);
+    memset(data, 0, sizeof(data));
     if ((rc = r->end(r->ctx)) != MB_OK) {
         r->puts(r->ctx, rc == MB_E_SIGNATURE ? "MB ERR signature (nothing installed)\n"
                         : rc == MB_E_REFUSED ? "MB ERR refused: not linked for this slot (nothing installed)\n"
@@ -78,6 +106,10 @@ int mb_recv(const mb_recv_t* r, mb_image_hdr_t* hdr_out) {
     if (hdr_out) *hdr_out = hdr;
     r->puts(r->ctx, "MB DONE\n");
     return MB_OK;
+out:
+    mb_aes_clear(&mb_upload_key);
+    memset(data, 0, sizeof(data));
+    return rc;
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +118,12 @@ int mb_recv(const mb_recv_t* r, mb_image_hdr_t* hdr_out) {
 // ---------------------------------------------------------------------------
 
 int mb_sink_slot_begin(void* ctx, const mb_image_hdr_t* hdr) {
+    mb_slot_sink_t* s = ctx;
+    int rc = mb_sink_slot_check(ctx, hdr);
+    return rc != MB_OK ? rc : mb_slot_erase(s->p, s->slot, hdr->payload_size);
+}
+
+int mb_sink_slot_check(void* ctx, const mb_image_hdr_t* hdr) {
     mb_slot_sink_t* s = ctx;
     const mb_slot_def_t* d = &s->p->layout->slot[s->slot];
     if (mb_image_check_header(s->p, hdr, d->size) != MB_OK) return MB_E_CORRUPT;
@@ -102,7 +140,7 @@ int mb_sink_slot_begin(void* ctx, const mb_image_hdr_t* hdr) {
     bool s1 = mb_slot_role(s->p, s->slot) == MB_ROLE_STAGE1;
     if ((s1 ? mb_stage1_check_sig(s->p, &tmp) : mb_image_check_sig(s->p, &tmp)) != MB_OK) return MB_E_SIGNATURE;
     s->hdr = *hdr;
-    return mb_slot_erase(s->p, s->slot, hdr->payload_size);
+    return MB_OK;
 }
 
 int mb_sink_slot_data(void* ctx, uint32_t off, const void* d, size_t n) {

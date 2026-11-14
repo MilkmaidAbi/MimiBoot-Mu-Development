@@ -35,6 +35,31 @@ bool mb_ed25519_verify(const uint8_t sig[64], const void* msg, size_t len, const
 /* ECDSA P-256 over a SHA-256 digest (MB_FEAT_ECDSA): sig = r || s, pub = X || Y, big-endian */
 bool mb_ecdsa_p256_verify(const uint8_t sig[64], const uint8_t digest[32], const uint8_t pub[64]);
 
+/* ---- encrypted images (MB_FEAT_ENC, core/mb_enc.c) ----------------------------
+ * MCUboot's scheme, so imgtool and MimiBoot agree: the payload is AES-CTR
+ * (128 or 256) under a random key, counter block = 12 zero bytes + the
+ * big-endian block number from the payload start. The key travels in an
+ * ECIES-X25519 envelope (MCUboot TLV 0x33): ephemeral public key (32) ||
+ * HMAC-SHA256 tag (32) || the key, AES-CTR-encrypted with a zero counter (16/32),
+ * keys from HKDF-SHA256(no salt, info "MCUBoot_ECIES_v1"). Hash and signature
+ * always cover the plaintext. */
+#define MB_ENC_TLV_X25519   0x33
+#define MB_ENC_ENV_MAX      (4 + 32 + 32 + 32)  /* TLV head (type, 0, length LE) + the largest envelope */
+
+typedef struct { uint32_t sk[MB_FEAT_ENC ? 120 : 1]; uint32_t rounds; } mb_aes_t;
+extern mb_aes_t mb_upload_key;      /* the image being received (recv or SMP, one at a time), when it came encrypted */
+bool mb_x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32]);    /* false: all-zero result */
+void mb_hmac_sha256(const uint8_t* key, size_t key_len, const void* msg, size_t len, uint8_t out[32]);
+void mb_hkdf_sha256(const uint8_t* ikm, size_t ikm_len, const void* info, size_t info_len, uint8_t* okm, size_t okm_len);
+bool mb_aes_init(mb_aes_t* a, const uint8_t* key, size_t len);                         /* 16 or 32 bytes */
+void mb_aes_block(const mb_aes_t* a, const uint8_t in[16], uint8_t out[16]);
+/* XOR the keystream for byte offset `off` (counter = nonce's last 32 bits, big-endian, + off/16) into buf */
+void mb_aes_ctr(const mb_aes_t* a, const uint8_t nonce[16], uint32_t off, uint8_t* buf, size_t n);
+void mb_aes_clear(mb_aes_t* a);
+/* env = the TLV (head included), n its size. On MB_OK `a` holds the image key.
+ * MB_E_CORRUPT: not an envelope; MB_E_SIGNATURE: not made for this device's key. */
+int  mb_enc_unwrap(mb_aes_t* a, const uint8_t* env, size_t n, const uint8_t priv[32]);
+
 /* ---- slots ------------------------------------------------------------------ */
 const char* mb_slot_name(const mb_port_t* p, int slot);            /* "a" "b" "g" "c" ... */
 int  mb_slot_parse(const mb_port_t* p, const char* s);             /* name -> index, -1 */
@@ -242,8 +267,11 @@ void mb_main(const mb_port_t* p);
 /* ---- receiving images (console upload, OTA from a running app) -------------------
  *
  *   dev:  "MB READY <where> <max frame>\n"
- *   host: 'H' + 256-byte image header          dev: "MB OK\n" | "MB ERR <why>\n"
+ *   host: 'H' + 256-byte image header          dev: "MB OK\n" | "MB KEY\n" | "MB ERR <why>\n"
+ *   (MB KEY: the header says MB_IMG_F_ENCRYPTED)
+ *   host: 'K' u16 len, envelope, u32 crc        dev: "MB OK\n" | "MB ERR <why>\n"
  *   host: 'D' u32 off, u16 len, data, u32 crc   dev: "MB OK <off>\n" | "MB ERR ..." (resend)
+ *   (an encrypted image's data frames carry ciphertext; the sink gets plaintext)
  *   host: 'E'                                   dev: "MB DONE\n" | "MB ERR <why>\n"
  *   host: 'X' at any point aborts
  */
@@ -253,6 +281,7 @@ typedef struct {
     void (*puts)(void* ctx, const char* s);
     uint16_t max_frame;                                     /* the receiver's buffer (<= 1024) */
     const char* where;                                      /* shown in READY */
+    const uint8_t* enc_key;                                 /* X25519 key for encrypted images (NULL: refused) */
     /* the sink */
     int  (*begin)(void* ctx, const mb_image_hdr_t* hdr);    /* validate, erase */
     int  (*data)(void* ctx, uint32_t off, const void* d, size_t n);
@@ -263,6 +292,7 @@ int mb_recv(const mb_recv_t* r, mb_image_hdr_t* hdr_out);
 
 /* the flash-slot sink (ctx = mb_slot_sink_t*) */
 typedef struct { const mb_port_t* p; int slot; mb_image_hdr_t hdr; } mb_slot_sink_t;
+int mb_sink_slot_check(void* ctx, const mb_image_hdr_t* hdr);     /* begin without the erase */
 int mb_sink_slot_begin(void* ctx, const mb_image_hdr_t* hdr);
 int mb_sink_slot_data(void* ctx, uint32_t off, const void* d, size_t n);
 int mb_sink_slot_end(void* ctx);

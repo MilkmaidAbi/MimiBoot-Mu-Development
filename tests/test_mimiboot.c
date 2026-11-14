@@ -1256,6 +1256,188 @@ static void test_client_install(void) {
           "not the running slot, not golden");
 }
 
+#if MB_FEAT_ENC
+// ---------------------------------------------------------------------------
+// encrypted images (the envelope and AES are checked against imgtool in
+// test_crypto.c; here: the upload paths around them)
+// ---------------------------------------------------------------------------
+
+static uint8_t dev_priv[32], dev_pub[32];
+
+// What `mbtool pack --encrypt` does: a key envelope (TLV 0x33) for dev_pub
+static size_t make_envelope(uint8_t* env, const uint8_t* pub, const uint8_t* key, size_t klen, uint8_t seed) {
+    static const uint8_t base[32] = { 9 }, zero[16];
+    uint8_t eph[32], shared[32], derived[64];
+    for (int i = 0; i < 32; i++) eph[i] = (uint8_t)(seed * 31 + i * 7);
+    env[0] = MB_ENC_TLV_X25519;
+    env[1] = 0;
+    env[2] = (uint8_t)(64 + klen);
+    env[3] = 0;
+    mb_x25519(env + 4, eph, base);
+    mb_x25519(shared, eph, pub);
+    mb_hkdf_sha256(shared, 32, "MCUBoot_ECIES_v1", 16, derived, klen + 32);
+    mb_aes_t a;
+    mb_aes_init(&a, derived, klen);
+    memcpy(env + 68, key, klen);
+    mb_aes_ctr(&a, zero, 0, env + 68, klen);
+    mb_hmac_sha256(derived + klen, 32, env + 68, klen, env + 36);
+    return 4 + 64 + klen;
+}
+
+static size_t put_key(uint8_t* out, const uint8_t* env, size_t len) {
+    size_t n = 0;
+    out[n++] = 'K';
+    out[n++] = (uint8_t)len;
+    out[n++] = (uint8_t)(len >> 8);
+    memcpy(out + n, env, len);
+    n += len;
+    uint32_t c = mb_crc32(0, env, len);
+    for (int i = 0; i < 4; i++) out[n++] = (uint8_t)(c >> (8 * i));
+    return n;
+}
+
+static uint8_t cipher[0x60000];
+
+// The console upload of an encrypted image: header, envelope, ciphertext frames
+static size_t put_enc_upload(uint8_t* s, size_t n, const mb_image_hdr_t* h, const uint8_t* env, size_t envlen,
+                             const uint8_t* key, size_t klen, uint16_t frame) {
+    static const uint8_t zero[16];
+    mb_aes_t a;
+    mb_aes_init(&a, key, klen);
+    memcpy(cipher, payload, h->payload_size);
+    mb_aes_ctr(&a, zero, 0, cipher, h->payload_size);
+    s[n++] = 'H';
+    memcpy(s + n, h, sizeof(*h));
+    n += sizeof(*h);
+    n += put_key(s + n, env, envlen);
+    for (uint32_t off = 0; off < h->payload_size; off += frame) {
+        uint16_t len = (uint16_t)(h->payload_size - off < frame ? h->payload_size - off : frame);
+        n += put_frame(s + n, off, cipher + off, len);
+    }
+    s[n++] = 'E';
+    return n;
+}
+
+static void console_run(size_t n) {
+    sim.console = true;
+    sim.button = true;
+    sim_input(script, n);
+    sim_power_on();
+    sim.button = false;
+    sim.console = false;
+}
+
+static const uint8_t base[32] = { 9 };
+
+// the simulated board's decryption key (tests/gen_smp.py derives the same one)
+static void dev_key_init(void) {
+    mb_sha256_t s;
+    mb_sha256_init(&s);
+    mb_sha256_update(&s, "MimiBoot test encryption key", 28);
+    mb_sha256_final(&s, dev_priv);
+    mb_x25519(dev_pub, dev_priv, base);
+}
+
+static void test_encrypted(void) {
+    dev_key_init();
+    uint8_t key[32], env[MB_ENC_ENV_MAX];
+    for (int i = 0; i < 32; i++) key[i] = (uint8_t)(0xA5 ^ (i * 13));
+
+    for (size_t klen = 16; klen <= 32; klen += 16) {
+        printf("encrypted recv (AES-%u): decrypted on the way in, the slot holds plaintext\n", (unsigned)(klen * 8));
+        good_a();
+        sim_port.enc_key = dev_priv;
+        uint32_t size = make_payload(80 + (uint32_t)klen, 50001);
+        mb_image_hdr_t h = make_header("secret", MB_VERSION(2, 0, 0), 2, size, MB_IMG_F_ENCRYPTED);
+        size_t el = make_envelope(env, dev_pub, key, klen, 1);
+        size_t n = (size_t)sprintf((char*)script, "c\rrecv b\r");
+        n = put_enc_upload(script, n, &h, env, el, key, klen, 1000);
+        console_run(n);
+        CHECK(strstr(sim.out, "MB KEY") && strstr(sim.out, "MB DONE") && slot_intact(MB_SLOT_B), "installed, b intact (plaintext)");
+        uint32_t off = sim_port.layout->slot[MB_SLOT_B].offset + MB_IMG_PAYLOAD_OFF;
+        CHECK(!memcmp(sim_flash + off, payload, size) && sim_flash[off + size] == 0xFF, "flash holds the plaintext, nothing past it");
+        CHECK(boot() == MB_SLOT_B, "and it boots");
+    }
+
+    printf("encrypted recv: a bad envelope is refused before b is touched\n");
+    struct { const char* what; uint8_t flip_at; bool other_device; } bad[] = {
+        { "a flipped ephemeral key byte", 10, false }, { "a flipped tag byte", 40, false },
+        { "a flipped wrapped-key byte", 70, false }, { "made for another device", 0, true },
+    };
+    for (unsigned i = 0; i < 4; i++) {
+        good_a();
+        install_raw(MB_SLOT_B, "keep", MB_VERSION(1, 0, 0), 1, 90, 20000);
+        sim_port.enc_key = dev_priv;
+        uint32_t size = make_payload(91, 9000);
+        mb_image_hdr_t h = make_header("secret", MB_VERSION(2, 0, 0), 2, size, MB_IMG_F_ENCRYPTED);
+        uint8_t other_pub[32], other_priv[32];
+        memset(other_priv, 0x42, 32);
+        mb_x25519(other_pub, other_priv, base);
+        size_t el = make_envelope(env, bad[i].other_device ? other_pub : dev_pub, key, 16, 2);
+        if (!bad[i].other_device) env[bad[i].flip_at] ^= 0x01;
+        size_t n = (size_t)sprintf((char*)script, "c\rrecv b\r");
+        n = put_enc_upload(script, n, &h, env, el, key, 16, 1000);
+        uint32_t w0 = writes();
+        console_run(n);
+        CHECK(strstr(sim.out, "MB ERR") && !strstr(sim.out, "MB DONE"), "%s: refused", bad[i].what);
+        mb_slot_info_t in;
+        CHECK(writes() == w0 || (mb_image_read_header(&sim_port, MB_SLOT_B, &in) == MB_OK && !strcmp(in.hdr.name, "keep")),
+              "%s: b still holds its image", bad[i].what);
+        CHECK(slot_intact(MB_SLOT_B), "%s: ... intact", bad[i].what);
+    }
+
+    printf("encrypted recv: tampered ciphertext fails the hash, b left empty\n");
+    good_a();
+    sim_port.enc_key = dev_priv;
+    uint32_t size = make_payload(92, 9000);
+    mb_image_hdr_t h = make_header("secret", MB_VERSION(2, 0, 0), 2, size, MB_IMG_F_ENCRYPTED);
+    size_t el = make_envelope(env, dev_pub, key, 16, 3);
+    payload[4000] ^= 0x10;                      // encrypting a different plaintext = ciphertext with one bit off
+    size_t n = (size_t)sprintf((char*)script, "c\rrecv b\r");
+    n = put_enc_upload(script, n, &h, env, el, key, 16, 1000);
+    console_run(n);
+    mb_slot_info_t in;
+    CHECK(strstr(sim.out, "MB ERR hash") && mb_image_read_header(&sim_port, MB_SLOT_B, &in) != MB_OK, "refused, b empty");
+
+    printf("encrypted recv: a build without a key refuses, b untouched\n");
+    good_a();
+    install_raw(MB_SLOT_B, "keep", MB_VERSION(1, 0, 0), 1, 93, 20000);
+    size = make_payload(94, 9000);
+    h = make_header("secret", MB_VERSION(2, 0, 0), 2, size, MB_IMG_F_ENCRYPTED);
+    n = (size_t)sprintf((char*)script, "c\rrecv b\r");
+    n = put_enc_upload(script, n, &h, env, el, key, 16, 1000);
+    console_run(n);
+    CHECK(strstr(sim.out, "no decryption key") && slot_intact(MB_SLOT_B), "refused");
+
+    printf("encrypted ramboot: decrypted into RAM and started\n");
+    good_a();
+    sim_port.enc_key = dev_priv;
+    size = make_payload(95, 30000);
+    h = make_header_ex("ramsecret", MB_VERSION(0, 1, 0), 0, size, MB_IMG_F_ENCRYPTED, MB_ARCH_ARM, MB_LOAD_RAM,
+                       SIM_RAM_BASE + 0x2000, 0);
+    el = make_envelope(env, dev_pub, key, 32, 4);
+    n = (size_t)sprintf((char*)script, "c\rramboot\r");
+    n = put_enc_upload(script, n, &h, env, el, key, 32, 1024);
+    sim.console = true;
+    sim.button = true;
+    sim_input(script, n);
+    sim_outcome_t o = sim_power_on();
+    sim.button = false;
+    sim.console = false;
+    CHECK(o == SIM_BOOTED && sim.booted_ram && !memcmp(sim_ram + 0x2000, payload, size), "plaintext in RAM, started");
+
+    printf("encrypted images and the client library: refused (the key stays in the bootloader)\n");
+    good_a();
+    sim.self_slot = MB_SLOT_A;
+    mb_client_init(&sim_port);
+    h = make_header("secret", MB_VERSION(2, 0, 0), 2, 9000, MB_IMG_F_ENCRYPTED);
+    CHECK(mb_client_install_begin(MB_SLOT_B, &h) == MB_E_UNSUPP, "install_begin refuses");
+    sim_port.enc_key = NULL;
+}
+#else
+static void test_encrypted(void) {}
+#endif
+
 // ---------------------------------------------------------------------------
 // power cuts
 // ---------------------------------------------------------------------------
@@ -1710,6 +1892,36 @@ static void test_smp(void) {
     CHECK(bs == MB_SLOT_B && sim.booted_hdr.flags & MB_IMG_F_SIGNED, "and boots (signature checked again at boot)");
     sim_port.require_signature = false;
 
+#if MB_FEAT_ENC
+    printf("SMP: an encrypted image (mbtool's format) is decrypted on the way in\n");
+    dev_key_init();
+    good_a();
+    sim_port.enc_key = dev_priv;
+    SMP_ADD(smp_upload_enc);
+    smp_run();
+    any_err = false;
+    for (int k = 0; k < smp_rx_n; k++) any_err |= HAS(k, "\x63" "err") || HAS(k, "\x62rc");
+    make_payload(SMP_IMG_SEED, SMP_IMG_SIZE);
+    CHECK(!any_err && HAS(smp_rx_n - 1, "\x65match\xf5"), "no errors; the file's sha (ciphertext) matches");
+    CHECK(slot_intact(MB_SLOT_B) && !memcmp(sim_flash + b->offset + MB_IMG_PAYLOAD_OFF, payload, SMP_IMG_SIZE) &&
+          sim_flash[b->offset + MB_IMG_PAYLOAD_OFF + SMP_IMG_SIZE] == 0xFF, "b holds the plaintext, nothing past it");
+    CHECK(boot() == MB_SLOT_B, "and boots");
+
+    printf("SMP: a bad envelope, or no key in the build: refused, b untouched\n");
+    good_a();
+    sim_port.enc_key = dev_priv;
+    install_raw(MB_SLOT_B, "previous", MB_VERSION(2, 0, 0), 1, 9, 20000);
+    SMP_ADD(smp_upload_enc_badenv);
+    smp_run();
+    CHECK(HAS(smp_rx_n - 1, "\x63" "err") && slot_intact(MB_SLOT_B), "a flipped envelope bit: refused before the erase");
+    good_a();
+    install_raw(MB_SLOT_B, "previous", MB_VERSION(2, 0, 0), 1, 9, 20000);
+    SMP_ADD(smp_upload_enc);
+    smp_run();
+    CHECK(HAS(0, "\x63" "err") && slot_intact(MB_SLOT_B), "no key: refused at the first page");
+    sim_port.enc_key = NULL;
+#endif
+
     printf("SMP: erase, reset\n");
     good_a();
     install_raw(MB_SLOT_B, "other", MB_VERSION(2, 0, 0), 1, 8, 20000);
@@ -1757,6 +1969,7 @@ int main(int argc, char** argv) {
     test_ota();
     test_client_install();
     test_revocation();
+    test_encrypted();
     test_power_cuts();
     test_two_stage();
     test_smp();

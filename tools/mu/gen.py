@@ -13,7 +13,7 @@ ROLE_NAMES = {ROLE_AB: "A/B", ROLE_GOLDEN: "golden", 3: "aux", ROLE_STAGE1: "sta
 STAGE0_OFF = {"IMG_MCUBOOT": False, "IMG_RAW": False, "CONSOLE": False, "SHELL": False, "SHELL_DIAG": False,
               "RECV": False, "CFG_FILE": False, "CFG_SIGNED": False, "CONSOLE_AUTH": False, "GRUB": False,
               "CONTROL": False, "HANDOFF": False, "RAM_IMAGES": False, "SCRUB_RAM": False, "SMP": False,
-              "CONSOLE_USB": False}
+              "CONSOLE_USB": False, "ENCRYPTED_IMAGES": False}
 NATIVE_HDR = 0x1000
 VECTOR_MODES = {"vtor": 0, "remap": 1, "relay": 2}
 
@@ -85,6 +85,11 @@ def key_macros(cfg: Config) -> list[str]:
                 raise ValueError(f"{s1} has P-256 keys: turn on ECDSA, or remove them")
             out += [f"#define MB_S1_P256_KEY_COUNT {len(p256)}",
                     "#define MB_S1_P256_KEYS {" + ",".join(_c_bytes(k) for k in p256) + "}"]
+    ek = cfg.effective("ENC_KEY") if cfg.effective("ENCRYPTED_IMAGES") else None
+    if ek:
+        from mu.model import read_enc_key
+        out += ["/* the board's X25519 decryption key: this header is as secret as the key file */",
+                "#define MB_ENC_KEY " + _c_bytes(read_enc_key(ek))]
     rk = cfg.effective("REVOKE_KEYS") if cfg.effective("SIGNATURES") else None
     if rk:
         rkeys = read_keys(rk)
@@ -482,7 +487,7 @@ def mcu_outputs(cfg: Config, lay: Layout, out: Path):
 
 VENDOR_FLASH = {"stm32": "port/stm32/stm32_flash.c", "nrf": "port/nrf/nrf_flash.c", "samd": "port/samd/samd_flash.c"}
 CLIENT_CORE = ["core/mb_hash.c", "core/mb_ed25519.c", "core/mb_image.c", "core/mb_bcl.c", "core/mb_config.c",
-               "core/mb_control.c", "core/mb_grub.c", "core/mb_recv.c", "core/mb_formats.c", "core/mb_floor.c", "core/mb_ecdsa.c", "client/mb_client.c",
+               "core/mb_control.c", "core/mb_grub.c", "core/mb_recv.c", "core/mb_enc.c", "core/mb_formats.c", "core/mb_floor.c", "core/mb_ecdsa.c", "client/mb_client.c",
                "port/cortexm/cm_port.c"]
 CHUNK = {"stm32": "8 bytes (L4/G0/G4 program 8 bytes once per erase)", "nrf": "4 bytes",
          "samd": "64 bytes on SAM D21 (a page is written once per erase), 16 on SAM D51 (ECC quad-words)"}

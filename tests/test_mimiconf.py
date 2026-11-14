@@ -350,6 +350,26 @@ def two_stage_checks(db):
     h = gen.mcu_header(cfg, lay, 0x3000, gen.STAGE0_OFF)
     check("#define MB_FEAT_TWO_STAGE 1" in h and "#define MB_FEAT_CONSOLE 0" in h and "#define MB_FEAT_RECV 0" in h,
           "stage 0's header: two-stage on, console and uploads off")
+    check("#define MB_FEAT_ENC 0" in h, "stage 0's header: no decryption")
+    # encrypted images: a key, a valid one, no open memory dump, and a warning about the debug port
+    c4 = Config(db, "nucleo-f411re")
+    c4.set("ENCRYPTED_IMAGES", True)
+    errs = lambda c: [m for lvl, m in c.problems() if lvl == "error"]       # noqa: E731
+    check(any("ENC_KEY" in m for m in errs(c4)), "encrypted images without a key refused")
+    with tempfile.TemporaryDirectory() as td:
+        bad_key, good_key = Path(td) / "bad.key", Path(td) / "good.key"
+        bad_key.write_text("not a key\n")
+        good_key.write_text("# board key\n" + "ab" * 32 + "\n")
+        c4.set("ENC_KEY", str(bad_key))
+        check(any("hex" in m for m in errs(c4)), "a malformed key file refused")
+        c4.set("ENC_KEY", str(good_key))
+        check(any("SHELL_DIAG" in m for m in errs(c4)), "the memory dump open to anyone refused")
+        c4.set("SHELL_DIAG", False)
+        check(not errs(c4), f"a good key, no dump: accepted ({errs(c4)})")
+        check(any("debug port" in m for lvl, m in c4.problems() if lvl == "warn"), "warned about the debug port")
+        h4 = gen.mcu_header(c4, lay, 0x3000)
+        check("#define MB_FEAT_ENC 1" in h4 and "#define MB_ENC_KEY {" + ",".join(["0xab"] * 32) + "}" in h4,
+              "the header carries the key")
 
 
 def build_all():

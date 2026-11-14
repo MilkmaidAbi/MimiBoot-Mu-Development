@@ -194,6 +194,22 @@ default ****; needs `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)
 
 Ed25519 public keys (one per line) whose statements make the board stop trusting one of its signing keys: 'mbtool revoke --key <revocation key> --keyid <id>'. Keep these keys offline and apart from KEYS: a leaked image key must not be able to revoke the good ones. The revocation is kept in the protected store, so it needs one: nRF with PROTECTED_FLOOR, or a two-stage build. A board never revokes the last key of a kind. Images signed only by a revoked key stop booting when signatures are required: re-sign them first.
 
+### `ENCRYPTED_IMAGES`: Take encrypted images (AES-CTR + X25519, MCUboot's scheme)
+
+default **off**; needs `RECV`. (full core; builds: STM32/nRF/SAMD)
+
+Images can travel encrypted: 'mbtool pack --encrypt <board.pub>' (or imgtool's ECIES-X25519 key envelope, the same format) encrypts the payload with a fresh AES key and wraps that key for the board. MimiBoot decrypts while the image comes in over the console or SMP, so slots hold plaintext, as MCUboot's primary slot does: this keeps update files and the link private, not the chip's flash. The hash and signature cover the plaintext. Apps can't install encrypted images through the client library (the key stays in the bootloader).
+
+The decryption key is compiled in (ENC_KEY): every board built from the binary shares it, and it is only as safe as the bootloader's flash. Lock the debug port (DEBUG_LOCK on nRF, read protection from 'mbtool provision' elsewhere), and don't leave the 'md' memory dump open to anyone (SHELL_DIAG needs CONSOLE_AUTH here). About 3.5 KB of code (AES, X25519, HMAC/HKDF), 0.5 KB of RAM.
+
+C macro: `MB_FEAT_ENC`
+
+### `ENC_KEY`: Decryption key file (mbtool keygen --type x25519)
+
+default ****; needs `ENCRYPTED_IMAGES`. (full core; builds: STM32/nRF/SAMD)
+
+The board's X25519 private key, 64 hex digits ('mbtool keygen --type x25519 --out keys/board' writes board.key, this file, and board.pub, which 'mbtool pack --encrypt' takes). It ends up in the generated config header and the binary: keep the build folder as private as the key.
+
 ### `CFG_SIGNED`: Only use a boot config signed with your keys
 
 default **off**; needs `CFG_FILE`, `SIGNATURES`. (full core)

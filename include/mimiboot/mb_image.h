@@ -39,6 +39,10 @@
 #define MB_IMG_F_SIGNED     0x0002  /* signature[] is valid for key_id */
 #define MB_IMG_F_ECDSA      0x0004  /* with F_SIGNED: ECDSA P-256 (r || s) over SHA-256 of the signed bytes, not Ed25519 */
 #define MB_IMG_F_STAGE1     0x0008  /* a MimiBoot stage 1 (two-stage builds): only for a stage-1 slot */
+#define MB_IMG_F_ENCRYPTED  0x0010  /* delivered encrypted: in the file, a key envelope (MCUboot TLV 0x33)
+                                       sits at offset 256 of the header sector and the payload is AES-CTR.
+                                       MimiBoot decrypts while installing, so a slot always holds plaintext;
+                                       sha256 and the signature cover the plaintext. */
 
 #define MB_VERSION(maj, min, pat)   (((uint32_t)(maj) << 24) | ((uint32_t)(min) << 16) | (uint32_t)(pat))
 #define MB_VERSION_MAJOR(v)         ((v) >> 24)

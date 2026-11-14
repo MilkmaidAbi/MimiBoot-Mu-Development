@@ -106,19 +106,25 @@ void mb_sha512_final(mb_sha512_t* s, uint8_t out[64]) {
     for (int i = 0; i < 8; i++)
         for (int k = 0; k < 8; k++) out[8 * i + k] = (uint8_t)(s->h[i] >> (56 - 8 * k));
 }
+#endif /* MB_FEAT_SIGNATURES: SHA-512 */
 
+#if MB_FEAT_SIGNATURES || MB_FEAT_ENC
 // ---------------------------------------------------------------------------
-// GF(2^255 - 19)
+// GF(2^255 - 19), shared by Ed25519 and X25519. Every operation below is
+// branch-free and runs the same steps whatever the values (X25519 feeds the
+// device's secret key through them).
 // ---------------------------------------------------------------------------
 
 typedef int64_t gf[16];
 
+#if MB_FEAT_SIGNATURES
 static const gf gf0 = { 0 }, gf1 = { 1 };
 static const gf D = { 0x78a3, 0x1359, 0x4dca, 0x75eb, 0xd8ab, 0x4141, 0x0a4d, 0x0070, 0xe898, 0x7779, 0x4079, 0x8cc7, 0xfe73, 0x2b6f, 0x6cee, 0x5203 };
 static const gf D2 = { 0xf159, 0x26b2, 0x9b94, 0xebd6, 0xb156, 0x8283, 0x149a, 0x00e0, 0xd130, 0xeef3, 0x80f2, 0x198e, 0xfce7, 0x56df, 0xd9dc, 0x2406 };
 static const gf X = { 0xd51a, 0x8f25, 0x2d60, 0xc956, 0xa7b2, 0x9525, 0xc760, 0x692c, 0xdc5c, 0xfdd6, 0xe231, 0xc0a4, 0x53fe, 0xcd6e, 0x36d3, 0x2169 };
 static const gf Y = { 0x6658, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666 };
 static const gf I = { 0xa0b0, 0x4a0e, 0x1b27, 0xc4ee, 0xe478, 0xad2f, 0x1806, 0x2f43, 0xd7a7, 0x3dfb, 0x0099, 0x2b4d, 0xdf0b, 0x4fc1, 0x2480, 0x2b83 };
+#endif
 
 static void set25519(gf r, const gf a) { for (int i = 0; i < 16; i++) r[i] = a[i]; }
 
@@ -164,6 +170,7 @@ static void pack25519(uint8_t* o, const gf n) {
     }
 }
 
+#if MB_FEAT_SIGNATURES
 static bool neq25519(const gf a, const gf b) {
     uint8_t c[32], d[32];
     pack25519(c, a);
@@ -176,6 +183,7 @@ static uint8_t par25519(const gf a) {
     pack25519(d, a);
     return d[0] & 1;
 }
+#endif
 
 static void unpack25519(gf o, const uint8_t* n) {
     for (int i = 0; i < 16; i++) o[i] = n[2 * i] + ((int64_t)n[2 * i + 1] << 8);
@@ -207,6 +215,7 @@ static void inv25519(gf o, const gf in) {
     set25519(o, c);
 }
 
+#if MB_FEAT_SIGNATURES
 static void pow2523(gf o, const gf in) {
     gf c;
     set25519(c, in);
@@ -376,8 +385,63 @@ bool mb_ed25519_verify(const uint8_t sig[64], const void* msg, size_t len, const
     if (mb_ct_diff(sig, t, 32) != 0) return false;
     return mb_ct_diff(t, sig, 32) == 0;
 }
+#endif /* MB_FEAT_SIGNATURES: points, Ed25519 */
 
-#else /* !MB_FEAT_SIGNATURES: nothing verifies, so nothing passes */
+#if MB_FEAT_ENC
+// ---------------------------------------------------------------------------
+// X25519 (RFC 7748): the Montgomery ladder, as TweetNaCl's crypto_scalarmult.
+// The scalar is the device's decryption key, so every step is the same
+// whatever its bits: conditional swaps by mask (sel25519), a fixed 255
+// iterations, inversion by a fixed exponent.
+// ---------------------------------------------------------------------------
+bool mb_x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32]) {
+    static const gf k121665 = { 0xDB41, 1 };
+    uint8_t z[32];
+    gf x, a, b, c, d, e, f;
+    memcpy(z, scalar, 32);
+    z[31] = (uint8_t)((z[31] & 127) | 64);      // clamp (RFC 7748 section 5)
+    z[0] &= 248;
+    unpack25519(x, point);                      // drops the top bit, as the RFC asks
+    for (int i = 0; i < 16; i++) { b[i] = x[i]; d[i] = a[i] = c[i] = 0; }
+    a[0] = d[0] = 1;
+    for (int i = 254; i >= 0; i--) {
+        int r = (z[i >> 3] >> (i & 7)) & 1;
+        sel25519(a, b, r);
+        sel25519(c, d, r);
+        A(e, a, c);
+        Z(a, a, c);
+        A(c, b, d);
+        Z(b, b, d);
+        S(d, e);
+        S(f, a);
+        M(a, c, a);
+        M(c, b, e);
+        A(e, a, c);
+        Z(a, a, c);
+        S(b, a);
+        Z(c, d, f);
+        M(a, c, k121665);
+        A(a, a, d);
+        M(c, c, a);
+        M(a, d, f);
+        M(d, b, x);
+        S(b, e);
+        sel25519(a, b, r);
+        sel25519(c, d, r);
+    }
+    inv25519(c, c);
+    M(a, a, c);
+    pack25519(out, a);
+    // an all-zero result means a low-order point: no shared secret (RFC 7748 section 6.1)
+    uint8_t acc = 0;
+    for (int i = 0; i < 32; i++) acc |= out[i];
+    memset(z, 0, sizeof(z));
+    return acc != 0;
+}
+#endif /* MB_FEAT_ENC */
+#endif /* MB_FEAT_SIGNATURES || MB_FEAT_ENC */
+
+#if !MB_FEAT_SIGNATURES /* nothing verifies, so nothing passes */
 bool mb_ed25519_verify(const uint8_t sig[64], const void* msg, size_t len, const uint8_t pub[32]) {
     (void)sig; (void)msg; (void)len; (void)pub;
     return false;

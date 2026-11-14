@@ -68,6 +68,18 @@ int LLVMFuzzerTestOneInput(const uint8_t* d, size_t n) {
     sim.stage1_slot = -1;
     sim_two_stage((d[0] & 4) != 0, NULL);
     locked = (d[0] & 2) != 0;
+    // bit 3: the board has a decryption key (the host tests' one, so the encrypted uploads
+    // in tests/gen_smp.h, which seed this, really decrypt)
+    static uint8_t dev_key[32];
+    static bool keyed;
+    if (!keyed) {
+        mb_sha256_t s;
+        mb_sha256_init(&s);
+        mb_sha256_update(&s, "MimiBoot test encryption key", 28);
+        mb_sha256_final(&s, dev_key);
+        keyed = true;
+    }
+    sim_port.enc_key = (d[0] & 8) ? dev_key : NULL;
     mb_bcl_load(&log_, &sim_port);
     sn = 0;
     if (d[0] & 1) {

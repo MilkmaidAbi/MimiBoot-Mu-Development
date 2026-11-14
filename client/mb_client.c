@@ -227,6 +227,8 @@ int mb_client_install_begin(int slot, const mb_image_hdr_t *hdr) {
         return MB_E_CORRUPT;
     if (mb_stage1_accepts(port, slot, hdr) != MB_OK)
         return MB_E_REFUSED; // a bootloader stage 1 in an app slot, or anything in a stage-1 slot
+    if (hdr->flags & MB_IMG_F_ENCRYPTED)
+        return MB_E_UNSUPP; // only MimiBoot holds the key: send encrypted images to its console / SMP
     mb_slot_info_t tmp;
     memset(&tmp, 0, sizeof(tmp));
     tmp.hdr = *hdr;
