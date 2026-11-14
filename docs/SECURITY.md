@@ -167,8 +167,21 @@ On the device, AES is BearSSL's constant-time bitsliced code (MIT, adapted to
 encryption only). X25519 is a Montgomery ladder on the same field arithmetic
 as Ed25519: branch-free, a fixed 255 steps, conditional swaps by mask. An
 all-zero shared secret (a low-order point) is refused. The tag is compared in
-constant time. On Cortex-M0/M0+ the 64-bit multiplies are libgcc calls, which
-have no data-dependent branches.
+constant time.
+
+Being branch-free isn't the same as taking constant time. It also depends on
+the multiply instructions:
+
+- **Cortex-M0/M0+:** the 64-bit multiplies are libgcc calls built from `MULS`,
+  with no data-dependent branches.
+- **Cortex-M4/M7/M33:** `UMULL` and `UMLAL` take a fixed number of cycles.
+- **Cortex-M3 (STM32F1, F2):** `UMULL` and `UMLAL` finish early when the
+  operands are small (Arm's Cortex-M3 Technical Reference Manual, instruction
+  timing). The field multiply's 16-bit limbs sit right at that edge, so how
+  long a key check takes depends on the board's key.
+
+So on a Cortex-M3 the configurator requires `CONSOLE_AUTH` with encrypted
+images: only someone who has unlocked the console can send envelopes to time.
 
 ## Updating the bootloader itself (two-stage)
 

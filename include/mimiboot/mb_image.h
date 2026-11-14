@@ -41,6 +41,9 @@
 #define MB_IMG_F_STAGE1     0x0008  /* a MimiBoot stage 1 (two-stage builds): only for a stage-1 slot */
 #define MB_IMG_F_ENCRYPTED  0x0010  /* delivered encrypted: in the file, a key envelope (MCUboot TLV 0x33)
                                        sits at offset 256 of the header sector and the payload is AES-CTR.
+                                       (Bytes 256.. of a file's header sector are a list of TLVs, type u8,
+                                       0, length u16 LE, ended by 0xFF; today the envelope is the only
+                                       kind, and anything else there is refused.)
                                        MimiBoot decrypts while installing, so a slot always holds plaintext;
                                        sha256 and the signature cover the plaintext. */
 

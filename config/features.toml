@@ -287,7 +287,7 @@ depends = ["RECV"]
 menu = "security"
 title = "Take encrypted images (AES-CTR + X25519, MCUboot's scheme)"
 help = """Images can travel encrypted: 'mbtool pack --encrypt <board.pub>' (or imgtool's ECIES-X25519 key envelope, the same format) encrypts the payload with a fresh AES key and wraps that key for the board. MimiBoot decrypts while the image comes in over the console or SMP, so slots hold plaintext, as MCUboot's primary slot does: this keeps update files and the link private, not the chip's flash. The hash and signature cover the plaintext. Apps can't install encrypted images through the client library (the key stays in the bootloader).
-The decryption key is compiled in (ENC_KEY): every board built from the binary shares it, and it is only as safe as the bootloader's flash. Lock the debug port (DEBUG_LOCK on nRF, read protection from 'mbtool provision' elsewhere), and don't leave the 'md' memory dump open to anyone (SHELL_DIAG needs CONSOLE_AUTH here). About 3.5 KB of code (AES, X25519, HMAC/HKDF), 0.5 KB of RAM."""
+The decryption key is compiled in (ENC_KEY): every board built from the binary shares it, and it is only as safe as the bootloader's flash. Lock the debug port (DEBUG_LOCK on nRF, read protection from 'mbtool provision' elsewhere), and don't leave the 'md' memory dump open to anyone (SHELL_DIAG needs CONSOLE_AUTH here). On a Cortex-M3 (STM32F1/F2) the key check's timing depends on the key (its multiplies end early on small numbers), so there CONSOLE_AUTH is required. About 3.5 KB of code (AES, X25519, HMAC/HKDF), 0.5 KB of RAM."""
 
 [[option]]
 id = "ENC_KEY"

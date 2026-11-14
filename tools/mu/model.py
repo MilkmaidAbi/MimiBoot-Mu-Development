@@ -482,6 +482,13 @@ class Config:
                     out.append(("error", "encrypted images with the diagnostic commands open to anyone: 'md' would dump a "
                                          "decrypted image (and the key) to whoever has the UART. Turn on CONSOLE_AUTH or "
                                          "turn off SHELL_DIAG"))
+                if self.t.get("cpu") == "cortex-m3" and not e("CONSOLE_AUTH"):
+                    # UMULL/UMLAL stop early on small operands (Cortex-M3 TRM, instruction timing),
+                    # and the field multiply's limbs sit right at that edge
+                    out.append(("error", "on a Cortex-M3 the X25519 multiplies take longer or shorter depending on the "
+                                         "numbers, so how long an upload's key check takes depends on the board's key: "
+                                         "anyone who can send envelopes could measure it. Turn on CONSOLE_AUTH so only "
+                                         "someone who unlocked the console can"))
                 if not e("DEBUG_LOCK"):
                     out.append(("warn", "the decryption key sits in the bootloader's flash: lock the debug port "
                                         "(DEBUG_LOCK on nRF; read protection from 'mbtool provision' on other chips), "

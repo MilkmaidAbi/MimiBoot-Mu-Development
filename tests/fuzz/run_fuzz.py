@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
         "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc"]
 TARGETS = ["smp", "recv", "config", "flash"]
-FEATURES = ["-DMB_FEAT_SMP=1", "-DMB_FEAT_ENC=1", "-DMB_FEAT_ECDSA=1", "-DMB_FEAT_IMG_MCUBOOT=1", "-DMB_FEAT_IMG_RAW=1"]
+FEATURES = ["-DMB_FEAT_SMP=1", "-DMB_FEAT_ENC=1", "-DMB_FEAT_REVOKE=1", "-DMB_FEAT_ECDSA=1", "-DMB_FEAT_IMG_MCUBOOT=1", "-DMB_FEAT_IMG_RAW=1"]
 
 
 def c_arrays(path):

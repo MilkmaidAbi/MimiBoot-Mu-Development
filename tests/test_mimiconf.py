@@ -370,6 +370,13 @@ def two_stage_checks(db):
         h4 = gen.mcu_header(c4, lay, 0x3000)
         check("#define MB_FEAT_ENC 1" in h4 and "#define MB_ENC_KEY {" + ",".join(["0xab"] * 32) + "}" in h4,
               "the header carries the key")
+        c5 = Config(db, "bluepill")                  # Cortex-M3: early-terminating multiplies
+        for k, v in (("CONSOLE", True), ("SHELL", True), ("RECV", True), ("ENCRYPTED_IMAGES", True), ("ENC_KEY", str(good_key)), ("SHELL_DIAG", False)):
+            c5.set(k, v)
+        check(any("Cortex-M3" in m for m in errs(c5)), "Cortex-M3: encryption without CONSOLE_AUTH refused")
+        c5.set("SIGNATURES", True)
+        c5.set("CONSOLE_AUTH", True)
+        check(not any("Cortex-M3" in m for m in errs(c5)), "Cortex-M3 with the console locked: allowed")
 
 
 def build_all():
