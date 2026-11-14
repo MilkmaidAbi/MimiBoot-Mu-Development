@@ -30,6 +30,7 @@
 #define MB_ROLE_AB      1
 #define MB_ROLE_GOLDEN  2
 #define MB_ROLE_AUX     3
+#define MB_ROLE_STAGE1  4   /* two-stage builds: a copy of the bootloader's stage 1 (never booted as an app) */
 
 typedef struct {
     uint32_t offset, size;

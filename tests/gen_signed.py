@@ -54,6 +54,29 @@ for name, seed, size, secret, version, secver in cases:
     print("#define %s_SEED %d\n#define %s_SIZE %d" % (name.upper(), seed, name.upper(), size))
     print(c_array(name + "_hdr", hdr))
 
+# two-stage: stage-1 images for the sim's two-stage layout (s1a at 0x140000), signed with
+# the stage-1 key (OTHER_SECRET in two-stage tests) and with the app key (RFC1_SECRET)
+S1A_LINK = 0x140000 + 0x1000
+
+
+def stage1_payload(seed, size, link):
+    """Same as stage1_payload() in test_mimiboot.c: a payload with a vector table
+    (SP, then a reset vector inside the payload as linked at `link`)"""
+    import struct
+    p = bytearray(payload(seed, size))
+    struct.pack_into("<II", p, 0, 0x20001000, link + 0x101)
+    return bytes(p)
+
+
+print("__attribute__((unused)) static const uint8_t s1_public[32] = { %s };"
+      % ", ".join("0x%02x" % b for b in ed.public_key(OTHER_SECRET)))
+for name, secret in (("s1_signed_s1key", OTHER_SECRET), ("s1_signed_appkey", RFC1_SECRET)):
+    hdr = mbtool.build_header(stage1_payload(21, 30000, S1A_LINK), name, mbtool.parse_version("2.0.0"), 0,
+                              target="sim", arch=mbtool.ARCH_ARM, secret=secret, build_time=0, entry=S1A_LINK,
+                              stage1=True)
+    print(c_array(name + "_hdr", hdr))
+print("#define S1_SIGNED_SEED 21\n#define S1_SIGNED_SIZE 30000")
+
 # signed boot configs (CFG_SIGNED), with mbtool's config_signature()
 CFG_TEXT = b"default rescue\nentry rescue\n title Signed rescue\n slot g\n args signed=1\n"
 for name, version, secret in (("cfg_v5", 5, RFC1_SECRET), ("cfg_v3", 3, RFC1_SECRET), ("cfg_other_key", 9, OTHER_SECRET)):

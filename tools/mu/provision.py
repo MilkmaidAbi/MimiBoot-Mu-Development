@@ -35,7 +35,7 @@ def _covering_units(sectors, start: int, size: int) -> list[int]:
             idx.append(i)
     covered = sum(sectors[i][1] for i in idx)
     if covered != size:
-        raise ProvisionError(f"the bootloader region (0x{start:x}, {size} bytes) doesn't line up with the chip's "
+        raise ProvisionError(f"the region to lock (0x{start:x}, {size} bytes) doesn't line up with the chip's "
                              "protection units")
     return idx
 
@@ -67,7 +67,16 @@ def steps(build_dir: Path) -> list[str]:
         raise ProvisionError("no layout.json: provisioning steps are generated for bare-metal (mcu) builds and AVR")
     fb, boot = lay["flash_base"], lay["boot"]
     b0, bsize = boot["offset"], boot["size"]
-    out.append(f"Bootloader region: 0x{fb + b0:08x}, {bsize // 1024} KB. The boot log right after it must stay writable.")
+    two = bool(info.get("two_stage")) and lay.get("floor")
+    if two:
+        # only stage 0's code is locked for good: its store (right after it) and the
+        # stage-1 copies are written by the bootloader, and stage 1 is updated in the field
+        st = lay["floor"]
+        bsize = st["offset"] - b0
+        out.append(f"Two-stage build: lock stage 0 only, 0x{fb + b0:08x}, {bsize // 1024} KB. Its store "
+                   f"(0x{fb + st['offset']:08x}, {st['size'] // 1024} KB) and the stage-1 copies must stay writable.")
+    else:
+        out.append(f"Bootloader region: 0x{fb + b0:08x}, {bsize // 1024} KB. The boot log right after it must stay writable.")
     out.append("")
 
     if vendor == "nrf":
@@ -77,7 +86,9 @@ def steps(build_dir: Path) -> list[str]:
             f"nRF{series}: the flash lock is applied by the bootloader itself on every boot"
             + (" (BOOT_LOCK is on in this build)." if feats.get("BOOT_LOCK") else
                ": BOOT_LOCK is OFF in this build, turn it on (mimiconf, security menu)."),
-            f"  mechanism: {'MPU PROTENSET' if lock == 'mpu' else lock.upper()}, until each reset; nothing to provision.",
+            f"  mechanism: {'MPU PROTENSET' if lock == 'mpu' else lock.upper()}, until each reset; nothing to provision."
+            + ("\n  Two-stage: stage 1 locks stage 0, the store and both stage-1 copies before it starts an app."
+               if two else ""),
             "",
             "Debug port (persistent):",
             "  nrfjprog --rbp ALL          sets UICR.APPROTECT (nRF51: UICR.RBPCONF): no debugger access after reset",
@@ -119,8 +130,10 @@ def steps(build_dir: Path) -> list[str]:
             "     Level 2 (RDP=0xCC) disables debug and option-byte changes FOREVER. Only for a final product,",
             "     and only after everything else here is right.",
             "",
-            "Write protection also stops the bootloader writing its own region; MimiBoot never writes there",
-            "(PROTECTED_FLOOR exists only on nRF, where the lock is applied after the bootloader's own writes).",
+            "Write protection also stops the bootloader writing what it covers; MimiBoot never writes there",
+            "(PROTECTED_FLOOR exists only on nRF, where the lock is applied after the bootloader's own writes;",
+            "a two-stage build's store is left out of the range above for the same reason). Without a runtime",
+            "lock the store and the stage-1 copies stay writable by the app on STM32: see docs/SECURITY.md.",
             "Undo: RDP back to 0xAA (mass erase), then set the WRP bits/area back.",
         ]
         return out

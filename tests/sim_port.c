@@ -52,6 +52,23 @@ static const mb_layout_t layout = {
     .data = { 0x1F0000, SIM_FLASH_SIZE - 0x1F0000 },
 };
 
+// two-stage mode (sim_two_stage): aux slots c and d become the stage-1 copies
+static const mb_layout_t layout2 = {
+    .flash_size = SIM_FLASH_SIZE, .sector_size = 4096, .page_size = 256,
+    .boot = { 0x000000, 0x010000 },
+    .log = { { 0x010000, 0x1000 }, { 0x011000, 0x1000 } },
+    .cfg = { { 0x012000, 0x1000 }, { 0x013000, 0x1000 } },
+    .n_slots = 5,
+    .slot = { { 0x020000, 0x060000, MB_ROLE_AB, "a" }, { 0x080000, 0x060000, MB_ROLE_AB, "b" },
+              { 0x0E0000, 0x060000, MB_ROLE_GOLDEN, "g" }, { 0x140000, 0x060000, MB_ROLE_STAGE1, "s1a" },
+              { 0x1A0000, 0x050000, MB_ROLE_STAGE1, "s1b" } },
+    .data = { 0x1F0000, SIM_FLASH_SIZE - 0x1F0000 },
+};
+
+// the stage-1 key in two-stage mode: tests/gen_signed.py's OTHER_SECRET (so the app key can't sign a stage 1)
+static uint8_t s1_keys[1][32];
+static const mb_keyring_t s1_ring = { 1, (const uint8_t (*)[32])s1_keys };
+
 static void power_fail(void) {
     sim.outcome = SIM_POWERCUT;
     longjmp(*sim.jmp, 1);
@@ -68,8 +85,16 @@ static int f_read(uint32_t off, void* buf, size_t len) {
     return MB_OK;
 }
 
+// like the real port: the stage 1 that is running can't write over itself
+static bool running_stage1(uint32_t off, size_t len) {
+    if (!sim_port.stage1_slot || sim.stage1_slot < 0) return false;
+    const mb_slot_def_t* s = &sim_port.layout->slot[sim.stage1_slot];
+    return off < s->offset + s->size && off + len > s->offset;
+}
+
 static int f_erase(uint32_t off, size_t len) {
     if (off % 4096 || len % 4096 || off + len > SIM_FLASH_SIZE) return MB_E_BADARG;
+    if (running_stage1(off, len)) return MB_E_REFUSED;
     if (sim.fail_writes) return MB_E_IO;
     for (size_t s = 0; s < len; s += 4096) {
         if (cut_now()) {
@@ -84,6 +109,7 @@ static int f_erase(uint32_t off, size_t len) {
 
 static int f_program(uint32_t off, const void* buf, size_t len) {
     if (off % 256 || len % 256 || off + len > SIM_FLASH_SIZE) return MB_E_BADARG;
+    if (running_stage1(off, len)) return MB_E_REFUSED;
     if (sim.fail_writes) return MB_E_IO;
     const uint8_t* b = buf;
     if (cut_now()) {
@@ -144,7 +170,7 @@ static int f_launch(const mb_image_hdr_t* hdr, uint32_t slot_off, uint32_t slot_
     sim.booted_off = slot_off;
     sim.booted_hdr = *hdr;
     sim.booted_slot = -1;
-    for (int i = 0; i < layout.n_slots; i++) if (layout.slot[i].offset == slot_off) sim.booted_slot = i;
+    for (int i = 0; i < sim_port.layout->n_slots; i++) if (sim_port.layout->slot[i].offset == slot_off) sim.booted_slot = i;
     longjmp(*sim.jmp, 1);
 }
 
@@ -163,7 +189,7 @@ static int f_launch_ram(const mb_image_hdr_t* hdr) {
     // which slot did it come from (if any)? the newest log knows
     mb_bcl_t log;
     mb_bcl_load(&log, &sim_port);
-    if (log.cur.last_slot < layout.n_slots) {
+    if (log.cur.last_slot < sim_port.layout->n_slots) {
         mb_slot_info_t info;
         if (mb_image_read_header(&sim_port, log.cur.last_slot, &info) == MB_OK && !memcmp(info.hdr.sha256, hdr->sha256, 32))
             sim.booted_slot = log.cur.last_slot;
@@ -196,6 +222,15 @@ static void f_rom(void) { sim.outcome = SIM_ROM; longjmp(*sim.jmp, 1); }
 static uint32_t f_cause(void) { return sim.reset_cause; }
 static const char* f_reason(void) { return sim.reset_cause & MB_RESET_WATCHDOG ? "sim watchdog" : "sim power-on"; }
 static int f_self(void) { return sim.self_slot; }
+static int f_stage1(void) { return sim.stage1_slot; }
+
+void sim_two_stage(bool on, const uint8_t s1_public[32]) {
+    sim_port.layout = on ? &layout2 : &layout;
+    sim_port.stage1_slot = on ? f_stage1 : NULL;
+    if (s1_public) memcpy(s1_keys[0], s1_public, 32);
+    sim_port.stage1_keys = on ? &s1_ring : NULL;
+    sim.stage1_slot = -1;
+}
 
 mb_port_t sim_port = {
     .name = "sim", .target = "sim", .layout = &layout, .arch = MB_ARCH_ARM,
@@ -216,9 +251,13 @@ void sim_reset(void) {
     sim.arch = MB_ARCH_ARM;
     sim.reset_cause = MB_RESET_POWER;
     sim.fault_slot = -1;
+    sim.stage1_slot = -1;
     sim_port.require_signature = false;
     sim_port.keys = &keyring;
     sim_port.floor = &floor_store;
+    sim_port.layout = &layout;                      // one-stage unless a test asks (sim_two_stage)
+    sim_port.stage1_slot = NULL;
+    sim_port.stage1_keys = NULL;
 }
 
 void sim_input(const void* data, size_t len) {

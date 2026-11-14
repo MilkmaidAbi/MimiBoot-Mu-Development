@@ -981,7 +981,7 @@ static void test_console(void) {
     CHECK(strstr(sim.out, "d75a980182b1"), "keys lists the trusted key");
     CHECK(strstr(sim.out, "unknown command 'bogus'"), "unknown");
     CHECK(strstr(sim.out, "g -> BAD"), "reject golden");
-    CHECK(strstr(sim.out, "\033[33msecurity: unsigned images ALLOWED, hash every boot, rollback floors in locked flash"),
+    CHECK(strstr(sim.out, "\033[33msecurity: unsigned images ALLOWED, hash every boot, rollback floors in the bootloader's flash"),
           "menu's security line: optional signatures shown as a warning");
     sim.button = false;
     sim.console = false;
@@ -1318,6 +1318,225 @@ static int boot_file(const char* path) {
     return s == MB_SLOT_A ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// Two-stage builds: stage 0's choice (core/mb_stage0.c) and stage 1's guards
+// ---------------------------------------------------------------------------
+#define S1A 3   /* sim_two_stage(): slot 3 = s1a, 4 = s1b */
+#define S1B 4
+
+// a payload with a vector table: SP, then a reset vector inside it as linked at `link`
+static uint32_t stage1_payload(uint32_t seed, uint32_t size, uint32_t link) {
+    make_payload(seed, size);
+    uint32_t v[2] = { 0x20001000u, link + 0x101u };
+    memcpy(payload, v, sizeof(v));
+    return size;
+}
+
+static mb_image_hdr_t stage1_hdr(int slot, const char* name, uint32_t version, uint32_t secver, uint32_t seed) {
+    uint32_t link = sim_port.layout->slot[slot].offset + MB_IMG_PAYLOAD_OFF;
+    uint32_t size = stage1_payload(seed, 30000, link);
+    mb_image_hdr_t h = make_header(name, version, secver, size, MB_IMG_F_STAGE1);
+    h.entry = link;
+    mb_image_seal(&h);
+    return h;
+}
+
+static void put_stage1(int slot, uint32_t version, uint32_t secver, uint32_t seed) {
+    mb_image_hdr_t h = stage1_hdr(slot, "stage1", version, secver, seed);
+    put_image(slot, &h);
+}
+
+static uint32_t s1_id(int slot) {
+    mb_slot_info_t in;
+    mb_image_read_header(&sim_port, slot, &in);
+    return (uint32_t)mb_image_id(&in.hdr);
+}
+
+static int choose(bool* trial) {
+    mb_stage0_choice_t c;
+    int rc = mb_stage0_choose(&sim_port, &c);
+    if (trial) *trial = c.trial;
+    return rc == MB_OK ? c.slot : -1;
+}
+
+typedef struct { int rc; } confirm_t;
+static void stage1_confirm_fn(void* ctx) { ((confirm_t*)ctx)->rc = mb_stage1_confirm(&sim_port); }
+static mb_image_hdr_t ram_s1;
+static int ram_rc;
+static void ram_boot_fn(void* ctx) { ram_rc = mb_boot_ram(&sim_port, ctx, NULL, &ram_s1, NULL); }
+
+static void two_stage_fresh(void) {
+    sim_reset();
+    sim_two_stage(true, s1_public);
+}
+
+static void test_two_stage(void) {
+    bool trial;
+    printf("two-stage: stage 0 picks a stage 1\n");
+    two_stage_fresh();
+    CHECK(choose(NULL) == -1, "no stage 1 anywhere: nothing to start");
+    put_stage1(S1A, MB_VERSION(1, 0, 0), 0, 31);
+    CHECK(choose(&trial) == S1A && !trial, "one copy, never confirmed: started, not on trial");
+    CHECK(mb_store_count(&sim_port, MB_STORE_S1_ATTEMPT, s1_id(S1A)) == 0, "... and nothing counted (nothing to fall back to)");
+    for (int i = 0; i < 10; i++) choose(NULL);
+    CHECK(mb_store_count(&sim_port, MB_STORE_S1_ATTEMPT, s1_id(S1A)) == 0, "... however often it boots (the store doesn't fill)");
+
+    printf("two-stage: an update is tried, counted, and passed over after %d boots\n", MB_STAGE1_TRIES);
+    sim.stage1_slot = S1A;
+    confirm_t cf;
+    sim_guard(stage1_confirm_fn, &cf);
+    CHECK(cf.rc == MB_OK && mb_store_count(&sim_port, MB_STORE_S1_GOOD, s1_id(S1A)) == 1, "s1a confirms itself");
+    sim_guard(stage1_confirm_fn, &cf);
+    CHECK(mb_store_count(&sim_port, MB_STORE_S1_GOOD, s1_id(S1A)) == 1, "a second confirm writes nothing");
+    put_stage1(S1B, MB_VERSION(1, 1, 0), 0, 32);
+    for (int i = 1; i <= MB_STAGE1_TRIES; i++) {
+        CHECK(choose(&trial) == S1B && trial, "boot %d: the newer copy on trial", i);
+        CHECK(mb_store_count(&sim_port, MB_STORE_S1_ATTEMPT, s1_id(S1B)) == i, "boot %d counted before it runs", i);
+    }
+    CHECK(choose(&trial) == S1A && !trial, "after %d boots without a confirm: back to the good copy", MB_STAGE1_TRIES);
+    CHECK(mb_store_count(&sim_port, MB_STORE_S1_ATTEMPT, s1_id(S1B)) == MB_STAGE1_TRIES, "the failed copy isn't counted further");
+
+    printf("two-stage: a new copy that confirms wins\n");
+    put_stage1(S1B, MB_VERSION(1, 2, 0), 0, 33);
+    CHECK(choose(&trial) == S1B && trial, "a fresh image in s1b: on trial again");
+    sim.stage1_slot = S1B;
+    sim_guard(stage1_confirm_fn, &cf);
+    CHECK(choose(&trial) == S1B && !trial, "confirmed: chosen, no longer counted");
+    CHECK(mb_store_count(&sim_port, MB_STORE_S1_ATTEMPT, s1_id(S1B)) == 1, "one boot was counted, none after");
+
+    printf("two-stage: never bricked by its own bookkeeping\n");
+    two_stage_fresh();
+    put_stage1(S1A, MB_VERSION(1, 0, 0), 0, 34);
+    put_stage1(S1B, MB_VERSION(2, 0, 0), 0, 35);
+    for (int i = 0; i < 2 * MB_STAGE1_TRIES; i++) choose(NULL);    // neither ever confirms
+    CHECK(mb_store_count(&sim_port, MB_STORE_S1_ATTEMPT, s1_id(S1A)) == MB_STAGE1_TRIES &&
+          mb_store_count(&sim_port, MB_STORE_S1_ATTEMPT, s1_id(S1B)) == MB_STAGE1_TRIES, "both copies used up their tries");
+    CHECK(choose(&trial) == S1B && !trial, "both failed: the newer one still starts (uncounted)");
+    two_stage_fresh();
+    sim.floor_locked = true;    // the store can't be written
+    put_stage1(S1A, MB_VERSION(1, 0, 0), 0, 36);
+    put_stage1(S1B, MB_VERSION(2, 0, 0), 0, 37);
+    CHECK(choose(&trial) == S1B && !trial, "store unwritable, no good copy known: the best one starts uncounted");
+    sim.floor_locked = false;
+    sim.stage1_slot = S1A;
+    sim_guard(stage1_confirm_fn, &cf);
+    sim.floor_locked = true;
+    CHECK(choose(&trial) == S1A && !trial, "a trial that can't be counted doesn't start: the good copy does");
+    sim.floor_locked = false;
+
+    printf("two-stage: the store keeps room for floors\n");
+    two_stage_fresh();
+    int n = 0;
+    while (mb_store_append(&sim_port, MB_STORE_S1_ATTEMPT, 0x1234) == MB_OK) n++;
+    CHECK(n == 4096 / 16 - MB_STORE_RESERVE, "attempts stop %d entries short (%d written)", MB_STORE_RESERVE, n);
+    CHECK(mb_floor_raise(&sim_port, MB_FLOOR_STAGE1, 7) == MB_OK, "a floor still goes in");
+    CHECK(mb_store_append(&sim_port, MB_FLOOR_SECURITY, 1) == MB_E_UNSUPP, "floor tags can't be appended as counts");
+
+    printf("two-stage: what makes a copy unusable\n");
+    two_stage_fresh();
+    put_stage1(S1A, MB_VERSION(1, 0, 0), 0, 38);
+    mb_image_hdr_t h = stage1_hdr(S1B, "other-slot", MB_VERSION(3, 0, 0), 0, 39);
+    h.entry = sim_port.layout->slot[S1A].offset + MB_IMG_PAYLOAD_OFF;      // claims to be linked for s1a
+    mb_image_seal(&h);
+    put_image(S1B, &h);
+    CHECK(choose(NULL) == S1A, "a header for the other copy");
+    h = stage1_hdr(S1B, "vectors", MB_VERSION(3, 0, 0), 0, 40);
+    uint32_t far = 0x9000000;
+    memcpy(payload + 4, &far, 4);                                           // reset vector outside the image
+    memcpy(h.sha256, (uint8_t[32]){0}, 32);
+    { mb_sha256_t s; mb_sha256_init(&s); mb_sha256_update(&s, payload, h.payload_size); mb_sha256_final(&s, h.sha256); }
+    mb_image_seal(&h);
+    put_image(S1B, &h);
+    CHECK(choose(NULL) == S1A, "a reset vector outside the payload (built for somewhere else)");
+    put_stage1(S1B, MB_VERSION(3, 0, 0), 0, 41);
+    sim_flash[sim_port.layout->slot[S1B].offset + MB_IMG_PAYLOAD_OFF + 500] ^= 1;
+    CHECK(choose(NULL) == S1A, "a payload that fails its hash");
+    install_raw(MB_SLOT_A, "app", MB_VERSION(9, 0, 0), 0, 42, 30000);
+    memcpy(sim_flash + sim_port.layout->slot[S1B].offset, sim_flash + sim_port.layout->slot[MB_SLOT_A].offset, 4096);
+    CHECK(choose(NULL) == S1A, "an app image (no stage-1 flag) in a stage-1 slot");
+    put_stage1(S1B, MB_VERSION(3, 0, 0), 0, 43);
+    sim.fault_slot = S1B;
+    CHECK(choose(NULL) == S1A, "the copy the CPU faulted on last time is left out for a boot");
+    CHECK(choose(&trial) == S1B && trial, "... and tried again on the next");
+
+    printf("two-stage: stage-1 anti-rollback\n");
+    two_stage_fresh();
+    put_stage1(S1A, MB_VERSION(1, 0, 0), 0, 44);
+    put_stage1(S1B, MB_VERSION(2, 0, 0), 2, 45);
+    CHECK(choose(NULL) == S1B, "security 2 on trial");
+    sim.stage1_slot = S1B;
+    sim_guard(stage1_confirm_fn, &cf);
+    uint32_t fl[MB_FLOOR_COUNT];
+    mb_floor_get(&sim_port, fl);
+    CHECK(fl[MB_FLOOR_STAGE1] == 2, "its confirm raised the stage-1 floor to 2 (%u)", (unsigned)fl[MB_FLOOR_STAGE1]);
+    sim_flash[sim_port.layout->slot[S1B].offset + MB_IMG_PAYLOAD_OFF + 9] ^= 1;
+    CHECK(choose(NULL) == -1, "with s1b damaged, the old s1a (security 0) is not started");
+
+    printf("two-stage: signatures (stage-1 keys only)\n");
+    two_stage_fresh();
+    sim_port.require_signature = true;
+    put_stage1(S1A, MB_VERSION(1, 0, 0), 0, 46);
+    CHECK(choose(NULL) == -1, "signatures required: an unsigned stage 1 is not started");
+    stage1_payload(S1_SIGNED_SEED, S1_SIGNED_SIZE, sim_port.layout->slot[S1A].offset + MB_IMG_PAYLOAD_OFF);
+    put_image(S1A, (const mb_image_hdr_t*)s1_signed_appkey_hdr);
+    CHECK(choose(NULL) == -1, "signed with the app key: not started");
+    put_image(S1A, (const mb_image_hdr_t*)s1_signed_s1key_hdr);
+    CHECK(choose(NULL) == S1A, "signed with the stage-1 key: started");
+    sim_port.require_signature = false;
+
+    printf("two-stage: stage 1 never boots a stage-1 copy, nor a stage 1 from an app slot\n");
+    two_stage_fresh();
+    put_stage1(S1A, MB_VERSION(1, 0, 0), 0, 47);
+    put_stage1(S1B, MB_VERSION(1, 1, 0), 0, 48);
+    sim.stage1_slot = S1A;
+    CHECK(boot() < 0, "only stage-1 copies in flash: nothing to boot");
+    mb_image_hdr_t sa = stage1_hdr(MB_SLOT_A, "s1-in-a", MB_VERSION(1, 0, 0), 0, 49);
+    put_image(MB_SLOT_A, &sa);
+    install_raw(MB_SLOT_GOLDEN, "rescue", MB_VERSION(1, 0, 0), 0, 50, 20000);
+    CHECK(boot() == MB_SLOT_GOLDEN, "a stage 1 in slot A is refused; golden boots");
+    CHECK(log_now().slot[MB_SLOT_A].state == MB_ST_BAD && log_now().slot[S1A].state == MB_ST_EMPTY,
+          "A marked bad; the log keeps no record of the stage-1 copies");
+    CHECK(mb_store_count(&sim_port, MB_STORE_S1_GOOD, s1_id(S1A)) == 1, "starting golden confirmed the running stage 1");
+    mb_bcl_t lg;
+    mb_bcl_load(&lg, &sim_port);
+    mb_slot_info_t info[MB_MAX_SLOTS];
+    mb_plan_t plan;
+    CHECK(mb_plan_slot(&sim_port, &lg, info, S1B, true, NULL, &plan) == MB_E_REFUSED, "'boot s1b force' refused");
+    ram_s1 = make_header_ex("s1-ram", MB_VERSION(1, 0, 0), 0, make_payload(53, 4096), MB_IMG_F_STAGE1, MB_ARCH_ARM,
+                            MB_LOAD_RAM, SIM_RAM_BASE + 0x1000, 0);
+    memcpy(sim_ram + 0x1000, payload, 4096);
+    sim_outcome_t ro = sim_guard(ram_boot_fn, &lg);
+    CHECK(ro != SIM_BOOTED && ram_rc == MB_E_UNSUPP, "a stage 1 can't be RAM-booted (%d, %d)", ro, ram_rc);
+
+    printf("two-stage: console and config guards\n");
+    sim.console = true;
+    sim.button = true;
+    uint32_t size = make_payload(51, 20000);
+    mb_image_hdr_t app = make_header("app", MB_VERSION(1, 0, 0), 0, size, 0);
+    size_t m = (size_t)sprintf((char*)script, "c\rversion\rrecv s1a\rerase s1a\rconfirm s1b\rboot s1b\rrecv s1b\r");
+    script[m++] = 'H';                          // refused at the header: no frames follow
+    memcpy(script + m, &app, sizeof(app));
+    m += sizeof(app);
+    mb_image_hdr_t s1 = stage1_hdr(S1B, "stage1-up", MB_VERSION(1, 5, 0), 0, 52);
+    m += (size_t)sprintf((char*)script + m, "recv s1b\r");
+    m = put_upload(script, m, &s1, 1000, false);
+    sim_input(script, m);
+    sim_power_on();
+    sim.console = false;
+    sim.button = false;
+    CHECK(strstr(sim.out, "stage 1 from s1a, v1.0.0, security 0"), "version names the running copy");
+    CHECK(strstr(sim.out, "s1a is the stage 1 running now: update the other copy"), "recv/erase into the running copy refused");
+    CHECK(strstr(sim.out, "s1b holds a copy of the bootloader (stage 1)"), "confirm/boot on a stage-1 slot refused");
+    CHECK(strstr(sim.out, "MB ERR refused (-7)"), "an app image into a stage-1 slot refused");
+    CHECK(strstr(sim.out, "MB DONE") && s1_id(S1B) == (uint32_t)mb_image_id(&s1), "a stage 1 for s1b goes into s1b");
+    char err[80];
+    mb_config_t cfg;
+    const char* text = "default x\nentry x\n slot s1b\n";
+    mb_config_parse(&sim_port, text, strlen(text), &cfg, err, sizeof(err));
+    CHECK(cfg.errors && strstr(err, "stage-1 slot"), "a config entry can't name a stage-1 slot (%s)", err);
+    sim_two_stage(false, NULL);
+}
+
 #include "tests/test_night.inc"
 
 int main(int argc, char** argv) {
@@ -1349,6 +1568,7 @@ int main(int argc, char** argv) {
     test_recv();
     test_ota();
     test_power_cuts();
+    test_two_stage();
     test_night();
     printf("\n%d checks, %d failed\n", checks + crypto_checks, fails + crypto_fails);
     return fails + crypto_fails ? 1 : 0;

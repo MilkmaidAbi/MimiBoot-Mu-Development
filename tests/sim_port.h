@@ -36,6 +36,7 @@ typedef struct {
     // board
     bool button, console;
     int self_slot;
+    int stage1_slot;            /* two-stage mode: the copy "running" (port->stage1_slot), -1 none */
     uint32_t reset_cause;       /* what the next power_on reports */
     uint8_t arch;               /* the architecture the "chip" runs the bootloader on */
     bool universal;             /* a bootloader half exists for both architectures */
@@ -55,6 +56,7 @@ extern mb_port_t sim_port;              /* tests flip require_signature / keys *
 extern const uint8_t sim_test_secret[32], sim_test_public[32];
 
 void sim_reset(void);
+void sim_two_stage(bool on, const uint8_t s1_public[32]);   /* slots c, d -> s1a, s1b; NULL key: keep */
 void sim_input(const void* data, size_t len);
 sim_outcome_t sim_power_on(void);
 sim_outcome_t sim_guard(void (*fn)(void* ctx), void* ctx);

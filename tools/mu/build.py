@@ -16,10 +16,12 @@ import sys
 from pathlib import Path
 
 from . import gen
-from .model import ROOT, Config, parse_size
+from .model import ROOT, Config, parse_sectors, parse_size
 
 NIGHT_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
-              "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa"]
+              "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0"]
+# a two-stage build's stage 0: check MimiBoot images, keep its records, start one
+STAGE0_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_floor", "mb_ecdsa", "mb_stage0"]
 VENDOR_SOURCES = {"stm32": ["port/stm32/stm32_flash.c", "port/stm32/stm32_periph.c"],
                   "nrf": ["port/nrf/nrf_flash.c", "port/nrf/nrf_periph.c"],
                   "samd": ["port/samd/samd_flash.c", "port/samd/samd_periph.c"]}
@@ -164,6 +166,9 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
         "config": "mimiboot_config.h", "linker": "link.ld", "target": "mimiboot",
     }
 
+    if cfg.effective("TWO_STAGE"):
+        return _build_two_stage(cfg, out, gcc, recipe, ram, stack, flash)
+
     # pass 1: measure (linked against all of flash and RAM, so a build that is too big
     # still links and the error below can say by how much)
     lay0 = gen.mcu_layout(cfg, boot_bytes=flash // 2 if auto else None)
@@ -198,6 +203,106 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
             "features": {o.id: cfg.effective(o.id) for o in cfg.options()},
             "files": ["mimiboot.elf", "mimiboot.bin", "mimiboot.hex", "layout.txt", "layout.json",
                       "zephyr-partitions.overlay"] + [f"app-slot-{s.name}.ld" for s in lay.slots],
+            "notes": lay.notes, "recipe": recipe}
+    (out / "build-info.json").write_text(json.dumps(info, indent=2, default=str) + "\n")
+    return info
+
+
+def _build_two_stage(cfg: Config, out: Path, gcc: str, recipe: dict, ram: int, stack: int, flash: int) -> dict:
+    """Stage 0 at the start of flash, stage 1 linked once per copy (s1a, s1b) and
+    packed as signed MimiBoot images, mimiboot.bin = what a new board gets."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import mbtool  # noqa: E402  (the same header code `mbtool pack` uses)
+    from .layout import ROLE_STAGE1
+    from .model import parse_version_text
+    t = cfg.t
+    vendor_src = VENDOR_SOURCES[t.get("vendor")]
+    fb = gen.flash_base(cfg)
+
+    def link(lay, loader_ram, length, name, defines, *, origin=0, stage0=False, measure=False):
+        hdr = out / f"{name}_config.h"
+        hdr.write_text(gen.mcu_header(cfg, lay, loader_ram, gen.STAGE0_OFF if stage0 else None))
+        ld = out / f"{name}.ld"
+        ld.write_text(gen.mcu_linker(cfg, length, ram, loader_ram, 0 if measure else stack, origin))
+        srcs = ([f"core/{n}.c" for n in STAGE0_CORE] + ["port/cortexm/cm_port.c"] + vendor_src) if stage0 else recipe["sources"]
+        elf = out / f"{name}.elf"
+        _run([gcc, *recipe["cflags"], *defines, f'-DMB_CONFIG_HEADER="{hdr.as_posix()}"', "-I.", "-Iinclude", *srcs,
+              *recipe["ldflags"], f"-T{ld.as_posix()}", f"-Wl,-Map={(out / (name + '.map')).as_posix()}", "-o", elf])
+        return elf
+
+    def s1_defines(i):
+        return ["-DMB_CM_STAGE1", f"-DMB_STAGE1_SLOT={i}"]
+
+    # measure both stages against all of flash and RAM (this layout only has to place
+    # the slots: one smallest sector per copy, so small parts get measured too)
+    lay0 = gen.mcu_layout(cfg, s1_bytes=min(s for _, s in parse_sectors(t.get("sectors"))))
+    first = next(i for i, s in enumerate(lay0.slots) if s.role == ROLE_STAGE1)
+    s1 = _sizes(gcc, link(lay0, ram, flash, "stage1-measure", s1_defines(first), measure=True))
+    s0 = _sizes(gcc, link(lay0, ram, flash, "stage0-measure", ["-DMB_CM_STAGE0"], stage0=True, measure=True))
+    # one RAM size for both: their .noinit (the fault notes) then sits at the same address
+    need_ram = max(s0["ram"], s1["ram"]) + stack
+    if need_ram > ram:
+        raise BuildError(f"needs {need_ram - stack} bytes of RAM + {stack} of stack, the chip has {ram}")
+    loader_ram = min(ram, ((need_ram + 1023) // 1024) * 1024)
+
+    # the layout: stage 0 + its store (the last erase unit of the boot region), then the copies
+    s1_bytes = gen.stage1_bytes(cfg, s1["flash"])
+    bs = str(cfg.effective("BOOT_SIZE") or "chip").strip().lower()
+    if bs in ("chip", "auto"):
+        lay = gen.mcu_layout(cfg, boot_bytes=s0["flash"], s1_bytes=s1_bytes)
+        lay = gen.mcu_layout(cfg, boot_bytes=s0["flash"] + gen.floor_region(cfg, lay)[1], s1_bytes=s1_bytes)
+    else:
+        lay = gen.mcu_layout(cfg, s1_bytes=s1_bytes)
+    room0 = gen.code_room(cfg, lay)
+    if s0["flash"] > room0:
+        raise BuildError(f"stage 0 is {s0['flash']} bytes, its region has room for {room0} (the store takes the "
+                         f"last {lay.boot.size - room0}): set BOOT_SIZE bigger")
+    copies = [(i, s) for i, s in enumerate(lay.slots) if s.role == ROLE_STAGE1]
+    room1 = min(s.size for _, s in copies) - gen.NATIVE_HDR
+    if s1["flash"] > room1:
+        raise BuildError(f"stage 1 is {s1['flash']} bytes, a stage-1 copy has room for {room1}: set STAGE1_SIZE bigger")
+
+    objcopy = _tool(gcc, "objcopy")
+    elf0 = link(lay, loader_ram, room0, "stage0", ["-DMB_CM_STAGE0"], stage0=True)
+    _run([objcopy, "-O", "binary", elf0, out / "stage0.bin"])
+    sz0 = _sizes(gcc, elf0)
+    version = parse_version_text(str(cfg.effective("STAGE1_VERSION")))
+    secver = int(cfg.effective("STAGE1_SECURITY") or 0)
+    key = cfg.effective("STAGE1_SIGN_KEY")
+    secret = mbtool.read_secret(str(key)) if key and cfg.effective("SIGNATURES") else None
+    images, sz1 = {}, None
+    for i, s in copies:
+        name = f"stage1-{s.name}"
+        elf = link(lay, loader_ram, s.size - gen.NATIVE_HDR, name, s1_defines(i), origin=s.offset + gen.NATIVE_HDR)
+        sz1 = sz1 or _sizes(gcc, elf)
+        _run([objcopy, "-O", "binary", elf, out / f"{name}.bin"])
+        payload = (out / f"{name}.bin").read_bytes()
+        hdr = mbtool.build_header(payload, "mimiboot-stage1", version, secver, target=t.chip_name[:15],
+                                  arch=mbtool.ARCH_ARM, secret=secret, entry=s.offset + gen.NATIVE_HDR, stage1=True)
+        img = hdr + b"\xff" * (gen.NATIVE_HDR - len(hdr)) + payload
+        (out / f"{name}.img").write_bytes(img)
+        images[s.name] = img
+    # what a new board gets: stage 0, a blank store, stage 1 in the first copy
+    a = copies[0][1]
+    factory = bytearray(b"\xff" * (a.offset + len(images[a.name])))
+    b0 = (out / "stage0.bin").read_bytes()
+    factory[:len(b0)] = b0
+    factory[a.offset:] = images[a.name]
+    (out / "mimiboot.bin").write_bytes(bytes(factory))
+    _run([objcopy, "-I", "binary", "-O", "ihex", f"--change-addresses=0x{fb:x}", out / "mimiboot.bin", out / "mimiboot.hex"])
+    for n in ("stage1-measure", "stage0-measure"):
+        for ext in (".elf", ".map", ".ld", "_config.h"):
+            (out / (n + ext)).unlink(missing_ok=True)
+    gen.mcu_outputs(cfg, lay, out)
+    info = {"board": t.name, "core": "night", "build": "mcu", "vendor": t.get("vendor"), "two_stage": True,
+            "flash_used": sz1["flash"], "flash_region": room1, "stage0_used": sz0["flash"], "stage0_region": room0,
+            "ram_used": max(sz0["ram"], sz1["ram"]), "ram_region": loader_ram, "stack": stack,
+            "stage1_signed": bool(secret),
+            "features": {o.id: cfg.effective(o.id) for o in cfg.options()},
+            "files": ["mimiboot.bin", "mimiboot.hex", "stage0.elf", "stage0.bin"] +
+                     [f"stage1-{s.name}{e}" for _, s in copies for e in (".elf", ".img")] +
+                     ["layout.txt", "layout.json", "zephyr-partitions.overlay"] +
+                     [f"app-slot-{s.name}.ld" for s in lay.slots if s.role != ROLE_STAGE1],
             "notes": lay.notes, "recipe": recipe}
     (out / "build-info.json").write_text(json.dumps(info, indent=2, default=str) + "\n")
     return info

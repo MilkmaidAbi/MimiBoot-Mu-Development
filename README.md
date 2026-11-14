@@ -59,6 +59,10 @@ On the 32-bit chips (the "full" core):
   the debug port shut. A console lock makes uploads and changes wait for a signed
   unlock. `mbtool provision` prints the fuse / option-byte steps for the other chips.
   What holds against whom is in [docs/SECURITY.md](docs/SECURITY.md).
+- Update itself in the field (`TWO_STAGE`, Cortex-M parts with 192 KB+): a small fixed
+  stage 0 picks between two signed copies of the rest, tries a new one for a few boots
+  and goes back to the old one if it never gets as far as starting an app.
+  `mbtool loader build/` sends a new one.
 
 On AVR (the "lite" core, 1 to 2 KB):
 

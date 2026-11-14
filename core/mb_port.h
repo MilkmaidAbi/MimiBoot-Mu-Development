@@ -49,7 +49,14 @@ typedef struct {
 #define MB_FLOOR_SECURITY   0       /* anti-rollback floor for A/B images */
 #define MB_FLOOR_GOLDEN     1       /* newest golden version accepted */
 #define MB_FLOOR_CONFIG     2       /* newest signed config version accepted (MB_FEAT_CFG_SIGNED) */
-#define MB_FLOOR_COUNT      3
+#define MB_FLOOR_STAGE1     3       /* two-stage: anti-rollback floor for stage 1 (security_version) */
+#define MB_FLOOR_COUNT      4
+/* Counted entries (two-stage), value = the low 32 bits of a stage 1's image id.
+ * Kept far from the floor tags so a new floor can never read them as one. */
+#define MB_STORE_S1_GOOD    14      /* this stage 1 started an image: it works */
+#define MB_STORE_S1_ATTEMPT 15      /* one boot of an unconfirmed stage 1 */
+#define MB_STORE_RESERVE    8       /* attempts never take the last entries: floors still fit */
+_Static_assert(MB_FLOOR_COUNT <= MB_STORE_S1_GOOD, "floor tags would overlap the counted ones");
 typedef struct mb_floor_store {
     uint32_t off, size;         /* flash offset and size of the store (one erase unit) */
     uint32_t entry;             /* bytes per entry: 16, or the chip's program unit if larger */
@@ -119,6 +126,14 @@ typedef struct mb_port {
 
     /* optional: protected copies of the rollback floors (NULL: the log only) */
     const mb_floor_store_t* floor;
+
+    /* two-stage builds (stage 1 only): the slot this stage 1 runs from, or -1,
+     * and the keys stage 0 checks stage 1 images with (so an upload with the
+     * wrong key is refused at once; stage 0 checks again at every boot) */
+    int (*stage1_slot)(void);
+    uint32_t flash_base;        /* address of flash offset 0 (a stage 1's vector table is checked against it) */
+    const mb_keyring_t* stage1_keys;
+    const mb_keyring_p256_t* stage1_p256_keys;
 
     /* optional: what the port does to protect itself, for the console's
      * security line, e.g. "flash locked at handoff, debug forced shut".

@@ -108,8 +108,9 @@ static void cmd_entries(const mb_port_t* p, const mb_config_t* cfg) {
 
 static void cmd_info(const mb_port_t* p, const mb_bcl_t* log, mb_slot_info_t* info, int i) {
     const mb_slot_def_t* r = &p->layout->slot[i];
-    static const char* roles[] = { "-", "A/B", "golden", "aux" };
-    mb_printf(p, "slot %s (%s): flash 0x%06lx, %lu KB\n", mb_slot_name(p, i), roles[r->role & 3], (unsigned long)r->offset,
+    static const char* roles[] = { "-", "A/B", "golden", "aux", "stage 1" };
+    mb_printf(p, "slot %s (%s): flash 0x%06lx, %lu KB\n", mb_slot_name(p, i), roles[r->role <= MB_ROLE_STAGE1 ? r->role : 0],
+              (unsigned long)r->offset,
               (unsigned long)(r->size / 1024));
     if (!info[i].header_ok) { put(p, "  no valid image header\n"); return; }
     const mb_image_hdr_t* h = &info[i].hdr;
@@ -483,8 +484,16 @@ static void security_line(const mb_port_t* p) {
     mb_printf(p, "  %ssecurity: %s, hash %s, %s%s%s\033[0m\n", weak ? "\033[33m" : "\033[2m",
               p->require_signature ? "signed images only" : keys ? "unsigned images ALLOWED" : "no signature checks",
               MB_BOOT_VERIFY == MB_BOOT_VERIFY_EVERY ? "every boot" : MB_BOOT_VERIFY == MB_BOOT_VERIFY_ONCE ? "once per image" : "never",
-              !MB_FEAT_ANTI_ROLLBACK ? "no anti-rollback" : p->floor ? "rollback floors in locked flash" : "rollback floor in the boot log",
+              !MB_FEAT_ANTI_ROLLBACK ? "no anti-rollback" : p->floor ? "rollback floors in the bootloader's flash" : "rollback floor in the boot log",
               p->lockdown ? ", " : "", p->lockdown ? p->lockdown : "");
+    // two-stage: which copy of stage 1 is running (mbtool reads "stage 1 from <slot>")
+    int s = p->stage1_slot ? p->stage1_slot() : -1;
+    mb_image_hdr_t h;
+    if (s >= 0 && s < p->layout->n_slots && p->flash_read(p->layout->slot[s].offset, &h, sizeof(h)) == MB_OK &&
+        mb_image_check_header(p, &h, p->layout->slot[s].size) == MB_OK)
+        mb_printf(p, "  \033[2mstage 1 from %s, v%lu.%lu.%lu, security %lu\033[0m\n", mb_slot_name(p, s),
+                  (unsigned long)MB_VERSION_MAJOR(h.version), (unsigned long)MB_VERSION_MINOR(h.version),
+                  (unsigned long)MB_VERSION_PATCH(h.version), (unsigned long)h.security_version);
 }
 
 static void draw_menu(const mb_port_t* p, const mb_bcl_t* log, const mb_config_t* cfg, mb_slot_info_t* info, int sel, int dflt, int secs) {
@@ -695,6 +704,16 @@ static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_i
             continue;
         }
 #endif
+        // a stage-1 copy is the bootloader: it is uploaded, erased, looked at; never booted or confirmed
+        if (slot >= 0 && mb_slot_role(p, slot) == MB_ROLE_STAGE1 && strcmp(cmd, "recv") && strcmp(cmd, "erase") &&
+            strcmp(cmd, "info") && strcmp(cmd, "verify")) {
+            mb_printf(p, "%s holds a copy of the bootloader (stage 1): recv, erase, info and verify only\n", mb_slot_name(p, slot));
+            continue;
+        }
+        if (slot >= 0 && p->stage1_slot && p->stage1_slot() == slot && (!strcmp(cmd, "recv") || !strcmp(cmd, "erase"))) {
+            mb_printf(p, "%s is the stage 1 running now: update the other copy\n", mb_slot_name(p, slot));
+            continue;
+        }
         refresh_headers(p, info);
         if (!strcmp(cmd, "help") || !strcmp(cmd, "?")) put(p, help);
         else if (!strcmp(cmd, "ls")) cmd_ls(p, log, info);

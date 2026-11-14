@@ -142,14 +142,19 @@ class QemuSerial:
     """A running QEMU whose console is driven like a serial port, so mbtool's own
     upload code (to_shell / send_image) talks to the emulated bootloader."""
 
-    def __init__(self, machine: str, flash: Path, seconds: float):
+    def __init__(self, machine: str, flash: Path, seconds: float, keep: bool = False):
+        """keep: a monitor is listening, and keep_flash() saves flash over `flash` (see boot_keep)"""
         import queue
+        import random
         import threading
         q, conv, wrap = qemu_cmd()
+        self.flash, self.conv = flash, conv
+        self.port = random.randint(20000, 40000) if keep else None
         if wrap:
             i = len(q) - 1
             q = q[:i] + ["timeout", str(seconds)] + q[i:]
-        cmd = q + ["-M", machine, "-display", "none", "-monitor", "none", "-serial", "stdio", "-kernel", conv(flash)]
+        mon = f"tcp:127.0.0.1:{self.port},server,nowait" if keep else "none"
+        cmd = q + ["-M", machine, "-display", "none", "-monitor", mon, "-serial", "stdio", "-kernel", conv(flash)]
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.q = queue.Queue()
         self.log = b""
@@ -175,6 +180,19 @@ class QemuSerial:
         self.p.stdin.write(b)
         self.p.stdin.flush()
 
+    def keep_flash(self, size: int):
+        """power off: flash as it is now goes back into the image file"""
+        dump = self.flash.with_suffix(".dump")
+        dump.unlink(missing_ok=True)
+        said = monitor_send(self.port, [f'memsave 0 {size} "{self.conv(dump)}"', "quit"])
+        self.p.wait(timeout=60)
+        data = dump.read_bytes() if dump.exists() else b""
+        if len(data) != size:
+            raise RuntimeError(f"memsave gave {len(data)} bytes, wanted {size}; monitor: {said}")
+        if data[:8] != self.flash.read_bytes()[:8]:
+            raise RuntimeError("the flash dump doesn't start with the image's vector table: not saving it")
+        self.flash.write_bytes(data)
+
     def close(self):
         try:
             self.p.kill()
@@ -188,7 +206,7 @@ class QemuSerial:
 
 
 def build_nrf_app(work: Path, name: str, origin: int, ram_base: int, ram_end: int, probe: int,
-                  check: tuple | None = None, floor_at: int | None = None) -> Path:
+                  check: tuple | None = None, floor_at: int | None = None, store_at: int | None = None) -> Path:
     ld = work / f"{name}.ld"
     ld.write_text(f"""MEMORY {{ FLASH (rx) : ORIGIN = 0x{origin:08x}, LENGTH = 32K
          RAM (rwx) : ORIGIN = 0x{ram_base:08x}, LENGTH = 0x{ram_end - ram_base:x} }}
@@ -202,8 +220,66 @@ SECTIONS {{ .isr_vector : {{ KEEP(*(.isr_vector)) }} > FLASH
     run([GCC, "-mcpu=cortex-m0", "-mthumb", "-Os", "-nostdlib", "-ffreestanding", f'-DNAME="{name}"',
          f"-DPROBE=0x{probe:08x}u", f"-I{ROOT / 'include'}", ROOT / "tests/qemu/nrf_app.c", f"-T{ld}", "-o", elf,
          *([f"-DCHECK_LO=0x{check[0]:08x}u", f"-DCHECK_HI=0x{check[1]:08x}u"] if check else []),
-         *([f"-DFLOOR_AT=0x{floor_at:08x}u"] if floor_at is not None else [])])
+         *([f"-DFLOOR_AT=0x{floor_at:08x}u"] if floor_at is not None else []),
+         *([f"-DSTORE_AT=0x{store_at:08x}u"] if store_at is not None else [])])
     return elf
+
+
+def monitor_send(port: int, cmds: list[str]) -> str:
+    """Commands to a QEMU monitor listening on 127.0.0.1:port (in WSL when QEMU is).
+    -> what the monitor said (its line editor echoes; the last lines are the answers)."""
+    script = ("import socket,time,sys\n"
+              "s=None\n"
+              "for _ in range(50):\n"
+              "    try:\n"
+              f"        s=socket.create_connection(('127.0.0.1',{port}),5); break\n"
+              "    except OSError: time.sleep(0.2)\n"
+              "if s is None: print('no monitor'); sys.exit(0)\n"
+              "s.settimeout(2)\n"
+              "def rx():\n"
+              "    out=b''\n"
+              "    try:\n"
+              "        while True:\n"
+              "            b=s.recv(65536)\n"
+              "            if not b: break\n"
+              "            out+=b\n"
+              "            if out.endswith(b'(qemu) '): break\n"
+              "    except OSError: pass\n"
+              "    return out\n"
+              "rx()\n"
+              + "".join(f"s.sendall({(c + chr(10)).encode()!r}); print(rx()[-300:])\n" for c in cmds))
+    q, _, _ = qemu_cmd()
+    if q[0] == "wsl":
+        return run(q[:-1] + ["python3", "-c", script])
+    return run([sys.executable, "-c", script])
+
+
+def boot_keep(machine: str, flash: Path, size: int, seconds=6.0) -> str:
+    """One power cycle whose flash writes are kept. QEMU writes the -kernel image
+    back into flash on every reset (the nRF51's flash is a ROM *device*, so QEMU
+    doesn't treat the image as written-once ROM), so writes made before a reset
+    are lost. Here a boot runs for `seconds`, then the monitor saves flash over
+    `flash` and quits: the next call starts where this one left off. (memsave,
+    through the CPU: pmemsave reads QEMU's global address space, where the
+    nRF51 SoC's flash isn't mapped, and gives zeros.)"""
+    import random
+    port = random.randint(20000, 40000)
+    q, conv, _ = qemu_cmd()
+    dump = flash.with_suffix(".dump")
+    dump.unlink(missing_ok=True)
+    cmd = q + ["-M", machine, "-display", "none", "-serial", "stdio",
+               "-monitor", f"tcp:127.0.0.1:{port},server,nowait", "-kernel", conv(flash)]
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    time.sleep(seconds)
+    said = monitor_send(port, [f'memsave 0 {size} "{conv(dump)}"', "quit"])
+    out, _ = p.communicate(timeout=60)
+    data = dump.read_bytes() if dump.exists() else b""
+    if len(data) != size:
+        raise RuntimeError(f"memsave gave {len(data)} bytes, wanted {size}; monitor: {said}")
+    if data[:8] != flash.read_bytes()[:8]:
+        raise RuntimeError("the flash dump doesn't start with the image's vector table: not saving it")
+    flash.write_bytes(data)
+    return out.decode(errors="replace")
 
 
 def nrf51_tests(work: Path, db, check):
@@ -376,6 +452,181 @@ def nrf51_tests(work: Path, db, check):
     check(f"{board}: CONSOLE_AUTH: a key not in UNLOCK_KEYS is refused",
           "MB ERR bad response (1 of 5)" in o and "MB UNLOCKED" not in o, note + o[-1500:])
 
+    two_stage_tests(work, db, check, board, machine, ram_lo, ram_hi, probe)
+
+
+def two_stage_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
+    """7. TWO_STAGE on the nRF51: stage 0 at 0 picks a stage-1 copy and starts it
+    through the vector relay; stage 1 records itself as working once it starts an
+    app; a new stage 1 goes in over the console; one that never starts an app is
+    counted and passed over. Store entries print as tag:value ('>' = stage 1
+    worked, '?' = a boot of an unconfirmed one)."""
+    import hashlib
+    sys.path.insert(0, str(ROOT / "tools"))
+    import mbtool as mbt
+    cfg = Config(db, board)
+    cfg.set("LAYOUT", "ab+golden")
+    cfg.set("TWO_STAGE", True)
+    out = work / f"{board}-2stage"
+    info = mubuild.build(cfg, out, log=lambda *a: None)
+    lay = json.loads((out / "layout.json").read_text())
+    slot = {s["name"]: s for s in lay["slots"]}
+    store = lay["floor"]["offset"]
+    fsize = lay["flash_size"]
+    print(f"{board} (two-stage): stage 0 {info['stage0_used']} B of {info['stage0_region']} B, "
+          f"stage 1 {info['flash_used']} B in {slot['s1a']['size'] // 1024} KB copies, store at 0x{store:x}")
+
+    def id32(payload):
+        return int.from_bytes(hashlib.sha256(payload).digest()[4:8], "big")
+
+    def stage1_image(name, payload, at, version, secret=None):
+        hdr = mbt.build_header(payload, name, mbt.parse_version(version), target=lay["target"], arch=mbt.ARCH_ARM,
+                               entry=slot[at]["offset"] + 0x1000, stage1=True, secret=secret)
+        return hdr + b"\xff" * (0x1000 - len(hdr)) + payload
+
+    def put(img, at, data):
+        img[slot[at]["offset"]:slot[at]["offset"] + len(data)] = data
+
+    factory = (out / "mimiboot.bin").read_bytes()
+    s1a_payload = (out / "stage1-s1a.bin").read_bytes()
+    s1b_payload = (out / "stage1-s1b.bin").read_bytes()
+    elf = build_nrf_app(work, "nrf-2s", slot["g"]["link_native"], ram_lo, ram_hi, probe, store_at=store)
+    gimg = work / "nrf-2s.mimg"
+    mbtool("pack", str(elf), "--target", lay["target"], "-o", str(gimg), "--golden", "--version", "1.0.0")
+    golden = gimg.read_bytes()
+
+    def flash_with(name, extra=()):
+        img = bytearray(b"\xff" * fsize)
+        img[:len(factory)] = factory
+        for at, data in extra:
+            put(img, at, data)
+        p = work / f"{name}.flash.bin"
+        p.write_bytes(bytes(img))
+        return p
+
+    # a. a new board (stage 0 + stage 1 in s1a) with an app: the chain runs, stage 1 confirms itself
+    o = boot(machine, flash_with("nrf-2s-factory", [("g", golden)]), seconds=7)
+    ia = id32(s1a_payload)
+    check(f"{board}: TWO_STAGE: stage 0 -> stage 1 (s1a) -> app, through two vector relays",
+          "MU-APP nrf-2s" in o and f"relay={slot['g']['link_native']:08x}" in o and "svc=00000001" in o, o)
+    check(f"{board}: TWO_STAGE: stage 1 recorded itself as working (>{ia:08x}), nothing counted with one copy",
+          f">:{ia:08x}," in o and "?:" not in o, o)
+
+    # b. over the console: the running copy and a copy linked for the other slot are refused;
+    #    a newer stage 1 goes into s1b; after a reboot stage 0 tries it (counted), it starts
+    #    the app and records itself
+    newer = stage1_image("mimiboot-stage1", s1b_payload, "s1b", "1.1.0")
+    wrong = stage1_image("mimiboot-stage1", s1a_payload, "s1b", "1.1.0")        # s1a's build, s1b's header
+    ib = id32(s1b_payload)
+    prompt = r"mimiboot(?:\x1b\[0m)?> $"
+    upd = flash_with("nrf-2s-update")
+    s = QemuSerial(machine, upd, seconds=90, keep=True)
+    notes = []
+    try:
+        mbt.read_until(s, r"up/down \+ enter", 10)
+        for _ in range(3):
+            s.write(b"c")
+            if mbt.read_until(s, prompt, 6)[1]:
+                break
+        s.write(b"\x15version\r")
+        mbt.read_until(s, prompt, 5)
+        s.write(b"recv s1a\r")
+        mbt.read_until(s, prompt, 5)
+        s.write(b"recv s1b\r")
+        try:
+            mbt.send_image(s, wrong, wrong[0x1000:])
+        except SystemExit as e:
+            notes.append(str(e))
+        mbt.read_until(s, prompt, 5)
+        # `mbtool loader`'s own code: asks which copy runs, sends the build's image for the other
+        bdir = work / "nrf-2s-release"
+        bdir.mkdir(exist_ok=True)
+        shutil.copy(out / "layout.json", bdir / "layout.json")
+        (bdir / "stage1-s1b.img").write_bytes(newer)
+        (bdir / "stage1-s1a.img").write_bytes(b"not this one")
+        went, _ = mbt.loader_upload(s, str(bdir))
+        notes.append(f"loader wrote {went}")
+        mbt.read_until(s, prompt, 5)
+        s.write(b"recv g force\r")
+        mbt.send_image(s, golden, golden[0x1000:])
+        mbt.read_until(s, prompt, 5)
+        s.keep_flash(fsize)                          # power off with the uploads in flash
+    except SystemExit as e:
+        notes.append(f"mbtool: {e}")
+    o = s.close()
+    o += boot_keep(machine, upd, fsize)              # power on: stage 0 sees the new copy
+    note = "\n".join(notes) + "\n"
+    check(f"{board}: TWO_STAGE: the console says which stage 1 runs", "stage 1 from s1a, v1.0.0" in o, note + o[-2500:])
+    check(f"{board}: TWO_STAGE: 'recv' into the running copy is refused",
+          "s1a is the stage 1 running now" in o, note + o[-2500:])
+    check(f"{board}: TWO_STAGE: a stage 1 linked for the other copy is refused", "MB ERR refused" in o, note + o[-2500:])
+    tail = o[o.rfind("MU-APP nrf-2s"):] if "MU-APP nrf-2s" in o else ""
+    check(f"{board}: TWO_STAGE: mbtool loader put the new stage 1 into the copy that isn't running (s1b)",
+          "loader wrote s1b" in note, note + o[-2500:])
+    check(f"{board}: TWO_STAGE: after a power cycle stage 0 tries it (counted) and it starts the app",
+          f"?:{ib:08x}," in tail and "MU-APP nrf-2s" in tail, note + o[-2500:])
+    check(f"{board}: TWO_STAGE: ... and records itself as working", f">:{ib:08x}," in tail, note + o[-2500:])
+
+    # c. a stage 1 in s1b that hangs before starting any app (this test app, flagged as a
+    #    stage 1, just stops): each power cycle is counted; after 3 stage 0 passes it over
+    #    and s1a starts the app
+    elf = build_nrf_app(work, "s1-hang", slot["s1b"]["offset"] + 0x1000, ram_lo, ram_hi, probe)
+    hang = stage1_image("hang", mbt.read_input(str(elf), None, lay["target"])[0], "s1b", "2.0.0")
+    ih = id32(hang[0x1000:])
+    hf = flash_with("nrf-2s-hang", [("g", golden), ("s1b", hang)])
+    runs = [boot_keep(machine, hf, fsize, seconds=5.0) for _ in range(4)]
+    o = "".join(runs)
+    check(f"{board}: TWO_STAGE: a stage 1 that hangs is started on 3 power cycles",
+          all("MU-APP s1-hang" in r for r in runs[:3]), o[-2500:])
+    check(f"{board}: TWO_STAGE: ... then stage 0 goes back to s1a, which starts the app",
+          "MU-APP nrf-2s" in runs[3] and "s1-hang" not in runs[3], runs[3][-1500:])
+    check(f"{board}: TWO_STAGE: ... the 3 boots are on record, and s1a's own",
+          runs[3].count(f"?:{ih:08x},") == 3 and f">:{ia:08x}," in runs[3], runs[3][-1500:])
+
+    # d. damaged copies are ignored: a payload that doesn't match its hash, a header for the wrong slot
+    bad = bytearray(newer)
+    bad[0x1000 + 100] ^= 0x01
+    o = boot(machine, flash_with("nrf-2s-badhash", [("g", golden), ("s1b", bytes(bad))]), seconds=7)
+    check(f"{board}: TWO_STAGE: a stage 1 whose hash fails is ignored (s1a runs, nothing counted)",
+          "MU-APP nrf-2s" in o and "?:" not in o and f">:{ia:08x}," in o, o)
+    o = boot(machine, flash_with("nrf-2s-wrongslot", [("g", golden), ("s1b", wrong)]), seconds=7)
+    check(f"{board}: TWO_STAGE: a stage 1 linked for the other copy is ignored", "MU-APP nrf-2s" in o and "?:" not in o, o)
+
+    # e. signed: stage 0 takes S1_KEYS only. A stage 1 signed with the app key is ignored,
+    #    one signed with the stage-1 key is started
+    mbtool("keygen", "--out", str(work / "s1"))
+    mbtool("keygen", "--out", str(work / "app2"))
+    cfg2 = Config(db, board)
+    cfg2.set("LAYOUT", "ab+golden")
+    for k, v in (("TWO_STAGE", True), ("KEYS", str(work / "app2.pub")), ("REQUIRE_SIGNATURE", True),
+                 ("S1_KEYS", str(work / "s1.pub")), ("STAGE1_SIGN_KEY", str(work / "s1.key"))):
+        cfg2.set(k, v)
+    out2 = work / f"{board}-2stage-signed"
+    info2 = mubuild.build(cfg2, out2, log=lambda *a: None)
+    lay2 = json.loads((out2 / "layout.json").read_text())
+    if lay2 != lay:
+        slot.update({s["name"]: s for s in lay2["slots"]})
+    factory = (out2 / "mimiboot.bin").read_bytes()
+    elf = build_nrf_app(work, "nrf-2s-signed", slot["g"]["link_native"], ram_lo, ram_hi, probe, store_at=lay2["floor"]["offset"])
+    sg = work / "nrf-2s-signed.mimg"
+    mbtool("pack", str(elf), "--target", lay["target"], "-o", str(sg), "--golden", "--version", "1.0.0",
+           "--key", str(work / "app2.key"))
+    app_key = mbt.read_secret(str(work / "app2.key"))
+    s1_key = mbt.read_secret(str(work / "s1.key"))
+    pay_b = (out2 / "stage1-s1b.bin").read_bytes()
+    print(f"{board} (two-stage, signed): stage 0 {info2['stage0_used']} B, stage-1 images signed: {info2['stage1_signed']}")
+    o = boot(machine, flash_with("nrf-2s-signed", [("g", sg.read_bytes())]), seconds=9)
+    check(f"{board}: TWO_STAGE signed: stage 0 starts the build's signed stage 1, which starts a signed app",
+          info2["stage1_signed"] and "MU-APP nrf-2s-signed" in o, o)
+    o = boot(machine, flash_with("nrf-2s-appkey", [("g", sg.read_bytes()),
+                                                   ("s1b", stage1_image("x", pay_b, "s1b", "5.0.0", app_key))]), seconds=9)
+    check(f"{board}: TWO_STAGE signed: a newer stage 1 signed with the app key is ignored",
+          "MU-APP nrf-2s-signed" in o and "?:" not in o, o)
+    o = boot(machine, flash_with("nrf-2s-s1key", [("g", sg.read_bytes()),
+                                                  ("s1b", stage1_image("x", pay_b, "s1b", "5.0.0", s1_key))]), seconds=9)
+    check(f"{board}: TWO_STAGE signed: the same stage 1 signed with the stage-1 key is tried",
+          "MU-APP nrf-2s-signed" in o and f"?:{id32(pay_b):08x}," in o, o)
+
 def main():
     if not GCC:
         raise SystemExit("arm-none-eabi-gcc not found")
@@ -397,6 +648,9 @@ def main():
 
     if not only or "microbit" in only:
         nrf51_tests(work, db, check)
+    elif "two-stage" in only:                # just case 7 (nRF51)
+        flash = 256 * 1024
+        two_stage_tests(work, db, check, "microbit", "microbit", 0x20000008, 0x20004000, flash - 4)
 
     for board in ("netduinoplus2", "stm32vldiscovery"):
         if only and board not in only:
@@ -488,6 +742,32 @@ def main():
                 check(f"{board}: ECDSA P-256 signed image boots (signatures required)", f"MU-APP {board}-native" in o, o)
             else:
                 check(f"{board}: image signed by an untrusted P-256 key is refused", "MU-APP" not in o and "nothing bootable" in o, o)
+
+        # 6c. TWO_STAGE on the F405: stage 0 hands over to stage 1 through VTOR (the
+        #     relay case is the nRF51's), stage 1 boots the app. QEMU has no STM32 flash
+        #     controller, so stage 1's "it works" record can't be written: one copy,
+        #     nothing counted, the boot goes on regardless.
+        cfg_2s = Config(db, board)
+        cfg_2s.set("LAYOUT", "ab+golden")
+        cfg_2s.set("TWO_STAGE", True)
+        out_2s = work / f"{board}-2stage"
+        info_2s = mubuild.build(cfg_2s, out_2s, log=lambda *a: None)
+        lay_2s = json.loads((out_2s / "layout.json").read_text())
+        g2 = next(s for s in lay_2s["slots"] if s["name"] == "g")
+        s1a = next(s for s in lay_2s["slots"] if s["name"] == "s1a")
+        print(f"{board} (two-stage): stage 0 {info_2s['stage0_used']} B, stage 1 {info_2s['flash_used']} B, "
+              f"s1a at 0x{s1a['offset']:x}")
+        e2 = build_app(work, "two-stage", g2["link_native"], uart, ram_kb)
+        i2 = work / "two-stage.mimg"
+        mbtool("pack", str(e2), "--target", lay_2s["target"], "-o", str(i2), "--golden")
+        o = boot(machine, flash_image(work, "two-stage", lay_2s["flash_size"], out_2s / "mimiboot.bin", g2["offset"],
+                                      i2.read_bytes()))
+        check(f"{board}: TWO_STAGE: stage 0 -> stage 1 (VTOR) -> app", "MU-APP two-stage" in o and
+              f"vtor={0x08000000 + g2['offset'] + 0x1000:08x}" in o, o)
+        o = boot(machine, flash_image(work, "two-stage-menu", lay_2s["flash_size"], out_2s / "mimiboot.bin", g2["offset"],
+                                      i2.read_bytes()), seconds=3.0, keys=b" ")
+        check(f"{board}: TWO_STAGE: stage 1's console runs (break-in, 'stage 1 from s1a')",
+              "stage 1 from s1a" in o and "MU-APP" not in o, o)
 
         # 7. Zephyr/MCUboot image signed by imgtool with an Ed25519 key
         if not imgtool:

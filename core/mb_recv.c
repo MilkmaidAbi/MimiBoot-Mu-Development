@@ -70,7 +70,9 @@ int mb_recv(const mb_recv_t* r, mb_image_hdr_t* hdr_out) {
         say(r, "MB OK %lu%s\n", off, "");
     }
     if ((rc = r->end(r->ctx)) != MB_OK) {
-        r->puts(r->ctx, rc == MB_E_SIGNATURE ? "MB ERR signature (nothing installed)\n" : "MB ERR hash (nothing installed)\n");
+        r->puts(r->ctx, rc == MB_E_SIGNATURE ? "MB ERR signature (nothing installed)\n"
+                        : rc == MB_E_REFUSED ? "MB ERR refused: not linked for this slot (nothing installed)\n"
+                                             : "MB ERR hash (nothing installed)\n");
         return rc;
     }
     if (hdr_out) *hdr_out = hdr;
@@ -88,12 +90,17 @@ int mb_sink_slot_begin(void* ctx, const mb_image_hdr_t* hdr) {
     const mb_slot_def_t* d = &s->p->layout->slot[s->slot];
     if (mb_image_check_header(s->p, hdr, d->size) != MB_OK) return MB_E_CORRUPT;
     if (strncmp(hdr->target, s->p->target, sizeof(hdr->target))) return MB_E_UNSUPP;
+    // a stage 1 only into the stage-1 copy that isn't running, linked for it; nothing else there
+    int rc = mb_stage1_accepts(s->p, s->slot, hdr);
+    if (rc != MB_OK) return rc;
+    if (s->p->stage1_slot && s->p->stage1_slot() == s->slot) return MB_E_REFUSED;
     // refuse early what could never boot: unsigned / badly signed when required
     mb_slot_info_t tmp;
     memset(&tmp, 0, sizeof(tmp));
     tmp.hdr = *hdr;
     tmp.header_ok = true;
-    if (mb_image_check_sig(s->p, &tmp) != MB_OK) return MB_E_SIGNATURE;
+    bool s1 = mb_slot_role(s->p, s->slot) == MB_ROLE_STAGE1;
+    if ((s1 ? mb_stage1_check_sig(s->p, &tmp) : mb_image_check_sig(s->p, &tmp)) != MB_OK) return MB_E_SIGNATURE;
     s->hdr = *hdr;
     return mb_slot_erase(s->p, s->slot, hdr->payload_size);
 }
@@ -110,6 +117,8 @@ int mb_sink_slot_end(void* ctx) {
     tmp.hdr = s->hdr;
     tmp.header_ok = true;
     if (mb_image_verify(s->p, s->slot, &tmp) != MB_OK) return MB_E_CORRUPT;
+    if (mb_slot_role(s->p, s->slot) == MB_ROLE_STAGE1 && mb_stage1_vectors_ok(s->p, s->slot, &s->hdr) != MB_OK)
+        return MB_E_REFUSED;    // a stage 1 built for the other copy: left without a header (empty)
     return mb_slot_write_header(s->p, s->slot, &s->hdr);
 }
 

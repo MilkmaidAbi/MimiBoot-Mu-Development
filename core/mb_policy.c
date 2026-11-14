@@ -30,8 +30,6 @@
 #include <stdio.h>
 #include <string.h>
 
-volatile uint8_t mb_checking_slot = MB_SLOT_NONE;
-
 // The protected floors (port flash the app can't write), read once per decision.
 // The effective floor is the higher of these and the log's copy.
 static uint32_t hw_floor[MB_FLOOR_COUNT];
@@ -79,6 +77,12 @@ static void reconcile(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[M
         }
         mb_image_read_header(p, i, &info[i]);
         mb_slot_rec_t *s = &r->slot[i];
+        if (mb_slot_role(p, i) == MB_ROLE_STAGE1) {
+            // the bootloader's own copies: stage 0 keeps their books, the log never does
+            if (s->state != MB_ST_EMPTY || s->image_id)
+                memset(s, 0, sizeof(*s));
+            continue;
+        }
         if (!info[i].header_ok) {
             if (s->state != MB_ST_EMPTY || s->image_id)
                 memset(s, 0, sizeof(*s));
@@ -120,11 +124,15 @@ static bool verify(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[MB_M
 
 // Can `slot` be booted? Marks it bad in r if it never can.
 static bool admit(const mb_port_t *p, mb_bcl_rec_t *r, mb_slot_info_t info[MB_MAX_SLOTS], int slot, uint8_t want_arch) {
-    if (slot < 0 || slot >= p->layout->n_slots)
-        return false;
+    if (slot < 0 || slot >= p->layout->n_slots || mb_slot_role(p, slot) == MB_ROLE_STAGE1)
+        return false; // a stage-1 copy is never booted as an image
     mb_slot_rec_t *s = &r->slot[slot];
     if (s->state == MB_ST_EMPTY || s->state == MB_ST_BAD)
         return false;
+    if (info[slot].hdr.flags & MB_IMG_F_STAGE1) {
+        mark_bad(r, slot, MB_BAD_TARGET); // a bootloader stage 1 put in an app slot
+        return false;
+    }
     if (s->state == MB_ST_TRIAL && s->tries_left == 0) {
         mark_bad(r, slot, MB_BAD_TRIALS);
         return false;
@@ -197,6 +205,8 @@ static void book(const mb_port_t *p, mb_bcl_rec_t *r, const mb_slot_info_t info[
         if (s->state == MB_ST_NEW)
             s->state = MB_ST_GOOD;
         break;
+    case MB_ROLE_STAGE1:
+        break; // unreachable: admit() never lets one through
     default:
 #if !MB_FEAT_AB_TRIAL
         // Updates are trusted once their checks pass: no trial, no confirm.
@@ -523,6 +533,8 @@ int mb_plan_slot(const mb_port_t *p, const mb_bcl_t *log, mb_slot_info_t info[MB
         if (!force || !info[slot].header_ok || !startable(p, &info[slot].hdr))
             return MB_E_REFUSED;
         const mb_image_hdr_t *fh = &info[slot].hdr;
+        if (mb_slot_role(p, slot) == MB_ROLE_STAGE1 || (fh->flags & MB_IMG_F_STAGE1))
+            return MB_E_REFUSED; // not even forced: stage 1 is started by stage 0 only
         if (MB_FEAT_ANTI_ROLLBACK && mb_slot_role(p, slot) == MB_ROLE_AB && fh->security_version < security_floor(&log->cur))
             return MB_E_REFUSED;
         if (mb_slot_role(p, slot) == MB_ROLE_GOLDEN && golden_too_old(&log->cur, mb_image_id(fh), fh->version))
@@ -720,6 +732,9 @@ int mb_boot(const mb_port_t *p, mb_bcl_t *log, const mb_config_t *cfg, mb_slot_i
     // a signed config in force: an older signed one may not come back
     if (MB_FEAT_CFG_SIGNED && cfg && cfg->from_flash && cfg->version > hw_floor[MB_FLOOR_CONFIG])
         mb_floor_raise(p, MB_FLOOR_CONFIG, cfg->version);
+    // two-stage: this stage 1 got as far as starting an image, so it works
+    if (p->stage1_slot)
+        mb_stage1_confirm(p);
     uint32_t wd = hdr->trial_timeout_ms ? hdr->trial_timeout_ms : MB_DEFAULT_TRIAL_MS;
     int rc;
     if (!launch_checks(p, &plan->boot, &info[slot], slot)) {
@@ -752,7 +767,7 @@ int mb_boot_ram(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg,
                 const char *args) {
     if (!MB_FEAT_RAM_IMAGES || !p->ram_ptr || !p->launch_ram || hdr->load_type != MB_LOAD_RAM)
         return MB_E_UNSUPP;
-    if (!startable(p, hdr))
+    if (!startable(p, hdr) || (hdr->flags & MB_IMG_F_STAGE1))
         return MB_E_UNSUPP;
     // With signatures required, a RAM image is held to the same floor, or an
     // old signed image with a known hole could be run this way. (With them
@@ -793,6 +808,8 @@ int mb_boot_ram(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg,
             return topo;
     }
     set_args(&c, args);
+    if (p->stage1_slot)
+        mb_stage1_confirm(p);
     write_handoff(p, &log->cur, cfg, hdr, &c);
     return p->launch_ram(hdr);
 }

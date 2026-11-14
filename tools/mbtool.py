@@ -23,6 +23,7 @@ right after power-up, or have the app request the menu)
   ramboot app.mimg [-- args...]   send a RAM image and start it; flash untouched
   cfg push boot.cfg | cfg show    the boot config
   cmd "ls" "verify" ...           run console commands, print the output
+  loader build/ [--reboot]        two-stage boards: new stage 1 into the copy that isn't running
 
 Talking to a running OS (OTA)
   ota app.mimg [--slot b]         the OS's `boot recv` command (mb_client_recv): installs into the other slot
@@ -36,6 +37,7 @@ One step, no buttons
 """
 import argparse
 import hashlib
+import json
 import os
 import re
 import struct
@@ -55,7 +57,7 @@ PAYLOAD_OFF = 4096
 LOAD_CHAIN, LOAD_RAM = 1, 2
 ARCH_ANY, ARCH_ARM, ARCH_RISCV = 0, 1, 2
 ARCH_NAMES = {ARCH_ANY: "any", ARCH_ARM: "arm", ARCH_RISCV: "riscv"}
-F_GOLDEN, F_SIGNED, F_ECDSA = 0x1, 0x2, 0x4
+F_GOLDEN, F_SIGNED, F_ECDSA, F_STAGE1 = 0x1, 0x2, 0x4, 0x8
 TARGET = "rp2350"
 XIP_BASE = 0x10000000
 SRAM_BASE, SRAM_END = 0x20000000, 0x20082000
@@ -224,8 +226,10 @@ def read_input(path, load_addr=None, target=TARGET):
 # ---------------------------------------------------------------------------
 
 def build_header(payload, name, version, secver=0, golden=False, trial_ms=0, target=TARGET, arch=ARCH_ARM,
-                 load_type=LOAD_CHAIN, load_addr=0, handoff_addr=0, secret=None, build_time=None, entry=None):
-    flags = F_GOLDEN if golden else 0
+                 load_type=LOAD_CHAIN, load_addr=0, handoff_addr=0, secret=None, build_time=None, entry=None,
+                 stage1=False):
+    """stage1: a two-stage build's stage 1 (entry = the flash offset of its vector table)"""
+    flags = (F_GOLDEN if golden else 0) | (F_STAGE1 if stage1 else 0)
     key_id = 0
     if secret is not None and not isinstance(secret, Secret):
         secret = Secret("ed25519", secret)
@@ -392,8 +396,16 @@ def cmd_pack(a):
             die("RP2040 RAM payload overlaps loader at 0x20020000")
     secret = read_secret(a.key) if a.key else None
     name = a.name or os.path.splitext(os.path.basename(a.input))[0]
+    entry = vectors if a.target == "rp2040" else None
+    stage1 = getattr(a, "stage1", False)
+    if stage1:
+        # a two-stage build's stage 1: the header says which flash offset it is linked for
+        lo = next((lo for lo, size in MCU_FLASH if lo <= base < lo + size), None)
+        if a.target.startswith("rp2") or lo is None or load_type != LOAD_CHAIN:
+            die("--stage1 is for a Cortex-M MCU's flash-linked stage 1")
+        entry = base - lo
     hdr = build_header(payload, name, parse_version(a.version), a.secver, a.golden, a.trial_ms, a.target, arch,
-                       load_type, load_addr, handoff, secret, entry=vectors if a.target=="rp2040" else None)
+                       load_type, load_addr, handoff, secret, entry=entry, stage1=stage1)
     img = hdr + b"\xff" * (PAYLOAD_OFF - HDR_SIZE) + payload
     out = a.output or os.path.splitext(a.input)[0] + ".mimg"
     open(out, "wb").write(img)
@@ -405,7 +417,8 @@ def cmd_pack(a):
 
 def cmd_info(a):
     img, h, payload, problems = image_file(a.image)
-    print("name      %s%s" % (h["name"], "   (golden)" if h["flags"] & F_GOLDEN else ""))
+    print("name      %s%s" % (h["name"], "   (golden)" if h["flags"] & F_GOLDEN else
+                                 "   (bootloader stage 1, for flash offset 0x%x)" % h["entry"] if h["flags"] & F_STAGE1 else ""))
     print("version   %s   security %d" % (fmt_version(h["version"]), h["security_version"]))
     print("target    %s/%s   load %s" % (h["target"], ARCH_NAMES.get(h["arch"], "?"),
                                          "xip" if h["load_type"] == LOAD_CHAIN else "ram @0x%08x" % h["load_addr"]))
@@ -667,6 +680,39 @@ def cmd_install(a):
     print("installed in slot %s; it boots next (as a trial if it's an A/B update)" % a.slot)
 
 
+def loader_upload(s, build_dir):
+    """Two-stage boards: put the build's stage 1 into the copy that isn't running.
+    -> (slot written, image path). The board must already be at the prompt."""
+    s.write(b"version\r")
+    out, m = read_until(s, r"stage 1 from (\S+),", 5)
+    if not m:
+        die("the board didn't say which stage 1 it runs: not a two-stage build? output:\n" + ANSI.sub("", out)[-400:])
+    running = m.group(1)
+    read_until(s, PROMPT, 3)
+    lay = json.load(open(os.path.join(build_dir, "layout.json")))
+    copies = [x["name"] for x in lay["slots"] if x["role"] == "stage 1"]
+    if running not in copies or len(copies) != 2:
+        die("%s/layout.json doesn't match the board (stage-1 copies %s, running %s)" % (build_dir, copies, running))
+    other = copies[1 - copies.index(running)]
+    path = os.path.join(build_dir, "stage1-%s.img" % other)
+    img, h, payload = checked_image(path)
+    if not h["flags"] & F_STAGE1:
+        die("%s is not a stage-1 image" % path)
+    s.write(("recv %s\r" % other).encode())
+    send_image(s, img, payload)
+    return other, path
+
+
+def cmd_loader(a):
+    s = open_serial(a.port)
+    to_shell(s)
+    other, path = loader_upload(s, a.build_dir)
+    print("stage 1 from %s installed in %s; on the next boot stage 0 tries it (and goes back to the old "
+          "copy if it doesn't get as far as starting an app within %d boots)" % (path, other, 3))
+    if a.reboot:
+        s.write(b"reboot\r")
+
+
 def cmd_ramboot(a):
     img, h, payload = checked_image(a.image)
     if h["load_type"] != LOAD_RAM:
@@ -830,6 +876,7 @@ def main():
     p.add_argument("--key", help="sign with this secret key file"); p.add_argument("--arch", choices=["arm", "riscv"],
                                                                                     help="refuse to pack anything else")
     p.add_argument("--load-addr", help=".bin only: where it runs (default flash)")
+    p.add_argument("--stage1", action="store_true", help="a two-stage build's stage 1 (mimiconf builds these itself)")
     p.add_argument("--target", default=TARGET, help="target as the bootloader names it: rp2040, rp2350, or the chip from mimiconf (e.g. stm32f411ce); RP2040 requires a RAM-linked payload"); p.set_defaults(fn=cmd_pack)
     p = sub.add_parser("info"); p.add_argument("image"); p.add_argument("--pub"); p.set_defaults(fn=cmd_info)
     p = sub.add_parser("sign"); p.add_argument("image"); p.add_argument("--key", required=True); p.add_argument("-o", "--output")
@@ -856,6 +903,10 @@ def main():
     p = sub.add_parser("cmd"); p.add_argument("commands", nargs="+"); p.add_argument("--port"); p.add_argument("--timeout", type=float, default=10)
     p.set_defaults(fn=cmd_cmd)
     p = sub.add_parser("layout"); p.set_defaults(fn=cmd_layout)
+    p = sub.add_parser("loader", help="two-stage boards: update the bootloader (stage 1) from a mimiconf build")
+    p.add_argument("build_dir", help="the build directory (stage1-s1a.img, stage1-s1b.img, layout.json)")
+    p.add_argument("--port"); p.add_argument("--reboot", action="store_true", help="reboot into it straight away")
+    p.set_defaults(fn=cmd_loader)
     p = sub.add_parser("provision", help="print the steps to lock a board for production (runs nothing)")
     p.add_argument("build_dir", help="a mimiconf build directory (has build-info.json)"); p.set_defaults(fn=cmd_provision)
     a = ap.parse_args()

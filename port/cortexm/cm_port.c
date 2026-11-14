@@ -28,7 +28,7 @@
 
 static const mb_layout_t layout = MB_LAYOUT_INIT;
 
-#ifdef MB_TRUSTED_KEY_COUNT
+#if defined(MB_TRUSTED_KEY_COUNT) && !defined(MB_CM_STAGE0)   /* stage 0 trusts the stage-1 keys only */
 static const uint8_t trusted[MB_TRUSTED_KEY_COUNT][32] = MB_TRUSTED_KEYS;
 static const mb_keyring_t keyring = { MB_TRUSTED_KEY_COUNT, trusted };
 #define KEYRING (&keyring)
@@ -38,21 +38,38 @@ static const mb_keyring_t keyring = { MB_TRUSTED_KEY_COUNT, trusted };
 #ifndef MB_REQUIRE_SIGNATURE
 #define MB_REQUIRE_SIGNATURE 0
 #endif
-#if defined(MB_TRUSTED_P256_KEY_COUNT) && MB_FEAT_ECDSA
+#if defined(MB_TRUSTED_P256_KEY_COUNT) && MB_FEAT_ECDSA && !defined(MB_CM_STAGE0)
 static const uint8_t trusted_p256[MB_TRUSTED_P256_KEY_COUNT][64] = MB_TRUSTED_P256_KEYS;
 static const mb_keyring_p256_t p256_ring = { MB_TRUSTED_P256_KEY_COUNT, trusted_p256 };
 #define P256_RING (&p256_ring)
 #else
 #define P256_RING NULL
 #endif
-#if defined(MB_UNLOCK_KEY_COUNT) && !defined(MB_CM_CLIENT)
+#if defined(MB_UNLOCK_KEY_COUNT) && !defined(MB_CM_CLIENT) && !defined(MB_CM_STAGE0)
 static const uint8_t unlock_trusted[MB_UNLOCK_KEY_COUNT][32] = MB_UNLOCK_KEYS;
 static const mb_keyring_t unlock_ring = { MB_UNLOCK_KEY_COUNT, unlock_trusted };
 #define UNLOCK_RING (&unlock_ring)
 #else
 #define UNLOCK_RING NULL
 #endif
-#if defined(MB_VENDOR_NRF) && MB_FEAT_CONSOLE_AUTH && !defined(MB_CM_CLIENT)
+/* Two-stage builds: the keys stage 0 accepts stage 1 images from (S1_KEYS),
+ * separate from the app keys. Stage 1 carries them too, to refuse a badly
+ * signed upload at once. */
+#if MB_FEAT_TWO_STAGE && defined(MB_S1_KEY_COUNT) && !defined(MB_CM_CLIENT)
+static const uint8_t s1_trusted[MB_S1_KEY_COUNT][32] = MB_S1_KEYS;
+static const mb_keyring_t s1_ring = { MB_S1_KEY_COUNT, s1_trusted };
+#define S1_RING (&s1_ring)
+#else
+#define S1_RING NULL
+#endif
+#if MB_FEAT_TWO_STAGE && defined(MB_S1_P256_KEY_COUNT) && MB_FEAT_ECDSA && !defined(MB_CM_CLIENT)
+static const uint8_t s1_trusted_p256[MB_S1_P256_KEY_COUNT][64] = MB_S1_P256_KEYS;
+static const mb_keyring_p256_t s1_p256_ring = { MB_S1_P256_KEY_COUNT, s1_trusted_p256 };
+#define S1_P256_RING (&s1_p256_ring)
+#else
+#define S1_P256_RING NULL
+#endif
+#if defined(MB_VENDOR_NRF) && MB_FEAT_CONSOLE_AUTH && !defined(MB_CM_CLIENT) && !defined(MB_CM_STAGE0)
 #define RANDOM mcu_random
 #else
 #define RANDOM NULL
@@ -77,18 +94,27 @@ static const mb_keyring_t unlock_ring = { MB_UNLOCK_KEY_COUNT, unlock_trusted };
 #ifndef MB_CM_CLIENT
 #if MB_TIME_SYSTICK
 static volatile uint32_t ticks;
+#ifndef MB_CM_STAGE0
 static uint32_t now_ms(void) { return ticks; }
-#else
+#endif
+#elif !defined(MB_CM_STAGE0)
 static uint32_t now_ms(void) { return mcu_time_ms(); }
 #endif
+#ifndef MB_CM_STAGE0
 static uint32_t reset_flags;
+#endif
 
 /* ---- startup ---------------------------------------------------------------- */
 extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss, _estack;
 int main(void);
 
+extern const void* const mb_vectors[];
+
 void Reset_Handler(void) {
-#if MB_VECTORS == MB_VECTORS_RELAY
+#if MB_VECTORS == MB_VECTORS_RELAY && defined(MB_CM_STAGE1)
+    // stage 0's table (at address 0) relays here: our exceptions go to our handlers
+    REG32(MB_RELAY_ADDR) = (uint32_t)(uintptr_t)mb_vectors;
+#elif MB_VECTORS == MB_VECTORS_RELAY
     REG32(MB_RELAY_ADDR) = 0;               // our own exceptions until an image starts
 #endif
     uint32_t *s = &_sidata, *d = &_sdata;
@@ -103,7 +129,14 @@ void Reset_Handler(void) {
  * leaves a note in RAM that survives the reset (.noinit, checked with a magic
  * and a complement) saying which slot was being checked, and resets; the next
  * boot marks that slot bad and falls back (mb_main). */
+/* Two-stage builds put .noinit at the same address in both stages (first in
+ * their RAM, same RAM size), with a magic each: one stage never consumes the
+ * other's note. */
+#ifdef MB_CM_STAGE0
+#define CRUMB_MAGIC 0x3054424Du                     /* "MBT0" */
+#else
 #define CRUMB_MAGIC 0x4D424654u                     /* "MBFT" */
+#endif
 __attribute__((section(".noinit"))) static volatile uint32_t crumb[3];
 
 void mb_cm_fault(void) {
@@ -118,12 +151,21 @@ void mb_cm_fault(void) {
 
 static int fault_slot(void) {
     int s = -1;
-    if (crumb[0] == CRUMB_MAGIC && crumb[2] == ~crumb[1] && crumb[1] < MB_SLOT_NONE) s = (int)crumb[1];
+    if (crumb[0] != CRUMB_MAGIC) return -1;         // nothing, or the other stage's note: leave it
+    if (crumb[2] == ~crumb[1] && crumb[1] < MB_SLOT_NONE) s = (int)crumb[1];
     crumb[0] = 0;
     return s;
 }
 
-#if MB_VECTORS == MB_VECTORS_RELAY
+#if MB_VECTORS == MB_VECTORS_RELAY && defined(MB_CM_STAGE1)
+/* Stage 1 on a chip without VTOR: the hardware uses stage 0's table, which
+ * relays to this one, so this one must hold real handlers (a relay here would
+ * relay to itself). The bootloader uses no interrupts: every entry faults. */
+#define Fault_Handler mb_cm_fault
+#define H(x) ((const void*)(x))
+#define N_VECTORS (16 + MB_IRQS)
+#define RELAY_IRQS mb_cm_fault
+#elif MB_VECTORS == MB_VECTORS_RELAY
 /* Forward exception n to entry n of the table at *MB_RELAY_ADDR. r0/r1 are
  * already stacked by the exception entry and lr holds EXC_RETURN, so the
  * image's handler runs exactly as if the hardware had called it. While the
@@ -147,6 +189,7 @@ __attribute__((naked)) static void relay(void) {
 }
 #define H(x) ((const void*)relay)
 #define N_VECTORS (16 + MB_IRQS)
+#define RELAY_IRQS relay
 #else
 #define Fault_Handler mb_cm_fault
 #define H(x) ((const void*)(x))
@@ -164,7 +207,7 @@ __attribute__((section(".isr_vector"), used)) const void* const mb_vectors[N_VEC
     H(Fault_Handler), H(Fault_Handler), H(Fault_Handler), 0, 0, 0, 0,
     H(Fault_Handler), H(Fault_Handler), 0, H(Fault_Handler), H(SysTick_Handler),
 #if MB_VECTORS == MB_VECTORS_RELAY
-    [16 ... N_VECTORS - 1] = (const void*)relay,
+    [16 ... N_VECTORS - 1] = (const void*)RELAY_IRQS,
 #endif
 };
 #endif /* !MB_CM_CLIENT */
@@ -175,22 +218,46 @@ static int f_read(uint32_t off, void* buf, size_t n) {
     memcpy(buf, (const void*)(uintptr_t)(MB_FLASH_BASE + off), n);
     return MB_OK;
 }
+/* Never the bootloader itself: the boot region (stage 0 and the store, in a
+ * two-stage build), the stage 1 that is running, and from an app, either
+ * stage-1 copy (stage 1 is updated through MimiBoot's own console only).
+ * Stage 0 writes nothing but the store. */
+#ifndef MB_CM_STAGE0
+static bool own_flash(uint32_t off, size_t n) {
+    if (off < layout.boot.size) return true;
+#if MB_FEAT_TWO_STAGE
+    for (int i = 0; i < layout.n_slots; i++) {
+        const mb_slot_def_t* s = &layout.slot[i];
+        if (s->role != MB_ROLE_STAGE1 || off >= s->offset + s->size || off + n <= s->offset) continue;
+#if defined(MB_CM_CLIENT)
+        return true;
+#elif defined(MB_CM_STAGE1)
+        if (i == MB_STAGE1_SLOT) return true;
+#endif
+    }
+#endif
+    (void)n;
+    return false;
+}
 static int f_erase(uint32_t off, size_t n) {
-    if (off < layout.boot.size) return MB_E_REFUSED;         // never the bootloader itself
+    if (own_flash(off, n)) return MB_E_REFUSED;
     return mcu_flash_erase(off, n);
 }
 static int f_program(uint32_t off, const void* b, size_t n) {
-    if (off < layout.boot.size) return MB_E_REFUSED;
+    if (own_flash(off, n)) return MB_E_REFUSED;
     return mcu_flash_program(off, b, n);
 }
+#endif
 
 /* The rollback floors' store: the last erase unit of the bootloader region
  * (the linker keeps code out of it). Only the bootloader writes it, and only
- * before the region is locked; the app side reads it. */
-#if MB_FEAT_PROTECTED_FLOOR
+ * before the region is locked; the app side reads it. Two-stage builds always
+ * have it: stage 0 keeps its stage-1 records there. */
+#if MB_FEAT_PROTECTED_FLOOR || MB_FEAT_TWO_STAGE
 #ifndef MB_CM_CLIENT
 static int floor_program(uint32_t off, const void* b, size_t n) {
-    if (off < MB_FLOOR_OFF || n > MB_FLOOR_SIZE || off - MB_FLOOR_OFF > MB_FLOOR_SIZE - n) return MB_E_BADARG;
+    // off below the store wraps to a huge difference: refused by the same test
+    if (n > MB_FLOOR_SIZE || (uint32_t)(off - MB_FLOOR_OFF) > MB_FLOOR_SIZE - n) return MB_E_BADARG;
     return mcu_flash_program(off, b, n);
 }
 #define FLOOR_PROGRAM floor_program
@@ -240,7 +307,9 @@ const mb_port_t mb_mcu_port = {
 static bool in_ram(uint32_t a, uint32_t n) {
     return (a >= MB_RAM_BASE + MB_RAM_RESERVED && a < MB_LOADER_RAM && n <= MB_LOADER_RAM - a);
 }
+#ifndef MB_CM_STAGE0
 static void* ram_ptr(uint32_t a, uint32_t n) { return in_ram(a, n) ? (void*)(uintptr_t)a : NULL; }
+#endif
 static bool sp_ok(uint32_t sp) {
     if (sp & 3) return false;
     if (sp > MB_RAM_BASE && sp <= MB_RAM_BASE + MB_RAM_SIZE) return true;
@@ -256,8 +325,12 @@ static void quiesce(void) {
         REG32(NVIC_ICPR0 + 4u * (uint32_t)i) = 0xFFFFFFFFu;
     }
     REG32(SCB_ICSR) = ICSR_PENDSTCLR | ICSR_PENDSVCLR;
+#ifndef MB_CM_STAGE0
+    // stage 0 never opened the UART or the pins: "closing" them would wait on
+    // status bits of a peripheral whose clock was never on (STM32 TC, SAM D SYNCBUSY)
     mcu_uart_deinit();
     mcu_pins_release();
+#endif
     mcu_restore();
 }
 
@@ -296,12 +369,18 @@ static int start(uint32_t vectors, uint32_t lo, uint32_t hi) {
     if (vectors & (MB_VTOR_ALIGN - 1)) return MB_E_CORRUPT;  // VTOR can't point there
     uint32_t sp = REG32(vectors), pc = REG32(vectors + 4);
     if (!sp_ok(sp) || !(pc & 1) || (pc & ~1u) < lo || (pc & ~1u) >= hi) return MB_E_CORRUPT;
-#if MB_FEAT_BOOT_LOCK
+#if MB_FEAT_BOOT_LOCK && !defined(MB_CM_STAGE0)
     // The image gets the chip with the bootloader (code, keys, rollback floors)
     // write-protected until the next reset. Every bootloader write is done by
     // now. A lock that doesn't take is not a reason to stop booting: the board
-    // would be bricked by its own protection.
+    // would be bricked by its own protection. (Stage 0 doesn't lock: stage 1
+    // still has to write the store.)
     (void)mcu_flash_lock(layout.boot.offset, layout.boot.size);
+#if MB_FEAT_TWO_STAGE
+    // both stage-1 copies: the app may neither replace the bootloader nor erase its way back
+    for (int i = 0; i < layout.n_slots; i++)
+        if (layout.slot[i].role == MB_ROLE_STAGE1) (void)mcu_flash_lock(layout.slot[i].offset, layout.slot[i].size);
+#endif
 #if MB_FEAT_LOCK_GOLDEN
     // and the recovery image: what the board falls back to must survive the app
     for (int i = 0; i < layout.n_slots; i++)
@@ -331,6 +410,49 @@ static int launch(const mb_image_hdr_t* h, uint32_t slot_off, uint32_t slot_size
     return start(base + h->payload_offset, base, base + slot_size);
 }
 
+#ifdef MB_SYSMEM_ADDR
+static void reboot_rom(void) {
+    // the chip's own system-memory loader (STM32: USART / USB DFU / I2C ...)
+    uint32_t sp = REG32(MB_SYSMEM_ADDR), pc = REG32(MB_SYSMEM_ADDR + 4);
+    quiesce();
+#if MB_VECTORS == MB_VECTORS_VTOR
+    REG32(SCB_VTOR) = MB_SYSMEM_ADDR;
+#endif
+    jump(sp, pc);
+}
+#define REBOOT_ROM reboot_rom
+#else
+#define REBOOT_ROM NULL                     // no ROM loader on this chip (nRF, SAM D): the menu stays
+#endif
+
+#ifdef MB_CM_STAGE0
+/* ---- stage 0 (two-stage builds): pick a stage 1 and start it ------------------------- */
+static const mb_port_t stage0_port = {
+    .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
+    .keys = S1_RING, .p256_keys = S1_P256_RING, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING,
+    .require_signature = MB_REQUIRE_SIGNATURE, .flash_base = MB_FLASH_BASE,
+    .flash_read = f_read, .can_start = can_start, .floor = FLOOR, .fault_slot = fault_slot,
+};
+
+int main(void) {
+    // no UART and no reset-cause read here: stage 1 sets those up and needs the
+    // reset flags as the hardware left them (watchdog resets, crash guard)
+    mcu_init();
+    mcu_wdt_feed();
+    mb_stage0_choice_t c;
+    if (mb_stage0_choose(&stage0_port, &c) == MB_OK) {
+        const mb_slot_def_t* s = &layout.slot[c.slot];
+        (void)launch(&c.info.hdr, s->offset, s->size);      // returns only if the vector table is bad
+    }
+    // no stage 1 to start: the chip's own loader where there is one, else wait
+    // for a debugger (SWD can always reflash)
+#ifdef MB_SYSMEM_ADDR
+    reboot_rom();
+#endif
+    for (;;) mcu_wdt_feed();
+}
+#else
+
 static int launch_ram(const mb_image_hdr_t* h) {
     if (!can_start(h) || h->load_type != MB_LOAD_RAM) return MB_E_REFUSED;
     uint32_t v = h->entry ? h->entry : h->load_addr;
@@ -359,20 +481,6 @@ static void reboot(void) {
     REG32(SCB_AIRCR) = 0x05FA0004u;                         // SYSRESETREQ
     for (;;) {}
 }
-#ifdef MB_SYSMEM_ADDR
-static void reboot_rom(void) {
-    // the chip's own system-memory loader (STM32: USART / USB DFU / I2C ...)
-    uint32_t sp = REG32(MB_SYSMEM_ADDR), pc = REG32(MB_SYSMEM_ADDR + 4);
-    quiesce();
-#if MB_VECTORS == MB_VECTORS_VTOR
-    REG32(SCB_VTOR) = MB_SYSMEM_ADDR;
-#endif
-    jump(sp, pc);
-}
-#define REBOOT_ROM reboot_rom
-#else
-#define REBOOT_ROM NULL                     // no ROM loader on this chip (nRF, SAM D): the menu stays
-#endif
 static uint32_t cause(void) { return reset_flags; }
 static const char* reason(void) {
     return reset_flags & MB_RESET_WATCHDOG ? "watchdog" : reset_flags & MB_RESET_SOFT ? "software reset" : "power-on/pin";
@@ -409,6 +517,13 @@ static uint32_t caps(void) { return MB_CAP_CONTROL | MB_CAP_CONFIG | MB_CAP_RAM 
 #define DEBUG_TXT ""
 #endif
 
+#ifdef MB_CM_STAGE1
+static int stage1_slot(void) { return MB_STAGE1_SLOT; }    // linked for this copy, so it runs from this copy
+#define STAGE1_SLOT stage1_slot
+#else
+#define STAGE1_SLOT NULL
+#endif
+
 const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
     .keys = KEYRING, .p256_keys = P256_RING, .require_signature = MB_REQUIRE_SIGNATURE, .unlock_keys = UNLOCK_RING, .random = RANDOM,
@@ -418,6 +533,7 @@ const mb_port_t mb_mcu_port = {
     .console_open = console_open, .getc = getc_port, .write = write_port,
     .reboot = reboot, .reboot_rom = REBOOT_ROM, .reset_cause = cause, .reset_reason = reason,
     .capabilities = caps, .floor = FLOOR, .fault_slot = fault_slot, .lockdown = LOCK_TXT DEBUG_TXT,
+    .stage1_slot = STAGE1_SLOT, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING, .flash_base = MB_FLASH_BASE,
 };
 
 int main(void) {
@@ -434,4 +550,5 @@ int main(void) {
     return 0;
 }
 
+#endif /* MB_CM_STAGE0 */
 #endif /* MB_CM_CLIENT */

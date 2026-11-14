@@ -74,6 +74,75 @@ console doesn't get past it, and neither does `ramboot` when signatures are
 required. The store has room for 256 raises; when it is full the floors stay
 where they are and the log copy carries on.
 
+## Updating the bootloader itself (two-stage)
+
+A one-stage MimiBoot can't replace itself: a bug in it is fixed with a debug
+probe. With `TWO_STAGE` it is split in two:
+
+- **Stage 0**, at the start of flash: about 10 KB, never updated in the field.
+  It reads the two stage-1 copies, checks them, keeps a few records in the
+  store at the end of its region, and starts one. No console, no uploads.
+- **Stage 1**, the whole bootloader you know (console, uploads, A/B, configs),
+  in two copies, `s1a` and `s1b`. Each copy is a MimiBoot image linked for its
+  own slot and flagged as a stage 1 (`MB_IMG_F_STAGE1`, inside the signed
+  bytes).
+
+A new stage 1 goes into the copy that isn't running (`mbtool loader <build
+dir>`, which asks the board which one runs). On the next boot, stage 0 starts
+a copy only if all of this holds:
+
+- the header is sound, it is a stage 1 for this chip, and it is linked for that
+  slot (the header says so, and the payload's reset vector agrees);
+- its security version is at or above the stage-1 floor;
+- it is signed by one of `S1_KEYS` (required when signatures are required).
+  These are separate from the app keys: an app signing key that leaks can't
+  replace the bootloader;
+- its hash matches.
+
+Then, between two usable copies: one that hasn't failed, then the higher
+version, then one known to work. A copy is known to work once it has got as
+far as starting an image (it writes that into the store just before the
+launch). A copy that hasn't yet is on trial: every boot of it is recorded
+before it runs, and after 3 boots without getting that far it is passed over
+and the other copy starts. Once a copy with security version N has worked, no
+copy below N starts again.
+
+Stage 0 is built so its own records can't brick the board:
+
+- with one usable copy it starts it, trial or not, and records nothing (a board
+  left at the menu with no app doesn't fill the store);
+- if every usable copy has failed, the best of them starts anyway;
+- if a trial boot can't be recorded (store full, write failed), the trial
+  doesn't start: the copy known to work does.
+
+What it doesn't do:
+
+- **No watchdog in stage 0.** On most of these chips a watchdog can't be stopped
+  or slowed once it runs, so it would follow stage 1 into the app. A stage 1
+  that faults resets itself (the fault handler); one that hangs is counted by
+  power cycles.
+- **The store is finite.** It is append-only, one erase unit (4 KB: 256 entries
+  of 16 bytes). A stage-1 update costs at most 5 entries (3 boots, "it works",
+  a floor). Boot counting stops 8 entries short of full so floors still fit.
+  Nothing erases the store in the field yet, so after about 50 stage-1 updates
+  new copies start without trials.
+- **A stage-1 copy that is damaged, unsigned or below the floor is skipped, not
+  repaired.** If both are unusable, stage 0 has nothing to start: STM32 parts
+  fall into their ROM loader, others wait for a debug probe.
+- **Without a runtime lock the copies are the app's to erase.** On nRF,
+  `BOOT_LOCK` write-protects stage 0, the store and both copies before the app
+  starts. On STM32 and SAM D, `mbtool provision` locks stage 0's code for good
+  but has to leave the store and the copies writable, because the bootloader
+  writes them. A compromised app there can erase both copies (the board then
+  needs the ROM loader or a probe) or add records to the store (it can make
+  stage 0 skip an update, or use up the store); it can't make stage 0 start
+  anything that isn't signed and above the floor.
+
+Two-stage builds need about 100 KB for stage 0 and the two copies, so parts
+with 192 KB of flash or more. On STM32 F4/F7, whose sectors grow to 128 or
+256 KB, every region takes whole sectors: there it fits A/B but not A/B plus
+golden.
+
 ## Protection per chip
 
 | Chip | Bootloader region vs the app | Debug port | Persistent steps (`mbtool provision`) |
@@ -195,8 +264,9 @@ needs a hardware RNG: not yet).
 ## Known gaps
 
 - **Fault injection.** See above: hardened, not immune.
-- **No self-update.** The bootloader can't replace itself in the field: a bug
-  in it is fixed only with a debug probe. (A two-stage design is planned.)
+- **Self-update needs `TWO_STAGE`.** A one-stage build can't replace itself in
+  the field. With two stages, stage 0 itself still can't be: keep it small and
+  get it right before the boards ship.
 - **Untested on hardware.** The nRF locks, the debug lock and the RNG have run
   only in the emulator (RNG, flash) or not at all (BPROT, ACL, APPROTECT).
 - **The boot config** (boot order, arguments) is protected by a CRC only,

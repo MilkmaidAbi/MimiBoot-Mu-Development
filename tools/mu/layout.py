@@ -15,7 +15,8 @@ from .model import parse_sectors
 LOG_MIN = 2048          # a log copy: a sector header + records of 256 bytes
 CFG_MIN = 4096          # a config copy: 256-byte header + up to 3840 bytes of text
 SLOT_NAMES = ["a", "b", "g", "c", "d", "e"]
-ROLE_AB, ROLE_GOLDEN, ROLE_AUX = 1, 2, 3
+ROLE_AB, ROLE_GOLDEN, ROLE_AUX, ROLE_STAGE1 = 1, 2, 3, 4
+MAX_SLOTS = 6               # MB_MAX_SLOTS: the boot log has a record per slot
 
 
 class LayoutError(Exception):
@@ -65,7 +66,10 @@ class Layout:
 
 
 def plan(flash_size: int, sector_spec: str, boot_bytes: int, slots: str = "ab", aux: int = 0,
-         cfg_file: bool = False) -> Layout:
+         cfg_file: bool = False, stage1_bytes: int = 0) -> Layout:
+    """stage1_bytes: two-stage builds, the size of each stage-1 copy (s1a, s1b).
+    They sit after the log and config (small sectors go to those first) and
+    come last in the slot table (A, B and golden keep their indexes)."""
     sectors = [(o, s) for o, s in parse_sectors(sector_spec) if o < flash_size]
     if sum(s for _, s in sectors) != flash_size:
         raise LayoutError(f"sector map covers {sum(s for _, s in sectors)} bytes, flash is {flash_size}")
@@ -89,12 +93,18 @@ def plan(flash_size: int, sector_spec: str, boot_bytes: int, slots: str = "ab", 
     cfg = [take("cfg0", CFG_MIN), take("cfg1", CFG_MIN)] if cfg_file else []
     if cfg and cfg[0].size + cfg[1].size > 4 * CFG_MIN:
         notes.append(f"config file costs {(cfg[0].size + cfg[1].size) // 1024} KB here (large sectors)")
+    stage1 = [take("s1a", stage1_bytes, ROLE_STAGE1), take("s1b", stage1_bytes, ROLE_STAGE1)] if stage1_bytes else []
+    if stage1 and stage1[0].size != stage1[1].size:
+        notes.append(f"stage-1 copies differ in size (sectors): keep stage 1 under "
+                     f"{(min(r.size for r in stage1) - 4096) // 1024} KB")
 
     roles = {"single": [ROLE_AB], "ab": [ROLE_AB, ROLE_AB], "ab+golden": [ROLE_AB, ROLE_AB, ROLE_GOLDEN]}[slots]
     if aux:
         if slots != "ab+golden":
             raise LayoutError("aux slots need the ab+golden layout (slot 3+ follow golden)")
         roles += [ROLE_AUX] * aux
+    if len(roles) + len(stage1) > MAX_SLOTS:
+        raise LayoutError(f"{len(roles)} slots + 2 stage-1 copies: at most {MAX_SLOTS} in all")
     rest = sectors[cur:]
     n = len(roles)
     if len(rest) < n:
@@ -139,7 +149,7 @@ def plan(flash_size: int, sector_spec: str, boot_bytes: int, slots: str = "ab", 
     if len(set(sizes)) > 1:
         notes.append("slot sizes differ (" + ", ".join(f"{r.name}={r.size // 1024}K" for r in slot_regions) +
                      f"): keep images under {min(sizes) // 1024} KB to fit any slot")
-    lay = Layout(flash_size, sectors, boot, log, cfg, slot_regions, Region("data", flash_size, 0), notes)
+    lay = Layout(flash_size, sectors, boot, log, cfg, slot_regions + stage1, Region("data", flash_size, 0), notes)
     lay.check()
     return lay
 

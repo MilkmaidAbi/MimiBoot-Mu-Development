@@ -400,6 +400,48 @@ auto: the smallest sector-aligned region the build fits in (slot addresses chang
 
 32K / 48K ...: a fixed size.
 
+With TWO_STAGE this is stage 0's region (stage 0 + the store); chip means auto there.
+
+### `TWO_STAGE`: Two-stage bootloader (updatable in the field)
+
+default **off**. (full core; builds: STM32/nRF/SAMD)
+
+Split MimiBoot in two. Stage 0 is small and never changes: it checks the two stage-1 copies (s1a, s1b) and starts the best one. Stage 1 is the whole bootloader (console, uploads, A/B, everything), and is updated like an app: upload a new one into the copy that isn't running (mbtool loader), reboot. A new stage 1 is on trial until it gets as far as starting an image; after 3 boots that don't, stage 0 goes back to the old copy.
+
+The build makes stage0.bin, stage1-s1a.img, stage1-s1b.img and mimiboot.bin (stage 0 + stage 1 in s1a: what goes on a new board). Stage-1 images are signed with STAGE1_SIGN_KEY and checked against S1_KEYS, separate from the app keys.
+
+C macro: `MB_FEAT_TWO_STAGE`
+
+### `STAGE1_SIZE`: Size of each stage-1 copy (auto / e.g. 64K)
+
+default **auto**; needs `TWO_STAGE`. (full core; builds: STM32/nRF/SAMD)
+
+auto: the measured stage 1 plus a quarter for later versions, plus its 4 KB header, rounded up to sectors. A later stage 1 must fit, so leave room.
+
+### `STAGE1_VERSION`: Stage-1 version (x.y.z)
+
+default **1.0.0**; needs `TWO_STAGE`. (full core; builds: STM32/nRF/SAMD)
+
+Put in the stage-1 images. Between two working copies stage 0 starts the higher version; raise it with every release.
+
+### `STAGE1_SECURITY`: Stage-1 security version (anti-rollback)
+
+default **0**; 0..1000000; needs `TWO_STAGE`. (full core; builds: STM32/nRF/SAMD)
+
+Once a stage 1 with this security version has worked, stage 0 never starts one below it again. Raise it when a release fixes a security hole.
+
+### `S1_KEYS`: Stage-1 public keys file
+
+default ****; needs `TWO_STAGE`, `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)
+
+The keys stage 0 accepts a stage 1 from (Ed25519, or P-256 with ECDSA on), one per line. Keep them apart from KEYS: a leaked app key must not be enough to replace the bootloader. Required with REQUIRE_SIGNATURE.
+
+### `STAGE1_SIGN_KEY`: Sign stage-1 images with (secret key file)
+
+default ****; needs `TWO_STAGE`, `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)
+
+mbtool keygen's .key file, used by the build to sign stage1-s1a.img and stage1-s1b.img. Empty: they are built unsigned (sign them later with mbtool sign --key).
+
 ## AVR bootloader (Lite core)
 
 The small AVR core: STK500 uploads (Arduino IDE / avrdude), an app check, app requests, trial boots, a flash-write service, staged updates.

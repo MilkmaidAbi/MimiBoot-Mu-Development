@@ -269,14 +269,16 @@ def provision_checks(db):
     import json as _json
     from mu.provision import ProvisionError, steps
 
-    def run(board, boot_off, boot_size, features=None, core="night"):
+    def run(board, boot_off, boot_size, features=None, core="night", store=None):
+        """store: a two-stage build's store (offset, size) at the end of the boot region"""
         d = Path(tempfile.mkdtemp(prefix="mu-prov-"))
         t = db.target(board)
         (d / "build-info.json").write_text(_json.dumps({"board": board, "core": core, "features": features or {},
-                                                        "flash_region": boot_size}))
+                                                        "flash_region": boot_size, "two_stage": bool(store)}))
         if core == "night":
             (d / "layout.json").write_text(_json.dumps({"flash_base": t.get("flash_base", 0x08000000),
-                                                        "boot": {"offset": boot_off, "size": boot_size}}))
+                                                        "boot": {"offset": boot_off, "size": boot_size},
+                                                        "floor": {"offset": store[0], "size": store[1]} if store else None}))
         try:
             return "\n".join(steps(d))
         except ProvisionError as e:
@@ -296,6 +298,50 @@ def provision_checks(db):
     check("BOOT_LOCK is OFF" in o and "BPROT" in o, "provision nRF52832: says the lock is off")
     o = run("uno", 0, 512, core="lite")
     check("lock:w:0x2F:m" in o, "provision AVR: BLB1 lock bits")
+    # two-stage: stage 0's code only (sector 0), never its store (sector 1) or the copies
+    o = run("nucleo-f411re", 0, 32 * 1024, store=(16 * 1024, 16 * 1024))
+    check("nWRP0=0" in o and "nWRP1" not in o and "lock stage 0 only" in o, "provision F4 two-stage: stage 0's sector, not the store")
+    o = run("arduino-zero", 0, 16 * 1024 + 256, store=(16 * 1024, 256))
+    check("at91samd bootloader 16384" in o, "provision SAM D21 two-stage: BOOTPROT over stage 0's 16 KB")
+    o = run("nrf52840dk", 0, 16 * 1024, {"BOOT_LOCK": True}, store=(12 * 1024, 4096))
+    check("both stage-1 copies" in o, "provision nRF two-stage: says what the run-time lock covers")
+    two_stage_checks(db)
+
+
+def two_stage_checks(db):
+    """TWO_STAGE in the configurator: layout, problems, generated header"""
+    from mu.layout import ROLE_STAGE1
+    cfg = Config(db, "nrf52840dk")
+    cfg.set("LAYOUT", "ab+golden")
+    cfg.set("TWO_STAGE", True)
+    check(not [m for lvl, m in cfg.problems() if lvl == "error"], "two-stage nRF52840: no errors")
+    lay = gen.mcu_layout(cfg, boot_bytes=16 * 1024, s1_bytes=52 * 1024)
+    s1 = [s for s in lay.slots if s.role == ROLE_STAGE1]
+    check([s.name for s in s1] == ["s1a", "s1b"] and lay.slots.index(s1[0]) == 3, "stage-1 copies last in the slot table")
+    check([s.name for s in lay.slots[:3]] == ["a", "b", "g"], "A, B, golden keep slots 0..2")
+    check(all(s.size >= 52 * 1024 and s.offset % 4096 == 0 for s in s1), "copies sized and sector aligned")
+    check(s1[0].offset > lay.log[1].offset, "copies after the log (small sectors go to the log first)")
+    check(gen.floor_region(cfg, lay) == (12 * 1024, 4096), "two-stage: the store is the boot region's last unit")
+    check(gen.stage1_bytes(cfg, 40000) == (4096 + 50000 + 4095) // 4096 * 4096, "STAGE1_SIZE auto: measured + 25% + header")
+    cfg.set("AUX_SLOTS", 2)
+    check(any("at most 6 slots" in m for lvl, m in cfg.problems() if lvl == "error"), "two-stage + 5 slots refused")
+    try:
+        plan(1 << 20, "256x4K", 16384, "ab+golden", 2, False, 64 * 1024)
+        check(False, "planner took 7 slots")
+    except LayoutError:
+        check(True, "")
+    small = Config(db, "nucleo-g071rb")
+    small.set("TWO_STAGE", True)
+    check(any("192 KB" in m for lvl, m in small.problems() if lvl == "error"), "two-stage refused on a 128 KB part")
+    c2 = Config(db, "nucleo-f411re")
+    for k, v in (("TWO_STAGE", True), ("KEYS", "x.pub"), ("REQUIRE_SIGNATURE", True)):
+        c2.set(k, v)
+    check(any("S1_KEYS" in m for lvl, m in c2.problems() if lvl == "error"), "required signatures need S1_KEYS")
+    c2.set("STAGE1_VERSION", "1.2")
+    check(any("STAGE1_VERSION" in m for lvl, m in c2.problems() if lvl == "error"), "a bad stage-1 version is refused")
+    h = gen.mcu_header(cfg, lay, 0x3000, gen.STAGE0_OFF)
+    check("#define MB_FEAT_TWO_STAGE 1" in h and "#define MB_FEAT_CONSOLE 0" in h and "#define MB_FEAT_RECV 0" in h,
+          "stage 0's header: two-stage on, console and uploads off")
 
 
 def build_all():

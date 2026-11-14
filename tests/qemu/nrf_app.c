@@ -86,6 +86,16 @@ void reset(void) {
     puts_(" floor=");
     for (int i = 0; i < 4; i++) { hex(R(FLOOR_AT + 4u * (uint32_t)i)); putc_(i < 3 ? ',' : ' '); }
 #endif
+#ifdef STORE_AT
+    // two-stage: every entry in the store, as tag-letter:value (tag "MBFx": x = '0'+n)
+    puts_(" store=");
+    for (uint32_t a = STORE_AT; a < STORE_AT + 4096u && R(a) != 0xFFFFFFFFu; a += 16) {
+        putc_((char)(R(a) >> 24));
+        putc_(':');
+        hex(R(a + 4));
+        putc_(R(a + 8) == ~R(a + 4) && R(a + 12) == ~R(a) ? ',' : '!');
+    }
+#endif
     if (R(PROBE) == 0xFFFFFFFFu) {          // the emulator's NVMC must ignore writes without WEN
         R(0x4001E504) = 0;                  // CONFIG = read-only
         R(PROBE) = 0;

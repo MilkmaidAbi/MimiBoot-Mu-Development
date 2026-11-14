@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .layout import Layout, ROLE_AB, ROLE_GOLDEN, plan, sector_groups
+from .layout import Layout, ROLE_AB, ROLE_GOLDEN, ROLE_STAGE1, plan, sector_groups
 from .model import Config, parse_pin, parse_size
 
-ROLE_NAMES = {ROLE_AB: "A/B", ROLE_GOLDEN: "golden", 3: "aux"}
+ROLE_NAMES = {ROLE_AB: "A/B", ROLE_GOLDEN: "golden", 3: "aux", ROLE_STAGE1: "stage 1"}
+# what stage 0 is built without (two-stage builds): it reads MimiBoot images and nothing else
+STAGE0_OFF = {"IMG_MCUBOOT": False, "IMG_RAW": False, "CONSOLE": False, "SHELL": False, "SHELL_DIAG": False,
+              "RECV": False, "CFG_FILE": False, "CFG_SIGNED": False, "CONSOLE_AUTH": False, "GRUB": False,
+              "CONTROL": False, "HANDOFF": False, "RAM_IMAGES": False, "SCRUB_RAM": False}
 NATIVE_HDR = 0x1000
 VECTOR_MODES = {"vtor": 0, "remap": 1, "relay": 2}
 
@@ -45,12 +49,14 @@ def _c_bytes(b: bytes) -> str:
     return "{" + ",".join(f"0x{x:02x}" for x in b) + "}"
 
 
-def feature_macros(cfg: Config) -> list[str]:
+def feature_macros(cfg: Config, overrides: dict | None = None) -> list[str]:
     out = []
     for o in cfg.options():
         if not o.macro:
             continue
         v = cfg.effective(o.id)
+        if overrides and o.id in overrides and o.kind == "bool":
+            v = overrides[o.id]
         if o.kind == "bool":
             out.append(f"#define {o.macro} {1 if v else 0}")
         elif o.kind == "int":
@@ -66,11 +72,22 @@ def feature_macros(cfg: Config) -> list[str]:
 
 
 def key_macros(cfg: Config) -> list[str]:
+    out = []
+    s1 = cfg.effective("S1_KEYS") if cfg.effective("TWO_STAGE") and cfg.effective("SIGNATURES") else None
+    if s1:
+        keys, p256 = read_keys_any(s1)
+        if keys:
+            out += [f"#define MB_S1_KEY_COUNT {len(keys)}",
+                    "#define MB_S1_KEYS {" + ",".join(_c_bytes(k) for k in keys) + "}"]
+        if p256:
+            if not cfg.effective("ECDSA"):
+                raise ValueError(f"{s1} has P-256 keys: turn on ECDSA, or remove them")
+            out += [f"#define MB_S1_P256_KEY_COUNT {len(p256)}",
+                    "#define MB_S1_P256_KEYS {" + ",".join(_c_bytes(k) for k in p256) + "}"]
     path = cfg.effective("KEYS")
     if not path or not cfg.effective("SIGNATURES"):
-        return []
+        return out
     keys, p256 = read_keys_any(path)
-    out = []
     if keys:
         out += [f"#define MB_TRUSTED_KEY_COUNT {len(keys)}",
                 "#define MB_TRUSTED_KEYS {" + ",".join(_c_bytes(k) for k in keys) + "}"]
@@ -116,14 +133,37 @@ def ram_reserved(cfg: Config) -> int:
     return 0
 
 
-def mcu_layout(cfg: Config, boot_bytes: int | None = None) -> Layout:
+STAGE0_GUESS = 20 * 1024     # layout previews before a build has measured stage 0 / stage 1
+STAGE1_GUESS = 64 * 1024
+
+
+def stage1_bytes(cfg: Config, measured: int | None = None) -> int:
+    """the size of each stage-1 copy: STAGE1_SIZE, or (auto) the measured stage 1
+    plus a quarter for later versions, plus the 4 KB header sector, in 4 KB steps"""
+    if not cfg.effective("TWO_STAGE"):
+        return 0
+    s = str(cfg.effective("STAGE1_SIZE") or "auto").strip().lower()
+    if s != "auto":
+        return parse_size(s.upper())
+    if measured is None:
+        return STAGE1_GUESS
+    return (NATIVE_HDR + measured * 5 // 4 + 4095) // 4096 * 4096
+
+
+def mcu_layout(cfg: Config, boot_bytes: int | None = None, s1_bytes: int | None = None) -> Layout:
     t = cfg.t
     flash = parse_size(t.get("flash"))
+    two = bool(cfg.effective("TWO_STAGE"))
     if boot_bytes is None:
         bs = str(cfg.effective("BOOT_SIZE") or "chip").strip().lower()
-        boot_bytes = parse_size(t.get("boot")) if bs in ("chip", "auto") else parse_size(bs.upper())
+        if two and bs in ("chip", "auto"):
+            boot_bytes = STAGE0_GUESS
+        else:
+            boot_bytes = parse_size(t.get("boot")) if bs in ("chip", "auto") else parse_size(bs.upper())
+    if s1_bytes is None:
+        s1_bytes = stage1_bytes(cfg)
     return plan(flash, t.get("sectors"), boot_bytes, cfg.effective("LAYOUT") or "ab",
-                cfg.effective("AUX_SLOTS") or 0, bool(cfg.effective("CFG_FILE")))
+                cfg.effective("AUX_SLOTS") or 0, bool(cfg.effective("CFG_FILE")), s1_bytes if two else 0)
 
 
 def mcu_ram(cfg: Config):
@@ -262,7 +302,7 @@ FLOOR_ENTRY = {"stm32": 16, "nrf": 16, "samd": 16}
 def floor_region(cfg: Config, lay: Layout) -> tuple[int, int] | None:
     """(offset, size) of the protected floor store: the last erase unit of the
     bootloader region, which the bootloader's code must leave free"""
-    if not cfg.effective("PROTECTED_FLOOR"):
+    if not cfg.effective("PROTECTED_FLOOR") and not cfg.effective("TWO_STAGE"):
         return None
     end = lay.boot.offset + lay.boot.size
     for off, size in lay.sectors:
@@ -277,7 +317,7 @@ def code_room(cfg: Config, lay: Layout) -> int:
     return lay.boot.size - (fr[1] if fr else 0)
 
 
-def mcu_header(cfg: Config, lay: Layout, loader_ram: int) -> str:
+def mcu_header(cfg: Config, lay: Layout, loader_ram: int, overrides: dict | None = None) -> str:
     t = cfg.t
     ram, r2 = mcu_ram(cfg)
     fb, rb = flash_base(cfg), ram_base(cfg)
@@ -285,7 +325,7 @@ def mcu_header(cfg: Config, lay: Layout, loader_ram: int) -> str:
     lines = [
         "/* generated by mimiconf.py - do not edit; edit .config and rebuild */",
         "#ifndef MIMIBOOT_CONFIG_H", "#define MIMIBOOT_CONFIG_H", "",
-        "/* features */", *feature_macros(cfg), *key_macros(cfg), "",
+        "/* features */", *feature_macros(cfg, overrides), *key_macros(cfg), "",
         "/* board */",
         f'#define MB_BOARD_NAME "{t.name}"',
         f'#define MB_TARGET "{t.chip_name[:15]}"',
@@ -335,11 +375,12 @@ def layout_init(lay: Layout) -> str:
             f"  .data={{0x{lay.data.offset:x},0x{lay.data.size:x}}} }}")
 
 
-def mcu_linker(cfg: Config, boot_size: int, ram: int, loader_ram: int, stack: int) -> str:
+def mcu_linker(cfg: Config, boot_size: int, ram: int, loader_ram: int, stack: int, origin: int = 0) -> str:
+    """origin: flash offset the code is linked at (0; a stage-1 copy: its slot + 0x1000)"""
     fb, rb = flash_base(cfg), ram_base(cfg)
     return f"""/* generated by mimiconf.py */
 MEMORY {{
-  FLASH (rx)  : ORIGIN = 0x{fb:08x}, LENGTH = 0x{boot_size:x}
+  FLASH (rx)  : ORIGIN = 0x{fb + origin:08x}, LENGTH = 0x{boot_size:x}
   RAM   (rwx) : ORIGIN = 0x{rb + ram - loader_ram:08x}, LENGTH = 0x{loader_ram:x}
 }}
 _estack = ORIGIN(RAM) + LENGTH(RAM);
@@ -349,12 +390,14 @@ SECTIONS {{
   .isr_vector : {{ KEEP(*(.isr_vector)) }} > FLASH
   .text : {{ *(.text*) *(.rodata*) . = ALIGN(4); }} > FLASH
   .ARM.exidx : {{ *(.ARM.exidx*) }} > FLASH
+  /* first in RAM: the same address in stage 0 and stage 1 of a two-stage build,
+     so neither one's start-up zeroing wipes the other's fault note */
+  .noinit (NOLOAD) : {{ *(.noinit*) . = ALIGN(4); _enoinit = .; }} > RAM
   _sidata = LOADADDR(.data);
   .data : {{ _sdata = .; *(.data*) . = ALIGN(4); _edata = .; }} > RAM AT > FLASH
   .bss (NOLOAD) : {{ _sbss = .; *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; }} > RAM
-  .noinit (NOLOAD) : {{ *(.noinit*) . = ALIGN(4); _enoinit = .; }} > RAM
-  end = _enoinit; _end = end;
-  ASSERT(_enoinit + _stack_size <= _estack, "MimiBoot: RAM too small for data + stack: turn features off")
+  end = _ebss; _end = end;
+  ASSERT(_ebss + _stack_size <= _estack, "MimiBoot: RAM too small for data + stack: turn features off")
 }}
 """
 
@@ -380,12 +423,17 @@ def mcu_outputs(cfg: Config, lay: Layout, out: Path):
     (out / "layout.json").write_text(json.dumps(doc, indent=2) + "\n")
     rows = [f"MimiBoot-Mu layout for {t.name} ({t.chip_name}, {lay.flash_size // 1024} KB flash at 0x{fb:08x})",
             "", f"  {'region':8} {'address':>12} {'size':>8}  role"]
-    for r in lay.regions():
+    for r in sorted(lay.regions(), key=lambda r: r.offset):
         role = ROLE_NAMES.get(r.role, "") if r in lay.slots else ""
         rows.append(f"  {r.name:8} 0x{fb + r.offset:08x} {r.size // 1024:>6} K  {role}")
     fr = floor_region(cfg, lay)
     if fr:
-        rows.append(f"  (rollback floors: 0x{fb + fr[0]:08x}, {fr[1] // 1024} K at the end of the boot region, locked with it)")
+        what = "rollback floors + stage-1 records" if cfg.effective("TWO_STAGE") else "rollback floors"
+        how = "locked with it" if cfg.effective("BOOT_LOCK") else "not locked: BOOT_LOCK off or not on this chip"
+        rows.append(f"  ({what}: 0x{fb + fr[0]:08x}, {fr[1] // 1024} K at the end of the boot region, {how})")
+    if any(s.role == ROLE_STAGE1 for s in lay.slots):
+        rows.append("  (two-stage: stage 0 is the boot region; s1a and s1b hold the bootloader's stage 1, never an app)")
+    slots = [s for s in slots if s["role"] != ROLE_NAMES[ROLE_STAGE1]]        # apps link for the others only
     rows += ["", "Link your firmware for a slot at:",
              "  MimiBoot image (mbtool pack)   slot address + 0x1000   (vector table there)",
              f"  Zephyr / MCUboot image         slot address + 0x{mh:x}    "
@@ -459,7 +507,10 @@ def zephyr_overlay(cfg: Config, lay: Layout) -> str:
     parts = [("boot_partition", "mimiboot", lay.boot.offset, lay.boot.size)]
     names = {0: "slot0_partition", 1: "slot1_partition", 2: "slot2_partition"}
     for i, s in enumerate(lay.slots):
-        parts.append((names.get(i, f"slot{i}_partition"), f"image-{i}", s.offset, s.size))
+        if s.role == ROLE_STAGE1:       # the bootloader's own copies: named, so nothing else lands there
+            parts.append((f"mimiboot_{s.name}_partition", f"mimiboot-{s.name}", s.offset, s.size))
+        else:
+            parts.append((names.get(i, f"slot{i}_partition"), f"image-{i}", s.offset, s.size))
     lo = min(r.offset for r in lay.log + lay.cfg) if lay.log else 0
     hi = max(r.offset + r.size for r in lay.log + lay.cfg) if lay.log else 0
     body = "".join(

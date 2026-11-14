@@ -25,6 +25,17 @@ def parse_size(v) -> int:
     return n * {"": 1, "K": 1024, "M": 1 << 20}[unit]
 
 
+def parse_version_text(s: str) -> int:
+    """'1.2.3' -> MB_VERSION(1, 2, 3) (major/minor 0..255, patch 0..65535)"""
+    parts = s.strip().split(".")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"'{s}' is not x.y.z")
+    a, b, c = (int(p) for p in parts)
+    if a > 255 or b > 255 or c > 65535:
+        raise ValueError(f"'{s}': major and minor go to 255, patch to 65535")
+    return (a << 24) | (b << 16) | c
+
+
 def parse_sectors(spec: str) -> list[tuple[int, int]]:
     """'4x16K,1x64K' -> [(offset, size), ...]"""
     out, off = [], 0
@@ -400,6 +411,32 @@ class Config:
             if e("CONSOLE_AUTH") and not e("UNLOCK_KEYS"):
                 out.append(("warn", "console unlock uses the image signing keys: a separate UNLOCK_KEYS file keeps "
                                     "the image key off the bench"))
+            if e("TWO_STAGE"):
+                slots = {"single": 1, "ab": 2, "ab+golden": 3}.get(e("LAYOUT") or "ab", 2) + int(e("AUX_SLOTS") or 0)
+                if slots + 2 > 6:
+                    out.append(("error", "two-stage takes two slots for the stage-1 copies: at most 6 slots in all "
+                                         "(fewer AUX_SLOTS)"))
+                if not e("IMG_NATIVE"):
+                    out.append(("error", "two-stage needs MimiBoot images (IMG_NATIVE): the stage-1 copies are ones"))
+                if self.t.build == "mcu" and parse_size(self.t.get("flash")) < 192 * 1024:
+                    out.append(("error", "two-stage needs about 100 KB for stage 0 and two stage-1 copies before any "
+                                         "app slot: parts with 192 KB of flash or more"))
+                if e("REQUIRE_SIGNATURE") and not e("S1_KEYS"):
+                    out.append(("error", "two-stage with 'Refuse unsigned images' needs S1_KEYS (the keys stage 0 trusts)"))
+                for k in ("S1_KEYS", "STAGE1_SIGN_KEY"):
+                    if e(k):
+                        p = Path(str(e(k)))
+                        if not (p if p.is_absolute() else Path.cwd() / p).exists():
+                            out.append(("error", f"{k} file not found: {p}"))
+                if e("S1_KEYS") and not e("STAGE1_SIGN_KEY"):
+                    out.append(("warn", "stage-1 images are built unsigned (no STAGE1_SIGN_KEY): sign them with "
+                                        "mbtool sign --key before stage 0 will start them"))
+                if e("S1_KEYS") and e("KEYS") and Path(str(e("S1_KEYS"))).resolve() == Path(str(e("KEYS"))).resolve():
+                    out.append(("warn", "S1_KEYS is the KEYS file: an app signing key could then replace the bootloader"))
+                try:
+                    parse_version_text(str(e("STAGE1_VERSION")))
+                except ValueError as ex:
+                    out.append(("error", f"STAGE1_VERSION: {ex}"))
             if e("LAYOUT") == "single" and e("AB_TRIAL"):
                 out.append(("warn", "one slot + 'Updates must confirm': an app that never confirms stops booting after "
                                     f"{e('TRIES')} tries (nothing to roll back to)"))

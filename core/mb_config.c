@@ -259,6 +259,10 @@ static int parse_legacy(const mb_port_t *p, const char *text, size_t len, mb_con
                 note(line, "no such slot", err, errcap, &c->errors);
                 continue;
             }
+            if (sl != MB_SLOT_AB && mb_slot_role(p, sl) == MB_ROLE_STAGE1) {
+                note(line, "a stage-1 slot holds the bootloader, not an image to boot", err, errcap, &c->errors);
+                continue;
+            }
             cur->slot = (uint8_t)sl;
             cur_ok = true;
         } else if (word_is(w, wl, "topology")) {

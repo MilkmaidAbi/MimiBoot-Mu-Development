@@ -92,6 +92,43 @@ static int hash_flash(const mb_port_t* p, uint32_t off, uint32_t len, uint8_t ou
     return MB_OK;
 }
 
+volatile uint8_t mb_checking_slot = MB_SLOT_NONE;
+
+// Two-stage builds: what may go into (and start from) a slot. A stage-1 slot
+// takes only a stage 1 for this target, linked for that very slot; every other
+// slot refuses a stage 1 (the flag is in the signed bytes, so it can't be
+// stripped). Stage 0 and uploads both ask this; "not the copy that is
+// running" is the upload's own rule (mb_sink_slot_begin).
+int mb_stage1_accepts(const mb_port_t* p, int slot, const mb_image_hdr_t* h) {
+    if (slot < 0 || slot >= p->layout->n_slots) return MB_E_BADARG;
+    bool s1 = (h->flags & MB_IMG_F_STAGE1) != 0;
+    if (mb_slot_role(p, slot) != MB_ROLE_STAGE1) return s1 ? MB_E_REFUSED : MB_OK;
+    if (!s1 || h->load_type != MB_LOAD_CHAIN) return MB_E_REFUSED;
+    if (strncmp(h->target, p->target, sizeof(h->target))) return MB_E_UNSUPP;
+    if (h->entry != p->layout->slot[slot].offset + h->payload_offset) return MB_E_REFUSED;   // linked for the other copy
+    return MB_OK;
+}
+
+// The header's `entry` is only a claim: the payload's own reset vector must
+// point into it where it says it is linked. A build for the other copy (or
+// anything else) fails here, before stage 0 jumps into it.
+int mb_stage1_vectors_ok(const mb_port_t* p, int slot, const mb_image_hdr_t* h) {
+    uint32_t v[2];
+    if (h->payload_size < 8 || p->flash_read(p->layout->slot[slot].offset + h->payload_offset, v, sizeof(v)) != MB_OK)
+        return MB_E_IO;
+    uint32_t lo = p->flash_base + h->entry, pc = v[1] & ~1u;
+    return pc >= lo && pc - lo < h->payload_size ? MB_OK : MB_E_REFUSED;
+}
+
+// A stage 1's signature, against the stage-1 keys only: a leaked app key must
+// not be enough to replace the bootloader.
+int mb_stage1_check_sig(const mb_port_t* p, mb_slot_info_t* info) {
+    mb_port_t q = *p;
+    q.keys = p->stage1_keys;
+    q.p256_keys = p->stage1_p256_keys;
+    return mb_image_check_sig(&q, info);
+}
+
 uint32_t mb_ct_diff(const void* a, const void* b, size_t n) {
     const volatile uint8_t* x = a;
     const volatile uint8_t* y = b;

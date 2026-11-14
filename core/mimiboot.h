@@ -86,6 +86,22 @@ int  mb_image_check_header(const mb_port_t* p, const mb_image_hdr_t* h, uint32_t
 /* ---- protected rollback floors (core/mb_floor.c) -------------------------------- */
 int mb_floor_get(const mb_port_t* p, uint32_t out[MB_FLOOR_COUNT]);     /* zeros (+MB_E_UNSUPP) without a store */
 int mb_floor_raise(const mb_port_t* p, int which, uint32_t value);      /* never lowers; MB_E_NOSPACE when full */
+int mb_store_count(const mb_port_t* p, int tag, uint32_t value);        /* entries with this tag and value */
+int mb_store_append(const mb_port_t* p, int tag, uint32_t value);       /* one more entry (MB_STORE_S1_ATTEMPT) */
+
+/* ---- two-stage builds (core/mb_stage0.c) ----------------------------------------
+ * Stage 0 picks the stage 1 to run; stage 1 confirms itself once it works. */
+#define MB_STAGE1_TRIES 3       /* boots of an unconfirmed stage 1 before it is passed over */
+typedef struct {
+    int slot;                   /* the stage-1 slot to start, or -1: none usable */
+    bool trial;                 /* not confirmed yet: arm the watchdog, an attempt was recorded */
+    mb_slot_info_t info;        /* its header and check results */
+} mb_stage0_choice_t;
+int  mb_stage0_choose(const mb_port_t* p, mb_stage0_choice_t* out);
+int  mb_stage1_confirm(const mb_port_t* p);                             /* stage 1: "I work" (idempotent) */
+int  mb_stage1_accepts(const mb_port_t* p, int slot, const mb_image_hdr_t* h);   /* slot role vs MB_IMG_F_STAGE1 */
+int  mb_stage1_check_sig(const mb_port_t* p, mb_slot_info_t* info);     /* against the stage-1 keys only */
+int  mb_stage1_vectors_ok(const mb_port_t* p, int slot, const mb_image_hdr_t* h);  /* reset vector inside, as linked */
 
 /* The slot whose image is being checked right now (MB_SLOT_NONE otherwise):
  * a port's fault handler records it so the next boot can mark it bad. */

@@ -94,6 +94,9 @@
 #ifndef MB_FEAT_BOOT_LOCK
 #define MB_FEAT_BOOT_LOCK       0   /* write-protect the bootloader region until reset before starting an image */
 #endif
+#ifndef MB_FEAT_TWO_STAGE
+#define MB_FEAT_TWO_STAGE       0   /* fixed stage 0 + two updatable stage-1 copies (core/mb_stage0.c) */
+#endif
 #ifndef MB_FEAT_LOCK_GOLDEN
 #define MB_FEAT_LOCK_GOLDEN     0   /* with BOOT_LOCK: the golden slot is locked as well */
 #endif
@@ -163,6 +166,9 @@
 #endif
 #if MB_MENU_SECS < 1 || MB_MENU_SECS > 600
 #error "MB_MENU_SECS must be 1..600"
+#endif
+#if MB_FEAT_TWO_STAGE && !MB_FEAT_IMG_NATIVE
+#error "MB_FEAT_TWO_STAGE needs MB_FEAT_IMG_NATIVE: stage-1 copies are MimiBoot images"
 #endif
 #if MB_FEAT_CFG_SIGNED && (!MB_FEAT_CFG_FILE || !MB_FEAT_SIGNATURES)
 #error "MB_FEAT_CFG_SIGNED needs MB_FEAT_CFG_FILE and MB_FEAT_SIGNATURES"
