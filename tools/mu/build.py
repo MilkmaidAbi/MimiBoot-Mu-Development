@@ -128,6 +128,7 @@ def _sizes(gcc: str, elf: Path) -> dict:
 # bare-metal Cortex-M: STM32, nRF, SAMD
 # ---------------------------------------------------------------------------
 def build_mcu(cfg: Config, out: Path, log=print) -> dict:
+    cfg.store_one_unit = False      # set below when two store units don't fit beside the code
     gcc = arm_gcc()
     if not gcc:
         raise BuildError("arm-none-eabi-gcc not found: install the Arm GNU Toolchain or set MU_ARM_GCC")
@@ -194,6 +195,15 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
         floor = gen.floor_region(cfg, lay)[1]
     lay = gen.mcu_layout(cfg, boot_bytes=need_flash + floor if auto else None)
     room = gen.code_room(cfg, lay)
+    if need_flash > room and gen.floor_unit(cfg, lay):
+        # a fixed region with no room for a second store unit: one unit, append-only, as before
+        cfg.store_one_unit = True
+        if need_flash <= gen.code_room(cfg, lay):
+            room = gen.code_room(cfg, lay)
+            lay.notes.append("the protected store is one erase unit (append-only, it fills up): two, which compact, "
+                             "don't fit beside this much code; a larger BOOT_SIZE gives it room")
+        else:
+            cfg.store_one_unit = False
     if need_flash > room:
         extra = f" (the last {lay.boot.size - room} bytes of it hold the rollback floors)" if room < lay.boot.size else ""
         raise BuildError(f"the bootloader is {need_flash} bytes but its region has room for {room}{extra}: "

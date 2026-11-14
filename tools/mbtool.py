@@ -795,12 +795,12 @@ def cmd_loader(a):
 def revoke_on(s, secret, target, key_id):
     """At the prompt: 'revoke <id>', then the statement. -> the board's answer line"""
     s.write(("revoke %08x\r" % key_id).encode())
-    out, m = read_until(s, r"MB REVOKE [0-9a-f]{8} statement\?|MB ERR[^\r\n]*", 5)
+    out, m = read_until(s, r"MB REVOKE [0-9a-f]{8} statement\?|MB ERR[^\r\n]*\r?\n", 5)
     if not m or m.group(0).startswith("MB ERR"):
         die("the board won't take a revocation: " + ANSI.sub("", out)[-300:])
     s.write(revoke_signature(secret, target, key_id).hex().encode() + b"\r")
-    out, m = read_until(s, r"MB (REVOKED|ERR[^\r\n]*)", 10)
-    return m.group(0) if m else "no answer: " + ANSI.sub("", out)[-200:]
+    out, m = read_until(s, r"MB (REVOKED|ERR[^\r\n]*)\r?\n", 10)    # the whole line, not what came so far
+    return m.group(0).rstrip() if m else "no answer: " + ANSI.sub("", out)[-200:]
 
 
 def cmd_revoke(a):

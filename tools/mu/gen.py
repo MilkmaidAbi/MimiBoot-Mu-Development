@@ -331,14 +331,14 @@ def floor_region(cfg: Config, lay: Layout) -> tuple[int, int] | None:
     bootloader region, which the bootloader's code must leave free"""
     if not cfg.effective("PROTECTED_FLOOR") and not cfg.effective("TWO_STAGE"):
         return None
-    off, size, unit = _floor(lay)
+    off, size, unit = _floor(lay, getattr(cfg, "store_one_unit", False))
     return off, size
 
 
 FLOOR_TWO_UNITS_MAX = 8 * 1024     # erase units up to this size: two of them, compacted (core/mb_floor.c)
 
 
-def _floor(lay: Layout) -> tuple[int, int, int]:
+def _floor(lay: Layout, one_unit: bool = False) -> tuple[int, int, int]:
     """(offset, size, unit): the last two erase units of the bootloader region when
     they are small and alike (a full one is compacted into the other), else the last
     one alone (unit 0: append-only; a big sector holds thousands of entries)"""
@@ -347,13 +347,13 @@ def _floor(lay: Layout) -> tuple[int, int, int]:
     if last is None:
         raise ValueError("bootloader region doesn't end on a sector boundary")
     prev = next(((o, s) for o, s in lay.sectors if o + s == last[0]), None)
-    if last[1] <= FLOOR_TWO_UNITS_MAX and prev and prev[1] == last[1] and prev[0] >= lay.boot.offset:
+    if not one_unit and last[1] <= FLOOR_TWO_UNITS_MAX and prev and prev[1] == last[1] and prev[0] >= lay.boot.offset:
         return prev[0], 2 * last[1], last[1]
     return last[0], last[1], 0
 
 
 def floor_unit(cfg: Config, lay: Layout) -> int:
-    return _floor(lay)[2] if floor_region(cfg, lay) else 0
+    return _floor(lay, getattr(cfg, "store_one_unit", False))[2] if floor_region(cfg, lay) else 0
 
 
 def code_room(cfg: Config, lay: Layout) -> int:
