@@ -267,7 +267,23 @@ class TuiState:
                 unmeasured.append(o.id)
                 continue
             used += a - b
-        return {"used": int(used), "region": base["region"], "exact": False, "unmeasured": unmeasured}
+        return {"used": int(used), "region": self._region(base["region"]), "exact": False, "unmeasured": unmeasured}
+
+    def _region(self, default: int) -> int | None:
+        """the room the bootloader has as configured now (BOOT_SIZE moves it; two-stage: a stage-1
+        copy, None when that is sized to fit)"""
+        cfg = self.cfg
+        if cfg.t.build != "mcu":
+            return default
+        from . import gen
+        from .model import parse_size
+        try:
+            if cfg.effective("TWO_STAGE"):
+                s1 = str(cfg.effective("STAGE1_SIZE") or "auto").strip().lower()
+                return None if s1 in ("auto", "") else parse_size(s1.upper()) - gen.NATIVE_HDR
+            return gen.code_room(cfg, gen.mcu_layout(cfg))
+        except Exception:           # noqa: BLE001 - a layout that doesn't work is in the problems list
+            return default
 
     def changes(self) -> list[str]:
         """options set differently from the board's defaults (what you did)"""
@@ -384,8 +400,7 @@ class TuiState:
             if it.key == "build":
                 est = self.estimate()
                 if est:
-                    out += [("text", ""), ("label", f"flash: {'' if est['exact'] else '~'}{_kb(est['used'])} of "
-                                                    f"{_kb(est['region'])}{'' if est['exact'] else ' (estimate)'}")]
+                    out += [("text", ""), ("label", "flash: " + gauge_text(est, 0)[0].split("flash ", 1)[1].strip())]
             return out
         if v.kind == "text":
             return []
@@ -625,7 +640,8 @@ class TuiState:
             parts.append("also on: " + ", ".join(SHORT.get(k, k) for k in moved_on))
         est = self.estimate()
         if est:
-            parts.append(f"flash {'' if est['exact'] else '~'}{_kb(est['used'])} of {_kb(est['region'])}")
+            parts.append(f"flash {'' if est['exact'] else '~'}{_kb(est['used'])}"
+                         + (f" of {_kb(est['region'])}" if est["region"] else ""))
         self.message = "  ·  ".join(parts)
 
     def activate(self, oid: str, space=False):
@@ -771,7 +787,9 @@ def gauge_text(est: dict | None, width: int = 24) -> tuple[str, str]:
     if not est:
         return "flash: build once to see what it takes", "dim"
     used, region = est["used"], est["region"]
-    pct = 100 * used / region if region else 0
+    if not region:
+        return f"flash ~{_kb(used)} for stage 1 (two-stage: each stage-1 copy is sized to fit it)", "good"
+    pct = 100 * used / region
     style = "bad" if pct > 100 else "warn" if pct > 94 else "good"
     sure = "" if est["exact"] else "~"
     text = f"flash {bar(used, region, width)} {sure}{_kb(used)} of {_kb(region)}"

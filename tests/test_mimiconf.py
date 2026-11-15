@@ -280,9 +280,18 @@ def main():
         st3.cfg.set("SMP", True)
         e1 = st3.estimate()
         check(e0["used"] == 30000 and e1["used"] == 34000 and not e1["exact"], f"estimate follows a change ({e0} {e1})")
+        from mu.tui import gauge_text
+        st3.cfg.set("BOOT_SIZE", "64K")
+        check(st3.estimate()["region"] > 49152, f"a bigger BOOT_SIZE: the gauge's limit follows ({st3.estimate()['region']})")
+        st3.cfg.set("BOOT_SIZE", "chip")
+        st3.cfg.set("TWO_STAGE", True)
+        check(st3.estimate()["region"] is None and "sized to fit" in gauge_text(st3.estimate())[0],
+              "two-stage, stage-1 copies sized automatically: no fixed limit to show")
+        st3.cfg.set("STAGE1_SIZE", "96K")
+        check(st3.estimate()["region"] == 96 * 1024 - 4096, "two-stage with a set copy size: that is the limit")
+        st3.cfg.set("TWO_STAGE", False)
         st3.last_info = ("nucleo-f411re", dict(st3.cfg.values), {"flash_used": 33950, "flash_region": 49152})
         check(st3.estimate()["exact"] and st3.estimate()["used"] == 33950, "a build of this configuration: the real size")
-        from mu.tui import gauge_text
         check("~" in gauge_text(e1)[0] and "estimate" in gauge_text(e1)[0], "an estimate says so")
         near = dict(e1, used=48000)
         check("build to check" in gauge_text(near)[0] and gauge_text(near)[1] == "warn", "close to the limit: build to check")
