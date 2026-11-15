@@ -2620,6 +2620,18 @@ static void test_os_hooks(void) {
     ctl_out[0] = 0;
     strcpy(line, "frobnicate");
     CHECK(mb_ctl_line(line, ctl_print, NULL) == MB_E_BADARG && strstr(ctl_out, "unknown command"), "an unknown command: help");
+    printf("OS hooks: the built-in recovery entry with args (golden only, as a fresh board)\n");
+    {
+        sim_reset();
+        put_v2(MB_SLOT_GOLDEN, "g-only", MB_VERSION(1, 0, 0), 58, MB_HANDOFF_V2_SIZE);
+        CHECK(boot() == MB_SLOT_GOLDEN, "golden boots");
+        app_start(MB_SLOT_GOLDEN);
+        CHECK(mb_client_next(MB_CONTROL_ENTRY, "recovery", "hop=2", MB_VIA_AUTO) == MB_VIA_MAILBOX, "queued in RAM");
+        reboot_t rr = { MB_END_UPDATE, "hop" };
+        app_reset(reboot_fn, &rr);
+        CHECK(boot() == MB_SLOT_GOLDEN && !strcmp(ho->args, "hop=2") && ho->prev.reason == MB_END_UPDATE,
+              "golden again, with the args (args [%s])", ho->args);
+    }
 }
 #endif
 

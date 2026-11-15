@@ -8,6 +8,7 @@
 #define R(a) (*(volatile uint32_t*)(uintptr_t)(a))
 extern const mb_port_t mb_mcu_port;
 __attribute__((section(".noinit.mb_handoff"), used, aligned(8))) volatile mb_handoff_t mb_handoff;
+__attribute__((section(".noinit.runs"), used)) volatile uint32_t runs[2];     /* survives a reset if RAM does */
 extern uint32_t _estack;
 void reset(void);
 static void spin(void) { for (;;) {} }
@@ -32,6 +33,8 @@ void reset(void) {
     while (d < &_edata) *d++ = *s++;
     for (d = &_sbss; d < &_ebss;) *d++ = 0;
     R(UART + 0x0C) = (1u << 13) | (1u << 3) | (1u << 2);
+    if (runs[0] != 0x52554E53u) { runs[0] = 0x52554E53u; runs[1] = 0; }
+    runs[1]++;
     mb_client_init(&mb_mcu_port);
     mb_client_set_handoff(&mb_handoff);
     mb_client_status_t st;
@@ -47,11 +50,13 @@ void reset(void) {
     puts_(" args=[");
     puts_(mb_client_args());
     puts_("]\r\nMU-CLIENT-DONE\r\n");
-    // OS hooks: the first run asks for a restart with new args and says why, through the
+    // OS hooks: the first run asks for the recovery entry (itself) with new args and says why, through the
     // RAM mailbox (a real reset in the emulator); the second run reads it back
     mb_end_t e;
     if (mb_client_last_end(&e) == MB_OK) {
-        puts_("MU-HOOK prev=");
+        puts_("MU-HOOK run=");
+        dec((int)runs[1]);
+        puts_(" prev=");
         dec(e.reason);
         puts_(" msg=[");
         puts_(e.msg);
@@ -59,7 +64,7 @@ void reset(void) {
         dec(mb_client_transport());
         puts_("\r\n");
         if (e.reason != MB_END_UPDATE) {
-            int rc = mb_client_next(MB_CONTROL_RESTART, 0, "hop=2", MB_VIA_AUTO);
+            int rc = mb_client_next(MB_CONTROL_ENTRY, "recovery", "hop=2", MB_VIA_AUTO);
             puts_("MU-HOOK next=");
             dec(rc);
             puts_("\r\n");

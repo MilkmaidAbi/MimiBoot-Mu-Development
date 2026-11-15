@@ -1179,9 +1179,9 @@ def main():
         # OS hooks: the app asks (through the RAM mailbox) for a restart with new args and says why;
         # after a real reset the bootloader hands both to the next run, with no flash write
         check(f"{board}: OS hooks: a v2 handoff; the app's request and reason go through RAM",
-              "MU-HOOK prev=1 msg=[] via=2" in o and "MU-HOOK next=2" in o, o[-1500:])
+              "prev=1 msg=[] via=2" in o and "MU-HOOK next=2" in o, o[-1500:])
         check(f"{board}: OS hooks: ... and after the reset the next run gets them (args hop=2, 'qemu-hop')",
-              "args=[hop=2]" in o and "MU-HOOK prev=3 msg=[qemu-hop]" in o, o[-1500:])
+              "args=[hop=2]" in o and "prev=3 msg=[qemu-hop]" in o, o[-1500:])
 
         # 6b. ECDSA P-256 (micro-ecc, as Thumb-2 code): a mbtool P-256 image with signatures
         #     required boots; one signed by a stranger's P-256 key doesn't
