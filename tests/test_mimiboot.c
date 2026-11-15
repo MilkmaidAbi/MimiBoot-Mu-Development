@@ -2123,7 +2123,7 @@ static void test_smp(void) {
 static void test_smp(void) {}
 #endif
 
-#include "tests/test_night.inc"
+#include "tests/test_control.inc"
 
 
 // ---------------------------------------------------------------------------
@@ -2702,7 +2702,7 @@ int main(int argc, char** argv) {
 #if MB_FEAT_LMS
     test_lms_images();
 #endif
-    test_night();
+    test_control_ext();
     printf("\n%d checks, %d failed\n", checks + crypto_checks, fails + crypto_fails);
     return fails + crypto_fails ? 1 : 0;
 }

@@ -1,6 +1,6 @@
 """What each feature costs in flash: build a reference board with its defaults,
 then once with each on/off option flipped (choices: each value), and record
-the difference. `python mimiconf.py sizes` regenerates config/feature-sizes.json;
+the difference. `python muconfigurator.py sizes` regenerates config/feature-sizes.json;
 the TUI shows the numbers next to the options."""
 from __future__ import annotations
 

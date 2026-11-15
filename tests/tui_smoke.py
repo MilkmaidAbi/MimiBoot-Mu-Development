@@ -20,7 +20,7 @@ def session(cols: int) -> dict:
     if pid == 0:
         os.environ.update(TERM="xterm-256color", LINES="40", COLUMNS=str(cols), LANG="C.UTF-8")
         os.chdir(ROOT)
-        os.execvp(sys.executable, [sys.executable, "mimiconf.py", "-c", str(cfg)])
+        os.execvp(sys.executable, [sys.executable, "muconfigurator.py", "-c", str(cfg)])
     screen = b""
 
     def pump(t=0.6):

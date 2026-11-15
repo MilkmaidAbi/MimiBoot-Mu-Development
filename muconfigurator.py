@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """MimiBoot-Mu configurator and builder - like the kernel's menuconfig, for a bootloader.
 
-  python mimiconf.py                      menuconfig (TUI) on ./.config
-  python mimiconf.py boards               every board, by maker and category, with test status
-  python mimiconf.py defconfig uno        start a .config for a board
-  python mimiconf.py set VERIFY=none LED=n
-  python mimiconf.py show                 the effective configuration + warnings
-  python mimiconf.py layout               flash layout (bare-metal MCUs) without building
-  python mimiconf.py build                build into OUTPUT_DIR/<board>/ (default ~/MimiBoot/<board>)
-  python mimiconf.py preset [minimal|hobby|product|secure]   start from a preset (no name: list them)
-  python mimiconf.py toolchains           what was found where
-  python mimiconf.py sizes                re-measure what each feature costs (for the TUI)
-  python mimiconf.py docs                 regenerate docs/OPTIONS.md
+  python muconfigurator.py                      menuconfig (TUI) on ./.config
+  python muconfigurator.py boards               every board, by maker and category, with test status
+  python muconfigurator.py defconfig uno        start a .config for a board
+  python muconfigurator.py set VERIFY=none LED=n
+  python muconfigurator.py show                 the effective configuration + warnings
+  python muconfigurator.py layout               flash layout (bare-metal MCUs) without building
+  python muconfigurator.py build                build into OUTPUT_DIR/<board>/ (default ~/MimiBoot/<board>)
+  python muconfigurator.py preset [minimal|hobby|product|secure]   start from a preset (no name: list them)
+  python muconfigurator.py toolchains           what was found where
+  python muconfigurator.py sizes                re-measure what each feature costs (for the TUI)
+  python muconfigurator.py docs                 regenerate docs/OPTIONS.md
 
 Options are the ids from config/features.toml (`show` lists them).
 """
@@ -28,7 +28,7 @@ from mu.model import Config, Db  # noqa: E402
 def load(a, db):
     p = Path(a.config)
     if not p.exists():
-        raise SystemExit(f"no {p}: start one with `python mimiconf.py defconfig <board>` (see `boards`)")
+        raise SystemExit(f"no {p}: start one with `python muconfigurator.py defconfig <board>` (see `boards`)")
     return Config.load(db, p)
 
 

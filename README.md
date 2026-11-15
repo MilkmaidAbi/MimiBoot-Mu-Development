@@ -6,7 +6,7 @@ MimiBoot-Mu is a bootloader for microcontrollers, from small to big bois: RP2040
 Nordic nRF51/nRF52, Microchip SAM D21/D51, and classic AVRs like the ATmega328P on
 an Arduino Uno.
 
-You configure it the way you'd configure a Linux kernel. `python mimiconf.py` opens a
+You configure it the way you'd configure a Linux kernel. `python muconfigurator.py` opens a
 menu, you pick your board and switch features on or off, and the build only contains
 what you picked. Change your mind later, rerun it, rebuild.
 
@@ -112,11 +112,11 @@ test the NRF/ SAM D stuff - the code has been audited but just take caution...)
 
 Need Python 3.11+ and the toolchain for your chip: the Arm GNU Toolchain for STM32,
 nRF and SAMD, avr-gcc (the one the Arduino IDE installs is fine), or the Pico SDK for
-RP boards. `python mimiconf.py toolchains` shows what it found.
+RP boards. `python muconfigurator.py toolchains` shows what it found.
 
 ```
-python mimiconf.py              # pick a board, change options, build
-python mimiconf.py build        # build the current .config
+python muconfigurator.py              # pick a board, change options, build
+python muconfigurator.py build        # build the current .config
 ```
 
 The menu's home screen says what the configuration does, area by area, lists what you
@@ -129,10 +129,10 @@ an option back to its default, `/` finds options (or boards) as you type.
 Or without the menu (just use the menu, it's easier):
 
 ```
-python mimiconf.py defconfig nucleo-f411re
-python mimiconf.py preset hobby          # minimal / hobby / product / secure
-python mimiconf.py set IMG_MCUBOOT=y BOOT_VERIFY=once
-python mimiconf.py build
+python muconfigurator.py defconfig nucleo-f411re
+python muconfigurator.py preset hobby          # minimal / hobby / product / secure
+python muconfigurator.py set IMG_MCUBOOT=y BOOT_VERIFY=once
+python muconfigurator.py build
 ```
 
 Builds land in `~/MimiBoot/<board>/` unless you set another folder. Along with the
@@ -148,7 +148,7 @@ command line.
 ```
 python tests/run.py                       # core logic on the host
 python tests/test_profiles.py             # the core with features switched off
-python tests/test_mimiconf.py --build-all # configurator, every board compiles
+python tests/test_muconfigurator.py --build-all # configurator, every board compiles
 python tests/qemu/test_qemu.py            # STM32 and nRF51 in QEMU
 python tests/test_sim_flash.py            # SAM D flash driver against a model
 python tests/avr/test_avr.py              # AVR in simavr with avrdude (Linux/WSL)
@@ -157,7 +157,7 @@ python tests/avr/test_avr.py              # AVR in simavr with avrdude (Linux/WS
 ## Source layout - For roguh ref
 
 ```
-mimiconf.py         configurator and builder
+muconfigurator.py         configurator and builder
 config/             features.toml (the options), targets.toml (chips and boards)
 tools/mu/           the configurator's code
 tools/mbtool.py     pack, sign and upload images

@@ -10,7 +10,7 @@ from this repository, so they can't drift from it:
   security.md         docs/SECURITY.md
   os-integration.md   docs/OS-INTEGRATION.md
 
-    python mimiconf.py site <docs site checkout>
+    python muconfigurator.py site <docs site checkout>
 
 How far each feature has been tested comes from EVIDENCE below, which follows
 docs/HARDWARE-STATUS.md: change one, change the other.
@@ -117,7 +117,7 @@ def _level(board: str, cfg: Config, oid: str) -> str | None:
         return "hardware"
     if oid in EMULATOR.get(board, ()):
         return "emulator"
-    if oid in HOST and cfg.t.core == "night":
+    if oid in HOST and cfg.t.core == "komorebi":
         return "host"
     return "built"
 
@@ -309,7 +309,7 @@ facts are on <a href="boards.html">Boards</a> and <a href="status.html">Test sta
         h += "<details class=\\"mx-board\\" id=\\"" + esc(bid) + "\\"" + (open[bid] || bSel.value ? " open" : "") + "><summary><strong>" + esc(b.name) +
              "</strong> " + esc(b.title) + " " + badge(b.status) + (b.status_note ? " <span class=\\"mx-count\\">(" + esc(b.status_note) + ")</span>" : "") + " <span class=\\"mx-count\\">" + hw + " of " + all + " features on hardware</span></summary>";
         h += "<div class=\\"mx-facts\\"><div><b>chip</b> " + esc(b.chip) + (b.cpu ? " (" + esc(b.cpu) + ")" : "") + "</div><div><b>memory</b> " + esc(b.memory) +
-             "</div><div><b>console</b> " + esc(b.console) + "</div><div><b>core</b> " + esc(b.core === "night" ? "full" : "Lite") +
+             "</div><div><b>console</b> " + esc(b.console) + "</div><div><b>core</b> " + esc(b.core === "komorebi" ? "full" : "Lite") +
              "</div><div><b>flash writes</b> " + badge(b.flash_writes) + "</div></div>";
         if (b.never_ran) h += "<p class=\\"" + (b.family === "stm32" ? "warn-box" : "mx-never") + "\\">" + esc(b.never_ran) +
              (b.family === "stm32" ? " Keep an ST-Link on SWD while you try it." : "") + "</p>";
@@ -389,8 +389,8 @@ def boards_page(db: Db) -> str:
 def options_page(db: Db) -> str:
     from . import docs
     body = docs.render(db).split("\n", 1)[1]
-    body = body.replace("Generated from `config/features.toml` by `python mimiconf.py docs`; don't edit by hand.",
-                        "Generated from `config/features.toml` in the MimiBoot-Mu repository (`python mimiconf.py site`).")
+    body = body.replace("Generated from `config/features.toml` by `python muconfigurator.py docs`; don't edit by hand.",
+                        "Generated from `config/features.toml` in the MimiBoot-Mu repository (`python muconfigurator.py site`).")
     return "---\ntitle: Option reference\n---\n\n# Option reference\n" + body
 
 

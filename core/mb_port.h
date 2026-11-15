@@ -167,7 +167,7 @@ typedef struct mb_port {
      * Reading it clears it. The core marks that slot bad. */
     int (*fault_slot)(void);
 
-    /* Optional Night services; runtime capability checks include silicon policy. */
+    /* Optional Komorebi services; runtime capability checks include silicon policy. */
     uint32_t (*capabilities)(void);
     int (*prepare_topology)(mb_topology_t profile);
 

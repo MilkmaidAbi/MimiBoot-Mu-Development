@@ -1,9 +1,9 @@
 /*
- * MimiBoot-Mu - compile-time feature switches for the Night core
+ * MimiBoot-Mu - compile-time feature switches for the Komorebi core
  *
- * mimiconf.py writes a config header (mb_config.h) and passes it with
- * -DMB_CONFIG_HEADER="path". Every switch defaults to what MimiBoot-Night
- * 2.0.0 always had, so a build without a config header is the old full build.
+ * muconfigurator.py writes a config header (mb_config.h) and passes it with
+ * -DMB_CONFIG_HEADER="path". Every switch defaults to on, so a build without
+ * a config header is the full build.
  *
  * Each optional module stays declared in mimiboot.h. When it is switched off
  * its file compiles to small stubs that return MB_E_UNSUPP, so callers don't

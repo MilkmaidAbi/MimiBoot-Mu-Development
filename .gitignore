@@ -5,7 +5,7 @@ keys/*.key
 *.mimg.bin
 
 release/
-build-night*/
+build-mu*/
 __pycache__/
 build-console.log
 .config

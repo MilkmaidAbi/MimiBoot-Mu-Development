@@ -645,7 +645,7 @@ def cmd_keygen(a):
         print("secret %s.key  STATEFUL: it counts the signatures it has made. Never copy it, restore it from a\n"
               "                 backup or sign from two machines with it: each of those reuses one-time keys.\n"
               "public %s.pub  key id %08x, %s, %d signatures, %d-byte signature\n"
-              "build  %s_keys.h (or put the .pub line in mimiconf's KEYS file; turn on LMS)"
+              "build  %s_keys.h (or put the .pub line in MuConfigurator's KEYS file; turn on LMS)"
               % (base, base, k.key_id, lms.describe(pub), leaves, lms.sig_len(k.lt, k.ot), base))
         return
     if a.type == "x25519":
@@ -656,7 +656,7 @@ def cmd_keygen(a):
         lines = open(gi).read().split() if os.path.exists(gi) else []
         if "*.key" not in lines:
             open(gi, "a").write("*.key\n")
-        print("device %s.key: the bootloader's decryption key (mimiconf ENC_KEY; keep it private)\n"
+        print("device %s.key: the bootloader's decryption key (MuConfigurator ENC_KEY; keep it private)\n"
               "public %s.pub: encrypt with `mbtool pack --encrypt %s.pub`" % (base, base, base))
         return
     if a.type == "p256":
@@ -996,7 +996,7 @@ def who(s):
     s.reset_input_buffer()
     s.write(b"\x15")
     # prompts are coloured: match on the text with the ANSI codes taken out
-    out, _ = read_until(s, r"fox(?:\x1b\[[0-9;]*m)*@|MimiBoot(?:-Night)? \d|MB FLASH READY", 1.5)
+    out, _ = read_until(s, r"fox(?:\x1b\[[0-9;]*m)*@|MimiBoot(?:-\w+)? \d|MB FLASH READY", 1.5)
     text = ANSI.sub("", out)
     if "fox@" in text:
         return "os"
@@ -1112,10 +1112,10 @@ def main():
     p.add_argument("--key", help="sign with this secret key file"); p.add_argument("--arch", choices=["arm", "riscv"],
                                                                                     help="refuse to pack anything else")
     p.add_argument("--load-addr", help=".bin only: where it runs (default flash)")
-    p.add_argument("--stage1", action="store_true", help="a two-stage build's stage 1 (mimiconf builds these itself)")
+    p.add_argument("--stage1", action="store_true", help="a two-stage build's stage 1 (MuConfigurator builds these itself)")
     p.add_argument("--encrypt", metavar="PUB", help="encrypt the payload for the board whose key is PUB (mbtool keygen --type x25519)")
     p.add_argument("--encrypt-keylen", type=int, choices=[128, 256], default=128, help="AES key size (default 128)")
-    p.add_argument("--target", default=TARGET, help="target as the bootloader names it: rp2040, rp2350, or the chip from mimiconf (e.g. stm32f411ce); RP2040 requires a RAM-linked payload"); p.set_defaults(fn=cmd_pack)
+    p.add_argument("--target", default=TARGET, help="target as the bootloader names it: rp2040, rp2350, or the chip from MuConfigurator (e.g. stm32f411ce); RP2040 requires a RAM-linked payload"); p.set_defaults(fn=cmd_pack)
     p = sub.add_parser("info"); p.add_argument("image"); p.add_argument("--pub")
     p.add_argument("--enc-key", help="an encrypted image: decrypt with this device key and check the payload")
     p.set_defaults(fn=cmd_info)
@@ -1155,12 +1155,12 @@ def main():
     p.add_argument("--target", required=True, help="the chip as the board names it (e.g. nrf52840)")
     p.add_argument("--print", action="store_true", help="only print the statement (to send later, or by hand)")
     p.add_argument("--port"); p.set_defaults(fn=cmd_revoke)
-    p = sub.add_parser("loader", help="two-stage boards: update the bootloader (stage 1) from a mimiconf build")
+    p = sub.add_parser("loader", help="two-stage boards: update the bootloader (stage 1) from a MuConfigurator build")
     p.add_argument("build_dir", help="the build directory (stage1-s1a.img, stage1-s1b.img, layout.json)")
     p.add_argument("--port"); p.add_argument("--reboot", action="store_true", help="reboot into it straight away")
     p.set_defaults(fn=cmd_loader)
     p = sub.add_parser("provision", help="print the steps to lock a board for production (runs nothing)")
-    p.add_argument("build_dir", help="a mimiconf build directory (has build-info.json)"); p.set_defaults(fn=cmd_provision)
+    p.add_argument("build_dir", help="a MuConfigurator build directory (has build-info.json)"); p.set_defaults(fn=cmd_provision)
     a = ap.parse_args()
     if a.unlock_key:
         global UNLOCK_KEY

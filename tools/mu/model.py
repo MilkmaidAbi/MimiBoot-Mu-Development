@@ -1,6 +1,6 @@
 """MimiBoot-Mu configuration model: targets, options, dependencies, .config files.
 
-No UI here: the TUI (tui.py) and the CLI (mimiconf.py) both drive this.
+No UI here: the TUI (tui.py) and the CLI (muconfigurator.py) both drive this.
 """
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ class Option:
     title: str
     menu: str
     macro: str = ""
-    cores: list = field(default_factory=lambda: ["night", "lite"])
+    cores: list = field(default_factory=lambda: ["komorebi", "lite"])
     builds: list | None = None
     vendors: list | None = None
     default_for: dict = field(default_factory=dict)
@@ -108,7 +108,7 @@ class Preset:
     id: str
     title: str
     help: str = ""
-    cores: list = field(default_factory=lambda: ["night", "lite"])
+    cores: list = field(default_factory=lambda: ["komorebi", "lite"])
     values: dict = field(default_factory=dict)
 
 
@@ -146,7 +146,7 @@ class Target:
         if self.get("flash"):
             ram = self.get("ram")
             rows.append(("memory", f"{self.board.get('flash', self.get('flash'))} flash" + (f", {ram} RAM" if ram else "")))
-        core = {"night": "full (slots, checks, console, OS hooks)", "lite": "Lite (small AVR core, STK500 uploads)"}
+        core = {"komorebi": "full (slots, checks, console, OS hooks)", "lite": "Lite (small AVR core, STK500 uploads)"}
         rows.append(("core", core.get(self.core, self.core)))
         if self.build == "mcu":
             if self.get("vendor") == "samd":
@@ -240,7 +240,7 @@ class Db:
 
     def target(self, board: str) -> Target:
         if board not in self.boards:
-            raise KeyError(f"unknown board {board!r} (mimiconf.py boards)")
+            raise KeyError(f"unknown board {board!r} (muconfigurator.py boards)")
         b = self.boards[board]
         c = self.chips[b["chip"]]
         fam = c.get("family", "")
@@ -405,7 +405,7 @@ class Config:
         """[(level, message)]: 'error' stops a build, 'warn' doesn't"""
         out = []
         e = self.effective
-        if self.t.core == "night":
+        if self.t.core == "komorebi":
             if not any(e(k) for k in ("IMG_NATIVE", "IMG_MCUBOOT", "IMG_RAW") if e(k) is not None):
                 out.append(("error", "enable at least one image format"))
             if e("REQUIRE_SIGNATURE") and e("BOOT_VERIFY") != "every-boot":
@@ -556,7 +556,7 @@ class Config:
 
     # ---- .config ----
     def dump(self) -> str:
-        lines = ["# MimiBoot-Mu configuration (python mimiconf.py)", f'MU_BOARD="{self.board}"']
+        lines = ["# MimiBoot-Mu configuration (python muconfigurator.py)", f'MU_BOARD="{self.board}"']
         for o in self.options():
             v = self.values[o.id]
             if o.kind == "bool":

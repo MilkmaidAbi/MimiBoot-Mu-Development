@@ -1,5 +1,5 @@
 /*
- * MimiBoot 1.1 "Torii" - core API
+ * MimiBoot-Mu "Komorebi" - core API
  */
 #ifndef MIMIBOOT_H
 #define MIMIBOOT_H
@@ -8,10 +8,10 @@
 #include "mimiboot/mb_bcl.h"
 #include "mimiboot/mb_record.h"
 
-#define MIMIBOOT_VERSION        "2.0.0"
-#define MIMIBOOT_NAME           "MimiBoot-Night"
-#define MIMIBOOT_VERSION_NUM    MB_VERSION(2, 0, 0)
-#define MIMIBOOT_CODENAME       "Night"
+#define MIMIBOOT_VERSION        "3.0.0"
+#define MIMIBOOT_NAME           "MimiBoot-Mu"
+#define MIMIBOOT_VERSION_NUM    MB_VERSION(3, 0, 0)
+#define MIMIBOOT_CODENAME       "Komorebi"
 
 /* MB_DEFAULT_TRIES, MB_DEFAULT_TRIAL_MS, MB_STRIKES_MAX: core/mb_features.h (configurable) */
 #define MB_FLASH_WAIT_MS        60000   /* flash mode: how long to wait for a host to show up */

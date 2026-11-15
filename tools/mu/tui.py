@@ -810,7 +810,7 @@ def run(db: Db, path: Path):
         import curses
     except ImportError:
         raise SystemExit("this Python has no curses (Windows: pip install windows-curses). "
-                         "The CLI does everything too: python mimiconf.py show / set / preset / build")
+                         "The CLI does everything too: python muconfigurator.py show / set / preset / build")
     cfg = Config.load(db, path) if path.exists() else None
     st = TuiState(db, path, cfg)
     os.environ.setdefault("ESCDELAY", "25")     # Esc is "back": don't wait a second for a sequence

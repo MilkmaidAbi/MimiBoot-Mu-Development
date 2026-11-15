@@ -1,6 +1,6 @@
 """docs/OPTIONS.md from config/features.toml (+ measured sizes): every menu, every
 option with what it does, its default, what it needs and what it costs, and the
-presets. `python mimiconf.py docs` regenerates it."""
+presets. `python muconfigurator.py docs` regenerates it."""
 from __future__ import annotations
 
 from .model import ROOT, Db
@@ -16,8 +16,8 @@ def _kb(n: int) -> str:
 def render(db: Db) -> str:
     sizes = {k: v for k, v in load().items() if k != "boards"}     # (per-board bases: the TUI's gauge)
     lines = ["# MimiBoot-Mu options", "",
-             "Generated from `config/features.toml` by `python mimiconf.py docs`; don't edit by hand.",
-             "Set options in the TUI (`python mimiconf.py`) or with `python mimiconf.py set ID=value`.", ""]
+             "Generated from `config/features.toml` by `python muconfigurator.py docs`; don't edit by hand.",
+             "Set options in the TUI (`python muconfigurator.py`) or with `python muconfigurator.py set ID=value`.", ""]
     if sizes:
         lines += ["**Cost** is the flash a feature adds when it is on, measured by building a reference board "
                   "with its defaults and again with that one option flipped: " +
@@ -26,7 +26,7 @@ def render(db: Db) -> str:
     lines += ["## Presets", "", "| preset | what you get |", "|---|---|"]
     for p in db.presets.values():
         lines.append(f"| `{p.id}` | **{p.title}**. {p.help} |")
-    lines += ["", "`python mimiconf.py preset <name>` (or Presets in the TUI): every option back to its default, "
+    lines += ["", "`python muconfigurator.py preset <name>` (or Presets in the TUI): every option back to its default, "
               "then the preset's values. On small chips a preset doesn't turn back on what the chip's defaults "
               "trim to fit.", ""]
     for m in db.menu_defs.values():
@@ -36,8 +36,8 @@ def render(db: Db) -> str:
         lines += [f"## {m.title}", "", m.help, ""]
         for o in opts:
             where = []
-            if o.cores != ["night", "lite"]:
-                where.append(" / ".join({"night": "full core", "lite": "AVR Lite"}[c] for c in o.cores))
+            if o.cores != ["komorebi", "lite"]:
+                where.append(" / ".join({"komorebi": "full core", "lite": "AVR Lite"}[c] for c in o.cores))
             if o.builds:
                 where.append("builds: " + ", ".join({"mcu": "STM32/nRF/SAMD", "pico": "RP2040/RP2350",
                                                      "avr": "AVR"}[b] for b in o.builds))

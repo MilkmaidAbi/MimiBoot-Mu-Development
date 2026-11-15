@@ -2,7 +2,7 @@
  * MimiBoot-Mu - STM32 vendor part of the Cortex-M port: shared definitions
  *
  * No vendor headers and no HAL. Every address, bit position, pin and size
- * comes from the generated config header (mimiconf.py renders it from
+ * comes from the generated config header (muconfigurator.py renders it from
  * config/targets.toml), so adding a chip is data, not code:
  *
  *   MB_STM32_FLASH_{F0F1,F2F4,L4G0G4}, MB_STM32_FLASH_REGS, MB_STM32_BKER_BIT, MB_STM32_BANK_PAGES

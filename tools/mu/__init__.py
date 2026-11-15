@@ -1,1 +1,1 @@
-"""MimiBoot-Mu configurator / builder (python mimiconf.py)."""
+"""MimiBoot-Mu configurator / builder (python muconfigurator.py)."""

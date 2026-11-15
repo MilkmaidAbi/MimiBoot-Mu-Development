@@ -21,7 +21,7 @@ class ProvisionError(Exception):
 def _load(build_dir: Path) -> tuple[dict, dict | None]:
     info_p = build_dir / "build-info.json"
     if not info_p.exists():
-        raise ProvisionError(f"{info_p}: not a mimiconf build directory (no build-info.json)")
+        raise ProvisionError(f"{info_p}: not a MuConfigurator build directory (no build-info.json)")
     info = json.loads(info_p.read_text())
     lay_p = build_dir / "layout.json"
     return info, json.loads(lay_p.read_text()) if lay_p.exists() else None
@@ -85,7 +85,7 @@ def steps(build_dir: Path) -> list[str]:
         out += [
             f"nRF{series}: the flash lock is applied by the bootloader itself on every boot"
             + (" (BOOT_LOCK is on in this build)." if feats.get("BOOT_LOCK") else
-               ": BOOT_LOCK is OFF in this build, turn it on (mimiconf, security menu)."),
+               ": BOOT_LOCK is OFF in this build, turn it on (MuConfigurator, security menu)."),
             f"  mechanism: {'MPU PROTENSET' if lock == 'mpu' else lock.upper()}, until each reset; nothing to provision."
             + ("\n  Two-stage: stage 1 locks stage 0, the store and both stage-1 copies before it starts an app."
                if two else ""),

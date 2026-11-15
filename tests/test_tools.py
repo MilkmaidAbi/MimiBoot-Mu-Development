@@ -4,7 +4,7 @@ import importlib.util,struct,tempfile,types,contextlib,io
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location("mbtool",ROOT/"tools/mbtool.py");m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-with tempfile.TemporaryDirectory(prefix="night-tools-") as td:
+with tempfile.TemporaryDirectory(prefix="mu-tools-") as td:
     d=Path(td);payload=b"\0"*512
     for target,arch,layout,family in [("rp2040",m.ARCH_ARM,"2m",m.UF2_FAMILY_RP2040),("rp2350",m.ARCH_ARM,"4m",m.UF2_FAMILY_RP2350_ARM_S),("rp2350",m.ARCH_RISCV,"16m",m.UF2_FAMILY_RP2350_RISCV)]:
         img=d/(target+str(arch)+".mimg");hdr=m.build_header(payload,"test",0x10000,target=target,arch=arch,load_type=m.LOAD_RAM,load_addr=0x20000000)

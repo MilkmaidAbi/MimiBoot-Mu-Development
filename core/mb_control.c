@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 /* BCL v2 keeps its 256-byte size. Its CRC covers this reserved-space extension. */
-#define NIGHT_MAGIC 0x314e424du
+#define CONTROL_MAGIC 0x314e424du
 typedef struct {
     uint32_t magic;
     uint8_t version, action, core0, core1;
@@ -50,7 +50,7 @@ int mb_topology_resolve(const mb_port_t *p, mb_topology_t t, uint8_t image, mb_t
     return rc;
 }
 #if !MB_FEAT_CONTROL
-/* No OS control service: requests are refused, the log's Night area is ignored. */
+/* No OS control service: requests are refused, the log's control area is ignored. */
 int mb_control_submit(const mb_port_t *p, const mb_control_request_t *q) { (void)p; (void)q; return MB_E_UNSUPP; }
 int mb_control_reboot(const mb_port_t *p, const mb_control_request_t *q) { (void)p; (void)q; return MB_E_UNSUPP; }
 int mb_control_put(const mb_port_t *p, mb_bcl_rec_t *r, const mb_config_t *c, const mb_control_request_t *q) {
@@ -66,7 +66,7 @@ void mb_control_requeue(mb_bcl_rec_t *r, const mb_config_t *cfg, const struct mb
 #else
 static void store(mb_bcl_rec_t *r, unsigned action, mb_topology_t t, const char *entry) {
     stored_t s = {0};
-    s.magic = NIGHT_MAGIC;
+    s.magic = CONTROL_MAGIC;
     s.version = 1;
     s.action = action;
     s.core0 = t.core0;
@@ -151,7 +151,7 @@ int mb_control_consume(const mb_port_t *p, mb_bcl_rec_t *r, const mb_config_t *c
     memcpy(&s, r->reserved, sizeof s);
     memset(r->reserved, 0, sizeof r->reserved);
     *action = -1;
-    if (s.magic != NIGHT_MAGIC || s.version != 1 || s.action > MB_CONTROL_SLOT)
+    if (s.magic != CONTROL_MAGIC || s.version != 1 || s.action > MB_CONTROL_SLOT)
         return MB_E_CORRUPT;
     if (!memchr(s.entry, 0, sizeof s.entry))
         return MB_E_CORRUPT;

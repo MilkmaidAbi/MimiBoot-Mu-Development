@@ -48,7 +48,7 @@
 #include "pico/stdio_usb.h"
 #endif
 
-static uint32_t night_caps(void) {
+static uint32_t loader_caps(void) {
     uint32_t c = MB_CAP_CONTROL | MB_CAP_CONFIG | MB_CAP_RAM | MB_CAP_XIP;
     uint32_t flags = otp_hw->critical;
     if (!(flags & OTP_CRITICAL_ARM_DISABLE_BITS))
@@ -63,8 +63,8 @@ static uint32_t night_caps(void) {
     return c;
 }
 #ifndef MB_RP2350_CLIENT
-static int night_prepare(mb_topology_t t) {
-    uint32_t caps = night_caps();
+static int loader_prepare(mb_topology_t t) {
+    uint32_t caps = loader_caps();
 #ifdef __riscv
     const unsigned primary = MB_ARCH_RISCV;
 #else
@@ -515,7 +515,7 @@ static int f_launch_ram(const mb_image_hdr_t *hdr) {
    * profiles already switch loader ISA and prepare their explicit pair. */
   if (hdr->arch != MB_ARCH_ANY && hdr->arch != MY_ARCH) {
     mb_topology_t pair = {MY_ARCH, hdr->arch, 0};
-    int prepared = night_prepare(pair);
+    int prepared = loader_prepare(pair);
     if (prepared)
       return prepared;
   }
@@ -574,9 +574,9 @@ static const char *f_reason(void) {
 }
 
 const mb_port_t mb_rp2350_port = {
-    .capabilities = night_caps,
+    .capabilities = loader_caps,
 #ifndef MB_RP2350_CLIENT
-    .prepare_topology = night_prepare,
+    .prepare_topology = loader_prepare,
 #endif
     .name = "rp2350",
     .target = MB_RP2350_TARGET,
@@ -633,9 +633,9 @@ static void f_reboot(void) {
 }
 
 const mb_port_t mb_rp2350_port = {
-    .capabilities = night_caps,
+    .capabilities = loader_caps,
 #ifndef MB_RP2350_CLIENT
-    .prepare_topology = night_prepare,
+    .prepare_topology = loader_prepare,
 #endif
     .name = "rp2350",
     .target = MB_RP2350_TARGET,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Night core under named feature profiles (-Werror) and smoke-boot each
+"""Build the Komorebi core under named feature profiles (-Werror) and smoke-boot each
 in the simulator; check that invalid combinations refuse to compile."""
 import os, shutil, subprocess, sys, tempfile
 from pathlib import Path

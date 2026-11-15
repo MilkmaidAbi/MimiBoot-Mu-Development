@@ -15,9 +15,8 @@
 #define MB_CAP_MAILBOX (1u << 8)    /* the next boot reads the RAM mailbox (mb_mailbox_t): requests cost no flash write */
 /* Set in mb_handoff_t.reserved by bootloaders that run the control service:
  * then bits 8..23 of `reserved` are the MB_CAP_* bits (v2 handoffs also have
- * them in `caps`). MB_HOFF_NIGHT is the old name of the flag. */
+ * them in `caps`). */
 #define MB_HOFF_HAS_CAPS 0x80000000u
-#define MB_HOFF_NIGHT MB_HOFF_HAS_CAPS
 /* Zero means image/same-as-core0. Values 1/2 match MB_ARCH_ARM/RISCV. */
 typedef struct {
     uint8_t core0, core1;

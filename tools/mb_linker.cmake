@@ -1,4 +1,4 @@
-function(night_stack var)
+function(mb_stack var)
  string(REGEX REPLACE "SCRATCH_X\\(rwx\\) : ORIGIN = (0x[0-9a-fA-F]+), LENGTH = 4k" "SCRATCH_X(rwx) : ORIGIN = \\1, LENGTH = 0k" x "${${var}}")
  if(PICO_PLATFORM STREQUAL "rp2040")
   string(REPLACE "SCRATCH_Y(rwx) : ORIGIN = 0x20041000, LENGTH = 4k" "SCRATCH_Y(rwx) : ORIGIN = 0x20040000, LENGTH = 8k" x "${x}")

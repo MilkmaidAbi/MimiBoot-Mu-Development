@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mimiconf: model, dependencies, .config round trip, layouts, generated headers,
+"""MuConfigurator: model, dependencies, .config round trip, layouts, generated headers,
 the TUI state machine. --build-all also compiles every board's default config."""
 import subprocess
 import sys
@@ -32,7 +32,7 @@ def main():
         cfg = Config(db, name)
         errs = [m for lvl, m in cfg.problems() if lvl == "error"]
         check(not errs, f"{name}: default config has errors {errs}")
-        check(cfg.t.core in ("night", "lite") and cfg.t.build in ("mcu", "pico", "avr"), f"{name}: core/build")
+        check(cfg.t.core in ("komorebi", "lite") and cfg.t.build in ("mcu", "pico", "avr"), f"{name}: core/build")
 
     # every chip is reachable from a board (so --build-all compiles every chip's configuration)
     used = {b["chip"] for b in db.boards.values()}
@@ -69,7 +69,7 @@ def main():
     check(back.values == cfg.values and back.board == cfg.board, ".config round trip")
     check("# MU_CONSOLE is not set" in text, "kernel-style 'is not set' lines")
 
-    # the generated header names every Night switch explicitly
+    # the generated header names every Komorebi switch explicitly
     hdr = "\n".join(gen.feature_macros(Config(db, "netduinoplus2")))
     for m in ("CONSOLE", "RECV", "CFG_FILE", "GRUB", "CONTROL", "SIGNATURES", "ANTI_ROLLBACK", "RAM_IMAGES", "HANDOFF",
               "CRASH_GUARD", "TRIAL_WATCHDOG", "AB_TRIAL", "IMG_NATIVE", "IMG_MCUBOOT", "IMG_RAW"):
@@ -301,7 +301,7 @@ def main():
 
     # docs/OPTIONS.md is generated: it must match features.toml + feature-sizes.json
     from mu import docs
-    check(docs.OUT.read_text(encoding="utf-8") == docs.render(db), "docs/OPTIONS.md is stale: python mimiconf.py docs")
+    check(docs.OUT.read_text(encoding="utf-8") == docs.render(db), "docs/OPTIONS.md is stale: python muconfigurator.py docs")
 
     # the docs site's generated pages: every board in the matrix, the STM32 warning, nothing Liquid would read
     import json as _json
@@ -351,7 +351,7 @@ def main():
                 errs = [m for lvl, m in cc.problems() if lvl == "error" and "KEYS" not in m]
                 check(not errs, f"preset {pid} on {board}: {errs}")
     provision_checks(db)
-    print(f"mimiconf: {checks} checks, {fails} failed")
+    print(f"MuConfigurator: {checks} checks, {fails} failed")
     return fails
 
 
@@ -360,13 +360,13 @@ def provision_checks(db):
     import json as _json
     from mu.provision import ProvisionError, steps
 
-    def run(board, boot_off, boot_size, features=None, core="night", store=None):
+    def run(board, boot_off, boot_size, features=None, core="komorebi", store=None):
         """store: a two-stage build's store (offset, size) at the end of the boot region"""
         d = Path(tempfile.mkdtemp(prefix="mu-prov-"))
         t = db.target(board)
         (d / "build-info.json").write_text(_json.dumps({"board": board, "core": core, "features": features or {},
                                                         "flash_region": boot_size, "two_stage": bool(store)}))
-        if core == "night":
+        if core == "komorebi":
             (d / "layout.json").write_text(_json.dumps({"flash_base": t.get("flash_base", 0x08000000),
                                                         "boot": {"offset": boot_off, "size": boot_size},
                                                         "floor": {"offset": store[0], "size": store[1]} if store else None}))

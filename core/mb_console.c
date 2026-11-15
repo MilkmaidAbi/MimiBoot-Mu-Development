@@ -565,7 +565,7 @@ static void security_line(const mb_port_t* p) {
 }
 
 static void draw_menu(const mb_port_t* p, const mb_bcl_t* log, const mb_config_t* cfg, mb_slot_info_t* info, int sel, int dflt, int secs) {
-    mb_printf(p, "\033[H\033[2J\033[1;38;5;208m  MimiBoot-Night %s \"%s\"\033[0m   %s, %s\n", MIMIBOOT_VERSION, MIMIBOOT_CODENAME,
+    mb_printf(p, "\033[H\033[2J\033[1;38;5;208m  MimiBoot-Mu %s \"%s\"\033[0m   %s, %s\n", MIMIBOOT_VERSION, MIMIBOOT_CODENAME,
               p->name, p->reset_reason ? p->reset_reason() : "");
     security_line(p);
     put(p, "\n");
@@ -782,7 +782,7 @@ static void cmd_revoke(const mb_port_t* p, const char* arg) {
 
 // returns true for "exit" (boot normally), false for "menu"
 static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_info_t* info) {
-    put(p, "\nMimiBoot-Night command line. 'help' for commands.\n");
+    put(p, "\nMimiBoot-Mu command line. 'help' for commands.\n");
     char line[LINE_MAX], copy[LINE_MAX];
     char* argv[8];
     for (;;) {
@@ -911,7 +911,7 @@ static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_i
         else if (!strcmp(cmd, "revoke")) cmd_revoke(p, argc > 1 ? argv[1] : NULL);
 #endif
         else if (!strcmp(cmd, "version")) {
-            mb_printf(p, "MimiBoot-Night %s \"%s\" on %s (%s)\n", MIMIBOOT_VERSION, MIMIBOOT_CODENAME, p->name, arch_name(p->arch));
+            mb_printf(p, "MimiBoot-Mu %s \"%s\" on %s (%s)\n", MIMIBOOT_VERSION, MIMIBOOT_CODENAME, p->name, arch_name(p->arch));
             security_line(p);
         }
         else mb_printf(p, "unknown command '%s' (help)\n", cmd);
@@ -936,7 +936,7 @@ void mb_console(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_inf
 #if MB_FEAT_SHELL                                   /* without a command line both fall back to the menu */
     if (plan->choice.config_mode) {
         if(plan->choice.control_error)mb_printf(p,"control request refused (%d)\n",plan->choice.control_error);
-        put(p,"MimiBoot-Night configuration mode (no countdown)\n");
+        put(p,"MimiBoot-Mu configuration mode (no countdown)\n");
         if(shell(p,log,cfg,info))return;
     }
     if (plan->choice.flash_mode) {

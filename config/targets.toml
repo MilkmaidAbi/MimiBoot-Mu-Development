@@ -2,7 +2,7 @@
 #
 #   [family.X]  register addresses / bit positions shared by a chip family
 #   [chip.X]    memory: flash, RAM, erase sectors ("4x16K,1x64K,3x128K"), family
-#   [board.X]   what you pick in mimiconf: a chip + pins + console settings
+#   [board.X]   what you pick in MuConfigurator: a chip + pins + console settings
 #
 # status: what has actually been checked, per board (see docs/HARDWARE-STATUS.md)
 #   "hardware"  ran on a real board        "emulator"  booted in QEMU / simavr
@@ -20,7 +20,7 @@
 # ===========================================================================
 [family.stm32f0]
 maker = "st"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "stm32"
 cpu = "cortex-m0"
@@ -41,7 +41,7 @@ m0_vectors = 48
 
 [family.stm32f1]
 maker = "st"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "stm32"
 cpu = "cortex-m3"
@@ -61,7 +61,7 @@ nvic_words = 8
 
 [family.stm32f3]
 maker = "st"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "stm32"
 cpu = "cortex-m4"
@@ -80,7 +80,7 @@ nvic_words = 8
 
 [family.stm32f2]
 maker = "st"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "stm32"
 cpu = "cortex-m3"
@@ -99,7 +99,7 @@ nvic_words = 8
 
 [family.stm32f4]
 maker = "st"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "stm32"
 cpu = "cortex-m4"
@@ -119,7 +119,7 @@ nvic_words = 8
 
 [family.stm32f7]
 maker = "st"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "stm32"
 cpu = "cortex-m7"
@@ -138,7 +138,7 @@ nvic_words = 8
 
 [family.stm32l4]
 maker = "st"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "stm32"
 cpu = "cortex-m4"
@@ -160,7 +160,7 @@ nvic_words = 8
 
 [family.stm32g0]
 maker = "st"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "stm32"
 cpu = "cortex-m0plus"
@@ -181,7 +181,7 @@ nvic_words = 1
 
 [family.stm32g4]
 maker = "st"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "stm32"
 cpu = "cortex-m4"
@@ -663,7 +663,7 @@ status = "built"
 # ===========================================================================
 [family.nrf52]
 maker = "nordic"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "nrf"
 cpu = "cortex-m4"
@@ -679,7 +679,7 @@ vtor_align = 256
 
 [family.nrf51]
 maker = "nordic"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "nrf"
 cpu = "cortex-m0"
@@ -854,7 +854,7 @@ status = "emulator"
 # ===========================================================================
 [family.samd21]
 maker = "microchip"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "samd"
 cpu = "cortex-m0plus"
@@ -876,7 +876,7 @@ sercoms = [
 
 [family.samd51]
 maker = "microchip"
-core = "night"
+core = "komorebi"
 build = "mcu"
 vendor = "samd"
 cpu = "cortex-m4"
@@ -1038,7 +1038,7 @@ status = "built"
 # ===========================================================================
 [chip.rp2040]
 maker = "rpi"
-core = "night"
+core = "komorebi"
 build = "pico"
 platform = "rp2040"
 flash = "2M"
@@ -1046,14 +1046,14 @@ ram = "264K"
 locked = { RAM_IMAGES = true }      # the RP2040 port can only start RAM images
 [chip.rp2350-arm]
 maker = "rpi"
-core = "night"
+core = "komorebi"
 build = "pico"
 platform = "rp2350-arm-s"
 flash = "4M"
 ram = "520K"
 [chip.rp2350-riscv]
 maker = "rpi"
-core = "night"
+core = "komorebi"
 build = "pico"
 platform = "rp2350-riscv"
 flash = "4M"

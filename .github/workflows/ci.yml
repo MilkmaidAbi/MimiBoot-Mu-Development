@@ -70,9 +70,9 @@ jobs:
       - name: avr-gcc
         run: sudo apt-get update && sudo apt-get install -y gcc-avr avr-libc
       - name: configurator checks, then build every board (Pico SDK boards excepted)
-        run: python tests/test_mimiconf.py --build-all
+        run: python tests/test_muconfigurator.py --build-all
       - name: the same boards with two stages and with SMP (where they fit)
-        run: python tests/test_mimiconf.py --build-variants
+        run: python tests/test_muconfigurator.py --build-variants
 
   qemu:
     name: STM32 + nRF51 in QEMU

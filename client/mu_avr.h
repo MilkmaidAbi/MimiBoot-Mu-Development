@@ -14,7 +14,7 @@
  * MU_STAGE_BASE on (page by page with mu_spm), then
  *   mu_stage_commit(length, mu_crc32_flash(MU_STAGE_BASE, length));   // reboots and installs
  *
- * MU_BOOT_SIZE must match the bootloader's section (mimiconf prints it; 2048 by default).
+ * MU_BOOT_SIZE must match the bootloader's section (MuConfigurator prints it; 2048 by default).
  */
 #ifndef MU_AVR_H
 #define MU_AVR_H

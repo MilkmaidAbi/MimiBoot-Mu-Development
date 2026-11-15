@@ -1,7 +1,7 @@
 /*
  * MimiBoot-Mu - bare-metal Cortex-M port: what a chip vendor provides
  *
- * port/cortexm/cm_port.c is the Night port for any Cortex-M MCU (startup,
+ * port/cortexm/cm_port.c is the Komorebi port for any Cortex-M MCU (startup,
  * vector table, starting images, console glue, the app-side client). The
  * chip-specific parts are these functions, one directory per vendor:
  *
@@ -10,7 +10,7 @@
  *   port/samd    Microchip SAM D21 / D51
  *
  * Everything else (addresses, pins, sizes) comes from the generated config
- * header (mimiconf.py renders it from config/targets.toml). Common macros:
+ * header (muconfigurator.py renders it from config/targets.toml). Common macros:
  *
  *   MB_FLASH_BASE/SIZE, MB_RAM_BASE/SIZE, MB_RAM2_BASE/SIZE, MB_LOADER_RAM
  *   MB_SECTOR_GROUPS        {start, size, count} erase units as the layout sees them

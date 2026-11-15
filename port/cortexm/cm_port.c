@@ -1,5 +1,5 @@
 /*
- * MimiBoot-Mu - bare-metal Cortex-M port of the Night core (STM32, nRF, SAMD)
+ * MimiBoot-Mu - bare-metal Cortex-M port of the Komorebi core (STM32, nRF, SAMD)
  *
  * Console: a UART (115200 8N1 by default). Normal boots are silent; the menu
  * opens when the board's button is held, when any key arrives on the UART in

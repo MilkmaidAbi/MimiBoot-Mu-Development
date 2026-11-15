@@ -18,7 +18,7 @@ from pathlib import Path
 from . import gen
 from .model import ROOT, Config, parse_sectors, parse_size
 
-NIGHT_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
+KOMOREBI_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
               "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc", "mb_lms", "mb_mailbox"]
 # a two-stage build's stage 0: check MimiBoot images, keep its records, start one
 STAGE0_CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_lms"]
@@ -156,7 +156,7 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
     # what gets compiled, and how (the source export writes a Makefile from this)
     recipe = {
         "cc": "arm-none-eabi-gcc",
-        "sources": [f"core/{n}.c" for n in NIGHT_CORE] + ["port/cortexm/cm_port.c"] + VENDOR_SOURCES[t.get("vendor")],
+        "sources": [f"core/{n}.c" for n in KOMOREBI_CORE] + ["port/cortexm/cm_port.c"] + VENDOR_SOURCES[t.get("vendor")],
         "headers": ["core/*.h", "include/mimiboot/*.h", "port/cortexm/*.h", f"port/{t.get('vendor')}/*.h",
                     "third_party/micro-ecc/*"],
         "usb": bool(cfg.effective("CONSOLE_USB")),
@@ -219,7 +219,7 @@ def build_mcu(cfg: Config, out: Path, log=print) -> dict:
     _run([objcopy, "-O", "binary", elf, out / "mimiboot.bin"])
     _run([objcopy, "-O", "ihex", elf, out / "mimiboot.hex"])
     gen.mcu_outputs(cfg, lay, out)
-    info = {"board": t.name, "core": "night", "build": "mcu", "vendor": t.get("vendor"), "flash_used": sz["flash"], "flash_region": room,
+    info = {"board": t.name, "core": "komorebi", "build": "mcu", "vendor": t.get("vendor"), "flash_used": sz["flash"], "flash_region": room,
             "ram_used": sz["ram"], "ram_region": loader_ram, "stack": stack,
             "features": {o.id: cfg.effective(o.id) for o in cfg.options()},
             "files": ["mimiboot.elf", "mimiboot.bin", "mimiboot.hex", "layout.txt", "layout.json",
@@ -316,7 +316,7 @@ def _build_two_stage(cfg: Config, out: Path, gcc: str, recipe: dict, ram: int, s
         for ext in (".elf", ".map", ".ld", "_config.h"):
             (out / (n + ext)).unlink(missing_ok=True)
     gen.mcu_outputs(cfg, lay, out)
-    info = {"board": t.name, "core": "night", "build": "mcu", "vendor": t.get("vendor"), "two_stage": True,
+    info = {"board": t.name, "core": "komorebi", "build": "mcu", "vendor": t.get("vendor"), "two_stage": True,
             "flash_used": sz1["flash"], "flash_region": room1, "stage0_used": sz0["flash"], "stage0_region": room0,
             "ram_used": max(sz0["ram"], sz1["ram"]), "ram_region": loader_ram, "stack": stack,
             "stage1_signed": bool(secret),
@@ -378,10 +378,10 @@ def build_pico(cfg: Config, out: Path, log=print) -> dict:
             files.append(f.name)
     rel = [str(c) for c in cmd]
     rel = [s.replace(str(out), "<output>").replace(str(ROOT), ".") for s in rel]
-    info = {"board": t.name, "core": "night", "build": "pico", "platform": plat_arg, "files": files,
+    info = {"board": t.name, "core": "komorebi", "build": "pico", "platform": plat_arg, "files": files,
             "recipe": {"kind": "pico", "command": rel},
             "features": {o.id: cfg.effective(o.id) for o in cfg.options()}}
-    main_bin = next((out / f for f in files if f.endswith("mimiboot_night.bin") or f.endswith("universal.bin")), None)
+    main_bin = next((out / f for f in files if f.endswith("mimiboot.bin") or f.endswith("universal.bin")), None)
     if main_bin:
         info["flash_used"], info["flash_region"] = main_bin.stat().st_size, 245760
     (out / "build-info.json").write_text(json.dumps(info, indent=2, default=str) + "\n")
