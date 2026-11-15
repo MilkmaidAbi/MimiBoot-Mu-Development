@@ -48,8 +48,29 @@ def measure(db: Db, board: str, log=print) -> dict:
     return out
 
 
+def measure_boards(db: Db, log=print) -> dict:
+    """every board's default build: the base the TUI's size gauge adds option costs to"""
+    from .build import BuildError, build
+    out = {}
+    with tempfile.TemporaryDirectory() as td:
+        for name in db.boards:
+            cfg = Config(db, name)
+            if cfg.t.build == "pico":
+                continue
+            try:
+                info = build(cfg, Path(td) / name, log=lambda *a: None)
+            except BuildError:
+                continue
+            out[name] = {"flash": info["flash_used"], "region": info["flash_region"]}
+            if "ram_used" in info:
+                out[name].update(ram=info["ram_used"] + info["stack"], ram_region=info["ram_region"])
+            log(f"  {name:22} {info['flash_used']:7} / {info['flash_region']}")
+    return out
+
+
 def measure_all(db: Db, log=print) -> dict:
     res = {kind: measure(db, board, log) for kind, board in REFERENCE.items()}
+    res["boards"] = measure_boards(db, log)
     SIZES_FILE.write_text(json.dumps(res, indent=1) + "\n")
     return res
 

@@ -178,7 +178,10 @@ def main():
         st.move(1); st.move(1); st.move(1)
         check(st.current().kind != "section", "moving skips section headers")
         check(st.select("console"), "main lists the menus")
-        check(st.current().value.endswith(" on"), "menu rows summarise how many options are on")
+        check("A/B" in st.current().value or "menu" in st.current().value, "menu rows say what is on, in words")
+        st.select("slots")
+        check(st.current().value.startswith("A/B"), f"the slots line starts with the layout ({st.current().value})")
+        st.select("console")
         st.enter()
         check(st.view.kind == "menu", "open a menu")
         st.select("CONSOLE")
@@ -199,10 +202,40 @@ def main():
         check(st.cfg.values["BREAK_IN_MS"] == 500 and "outside" in st.message, "range enforced in the UI")
         st.select("SHELL_DIAG")
         check("MB_FEAT_SHELL_DIAG" in st.help_text() and "md" in st.help_text(), "option details: macro and help")
+        # what else a change moves, before and after
+        st.select("SHELL")
+        check("also turns off" in st.help_text() and "uploads" in st.help_text(), "details preview the knock-on: uploads go with the shell")
+        st.space()
+        check("also off" in st.message and "uploads" in st.message, f"the message says what else went off ({st.message})")
+        check(not st.cfg.effective("RECV"), "and it did")
+        st.undo()
+        check(st.cfg.values["SHELL"] and st.cfg.effective("RECV") and "undone" in st.message, "undo brings it back")
+        check(st.current().note == "" or st.current().note.startswith(("+", "-")), "an option's note is its cost")
+        st.select("RECV")
+        st.space()
+        st.reset_default()
+        check(st.cfg.values["RECV"] == st.cfg.default(st.db.options["RECV"]), "d: back to the default")
+        keys = [k for k, _ in st.keys_hint()]
+        check("Space" in keys and "u" in keys and "B" in keys, f"the key bar lists what applies here ({keys})")
         st.back()
         st.search("zephyr")
         check(any(i.key == "IMG_MCUBOOT" for i in st.items()), "search finds options by help text")
+        st.search("zephyr images")
+        check(st.view.kind == "search" and len(st.views) == 2 and any(i.key == "IMG_MCUBOOT" for i in st.items()),
+              "find as you type refines the same view, every word must match")
         st.back()
+        # home: what you changed, what needs attention (Enter goes to the fix)
+        st.cfg.set("REQUIRE_SIGNATURE", True)
+        st.views = [st.views[0]]
+        ks = [i.key for i in st.items()]
+        check("REQUIRE_SIGNATURE" in ks, "home lists what was changed from the defaults")
+        issues = [i for i in st.items() if i.kind == "issue"]
+        check(issues and issues[0].style == "bad" and issues[0].value == "KEYS", f"an error points at KEYS ({[(i.label, i.value) for i in issues]})")
+        st.select(issues[0].key)
+        st.enter()
+        check(st.view.kind == "menu" and st.current().key == "KEYS", "Enter on it goes to the option")
+        st.views = [st.views[0]]
+        st.cfg.set("REQUIRE_SIGNATURE", False)
         # presets
         st.select("presets")
         st.enter()
@@ -224,11 +257,32 @@ def main():
         st.select("board")
         st.enter()
         check(st.view.kind == "makers", "board row opens the picker")
+        st2 = TuiState(db, Path(td) / "other")
+        st2.search("f411")
+        check(st2.view.kind == "boardsearch" and {"nucleo-f411re", "blackpill-f411ce"} <= {i.key for i in st2.items()},
+              "find a board by part number, across makers")
+        st2.search("nordic 52840 dk")
+        found = [i.key for i in st2.items()]
+        check("nrf52840dk" in found and len(found) <= 2, f"several words narrow it down ({found})")
         st.select("microchip"); st.enter(); st.select("microchip\0AVR: Arduino and classic ATmega"); st.enter()
         st.select("uno"); st.enter()
         check(st.cfg.board == "uno" and st.cfg.output_dir().parent == Path(td) / "out dir",
               "switching boards keeps options that still apply")
         from mu.tui import build_report, layout_lines
+        # the size gauge: an estimate from the measured board + option costs, exact after a build
+        st3 = TuiState(db, Path(td) / "g", Config(db, "nucleo-f411re"))
+        st3.sizes = {"mcu": {"board": "nucleo-f411re", "base": 30000, "options": {"SMP": {"value": True, "delta": 4000}}},
+                     "boards": {"nucleo-f411re": {"flash": 30000, "region": 49152}}}
+        e0 = st3.estimate()
+        st3.cfg.set("SMP", True)
+        e1 = st3.estimate()
+        check(e0["used"] == 30000 and e1["used"] == 34000 and not e1["exact"], f"estimate follows a change ({e0} {e1})")
+        st3.last_info = ("nucleo-f411re", dict(st3.cfg.values), {"flash_used": 33950, "flash_region": 49152})
+        check(st3.estimate()["exact"] and st3.estimate()["used"] == 33950, "a build of this configuration: the real size")
+        from mu.tui import gauge_text
+        check("~" in gauge_text(e1)[0] and "estimate" in gauge_text(e1)[0], "an estimate says so")
+        near = dict(e1, used=48000)
+        check("build to check" in gauge_text(near)[0] and gauge_text(near)[1] == "warn", "close to the limit: build to check")
         rep = build_report(st, {"flash_used": 1604, "flash_region": 2048, "files": ["a.hex"]}, Path(td))
         check(any("1604 / 2048" in line for line in rep), "build report with a size bar")
         check(any("slot" in line or "a " in line for line in layout_lines(Config(db, "nucleo-f411re"))), "layout view")

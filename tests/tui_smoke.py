@@ -45,9 +45,8 @@ def session(cols: int) -> dict:
     key(b"\r")                          # Nucleo boards
     seen_details = b"tested" in screen and b"nucleo-f103rb" in screen
     key(b"\r")                          # the first Nucleo (nucleo-f103rb)
-    seen_main = b"Slots and updates" in screen and b"Presets" in screen
-    key(DOWN)                           # Presets
-    key(DOWN)                           # Slots and updates
+    seen_main = b"Slots and updates" in screen and b"Start from a preset" in screen
+    key(DOWN)                           # Slots and updates (the board line comes first)
     key(b"\r")
     seen_menu = b"Updates must confirm" in screen
     key(DOWN)                           # AUX_SLOTS (greyed out, still selectable)
