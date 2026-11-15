@@ -38,7 +38,10 @@ def session(cols: int) -> dict:
         os.write(fd, k)
         pump(t)
 
-    pump(1.5)
+    for _ in range(20):                 # a cold start (WSL, first run) can take a few seconds
+        pump(0.5)
+        if b"Raspberry" in screen:
+            break
     seen_makers = all(f in screen for f in (b"STMicro", b"Nordic", b"Raspberry", b"Atmel"))  # curses may split words
     key(b"\r")                          # STMicroelectronics
     seen_cats = b"Nucleo boards" in screen
