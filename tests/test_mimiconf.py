@@ -322,6 +322,10 @@ def main():
     check("ST-Link" in page and "connect under reset" in page, "site: the ST-Link warning is on the matrix page")
     hw = {b["name"] for b in data["boards"] if any(f[3] == "hardware" for f in b["f"])}
     check(hw <= {"pico", "rp2350-lcd"}, "site: only the RP boards that ran have hardware-level features")
+    check({b["name"] for b in data["boards"] if b["flash_writes"] == "hardware"} <= {"rp2350-lcd"},
+          "site: hardware flash writes only on the board that ran them")
+    check(all("earlier build" in f[4] for b in data["boards"] for f in b["f"] if f[3] == "hardware"),
+          "site: every hardware-level feature says it was an earlier build")
 
     # presets on a small part leave the chip's trims alone
     c = Config(db, "nucleo-g031k8")

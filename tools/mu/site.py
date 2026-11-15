@@ -106,7 +106,7 @@ def _flash_level(board: str, cfg: Config) -> str:
     if fam == "avr":
         return "emulator" if board == "uno" else "built"
     if fam == "pico":       # the RP2350 boot-ROM erase/program path ran (earlier build); RP2040's: no record
-        return "hardware" if cfg.t.chip_name.startswith("rp2350") else "built"
+        return "hardware" if board == "rp2350-lcd" else "built"   # the board that ran (Arm)
     return FLASH_WRITES.get(fam, "built")
 
 
@@ -148,7 +148,7 @@ def board_data(db: Db, board: str) -> dict:
             "chip": t.chip_name, "cpu": t.get("cpu") or t.get("mcu") or t.get("platform") or "",
             "memory": facts.get("memory", ""), "console": facts.get("console", ""), "core": t.core,
             "family": fam, "status": t.status, "status_text": STATUS_TEXT.get(t.status, ""),
-            "flash_writes": _flash_level(board, cfg), "never_ran": NEVER_RAN.get(fam if fam != "mcu" else "", ""),
+            "flash_writes": _flash_level(board, cfg), "status_note": HW_NOTE if t.status == "hardware" else "", "never_ran": NEVER_RAN.get(fam if fam != "mcu" else "", ""),
             "features": feats}
 
 
@@ -164,7 +164,9 @@ def compact(data: dict) -> dict:
         rows = []
         for f in b["features"]:
             options[f["id"]] = [f["title"], f["menu"], NOTES.get(f["id"], "")]
-            rows.append([f["id"], f["avail"], f["default"], f["level"], 1 if "too big" in f["note"] else 0])
+            extra = "; ".join(x for x in ("off by default: too big for this chip" if "too big" in f["note"] else "",
+                                           HW_NOTE if f["level"] == "hardware" else "") if x)
+            rows.append([f["id"], f["avail"], f["default"], f["level"], extra])
         boards.append({**{k: v for k, v in b.items() if k != "features"}, "f": rows})
     return {"menus": data["menus"], "options": options, "boards": boards}
 
@@ -186,7 +188,8 @@ QEMU has no STM32 flash controller, so the erase and program drivers are written
 have never executed. Uploads, the boot log, confirming an image and the rollback floors all write flash. Until a
 board has been tried, wire SWD (an ST-Link, or the one on a Nucleo), make sure STM32CubeProgrammer can
 <em>connect under reset</em> and mass-erase it, and don't touch readout protection (RDP level 2 can't be undone).
-Holding BOOT0 high at reset starts the chip's own ROM loader, whatever the flash holds.
+On most families, holding BOOT0 high at reset starts the chip's own ROM loader; on STM32G0 the factory option bytes
+take BOOT0 from an option bit instead of the pin, so there SWD is the way back.
 <a href="before-you-flash.html">Details for every family.</a>
 </div>
 """
@@ -230,7 +233,7 @@ facts are on <a href="boards.html">Boards</a> and <a href="status.html">Test sta
     b.features = b.f.map(function (a) {
       var o = D.options[a[0]];
       return {id: a[0], title: o[0], menu: o[1], avail: a[1], "default": a[2], level: a[3],
-              note: (o[2] || "") + (a[4] ? (o[2] ? "; " : "") + "off by default: too big for this chip" : "")};
+              note: [o[2], a[4]].filter(function (x) { return x; }).join("; ")};
     });
   });
   var esc = function (s) { return String(s).replace(/[&<>"]/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c]; }); };
@@ -262,7 +265,7 @@ facts are on <a href="boards.html">Boards</a> and <a href="status.html">Test sta
     h += "</tr></thead><tbody>";
     boards.forEach(function (b) {
       var by = {}; b.features.forEach(function (f) { by[f.id] = f; });
-      h += "<tr><td><a href=\\"#b-" + esc(b.name) + "\\">" + esc(b.name) + "</a></td><td>" + badge(b.status) + "</td><td>" + badge(b.flash_writes) + "</td>";
+      h += "<tr><td><a href=\\"#b-" + esc(b.name) + "\\">" + esc(b.name) + "</a></td><td title=\\"" + esc(b.status_note) + "\\">" + badge(b.status) + (b.status_note ? " <span class=\\"mx-count\\">earlier build</span>" : "") + "</td><td>" + badge(b.flash_writes) + "</td>";
       GRID.forEach(function (g) {
         var f = by[g[0]];
         if (!f || f.avail === "fixed off") { h += "<td></td>"; return; }
@@ -304,7 +307,7 @@ facts are on <a href="boards.html">Boards</a> and <a href="status.html">Test sta
         var hw = b.features.filter(function (f) { return f.level === "hardware"; }).length,
             all = b.features.filter(function (f) { return f.level; }).length;
         h += "<details class=\\"mx-board\\" id=\\"" + esc(bid) + "\\"" + (open[bid] || bSel.value ? " open" : "") + "><summary><strong>" + esc(b.name) +
-             "</strong> " + esc(b.title) + " " + badge(b.status) + " <span class=\\"mx-count\\">" + hw + " of " + all + " features on hardware</span></summary>";
+             "</strong> " + esc(b.title) + " " + badge(b.status) + (b.status_note ? " <span class=\\"mx-count\\">(" + esc(b.status_note) + ")</span>" : "") + " <span class=\\"mx-count\\">" + hw + " of " + all + " features on hardware</span></summary>";
         h += "<div class=\\"mx-facts\\"><div><b>chip</b> " + esc(b.chip) + (b.cpu ? " (" + esc(b.cpu) + ")" : "") + "</div><div><b>memory</b> " + esc(b.memory) +
              "</div><div><b>console</b> " + esc(b.console) + "</div><div><b>core</b> " + esc(b.core === "night" ? "full" : "Lite") +
              "</div><div><b>flash writes</b> " + badge(b.flash_writes) + "</div></div>";
@@ -324,8 +327,16 @@ facts are on <a href="boards.html">Boards</a> and <a href="status.html">Test sta
     ds.forEach(function (d) { d.open = anyClosed; });
     this.textContent = anyClosed ? "close all" : "open all";
   });
-  if (location.hash.indexOf("#b-") === 0) { bSel.value = location.hash.slice(3); }
+  function fromHash() {
+    if (location.hash.indexOf("#b-") !== 0) return;
+    bSel.value = decodeURIComponent(location.hash.slice(3));
+    draw();
+    var el = document.getElementById(location.hash.slice(1));
+    if (el) el.scrollIntoView();
+  }
+  window.addEventListener("hashchange", fromHash);
   draw();
+  fromHash();
 })();
 </script>
 """
