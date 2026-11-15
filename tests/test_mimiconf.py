@@ -303,6 +303,26 @@ def main():
     from mu import docs
     check(docs.OUT.read_text(encoding="utf-8") == docs.render(db), "docs/OPTIONS.md is stale: python mimiconf.py docs")
 
+    # the docs site's generated pages: every board in the matrix, the STM32 warning, nothing Liquid would read
+    import json as _json
+    from mu import site
+    with tempfile.TemporaryDirectory() as td:
+        (Path(td) / "_config.yml").write_text("title: x\n")
+        names = site.write(db, Path(td))
+        page = (Path(td) / "matrix.html").read_text(encoding="utf-8")
+    check({"matrix.html", "status.md", "security.md", "os-integration.md"} <= set(names), "site: pages written")
+    body = page.split("{% raw %}", 1)
+    check(len(body) == 2 and body[1].rstrip().endswith("{% endraw %}") and "{{" not in body[0] and "{%" not in body[0],
+          "site: the matrix's script and data are inside {% raw %}")
+    data = _json.loads(page.split('type="application/json">', 1)[1].split("</script>", 1)[0])
+    check({b["name"] for b in data["boards"]} == set(db.boards), "site: every board in the matrix")
+    stm = [b for b in data["boards"] if b["family"] == "stm32"]
+    check(stm and all(b["flash_writes"] == "built" and "never" in b["never_ran"] for b in stm),
+          "site: no STM32 board claims a flash write ran")
+    check("ST-Link" in page and "connect under reset" in page, "site: the ST-Link warning is on the matrix page")
+    hw = {b["name"] for b in data["boards"] if any(f[3] == "hardware" for f in b["f"])}
+    check(hw <= {"pico", "rp2350-lcd"}, "site: only the RP boards that ran have hardware-level features")
+
     # presets on a small part leave the chip's trims alone
     c = Config(db, "nucleo-g031k8")
     c.apply_preset("product")

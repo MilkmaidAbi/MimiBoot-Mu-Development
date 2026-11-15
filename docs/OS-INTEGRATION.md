@@ -39,8 +39,10 @@ your own linker script). `mbtool pack` finds the symbol in the ELF and writes
 its address and size into the image header, so there is nothing to configure.
 
 On the bootloader side the `OS_HOOKS` option (in mimiconf's "Handoff and OS
-hooks" menu) turns all of this on. It is on by default, except on parts with
-32 KB of flash where the diagnostic shell commands make way for it.
+hooks" menu) turns all of this on. It is on by default nearly everywhere. Where
+the bootloader region is tight (F103RB/CB, F401CC, G431RB, nRF52810/811) the
+diagnostic shell commands are off by default to make room for it, and on parts
+with 8 KB of RAM (F100RB, F030R8, G031K8) `OS_HOOKS` itself is off by default.
 
 ## What the OS learns at boot
 

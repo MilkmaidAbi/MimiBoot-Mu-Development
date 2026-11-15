@@ -69,6 +69,12 @@ def cmd_docs(a, db):
     print(f"wrote {docs.write(db)}")
 
 
+def cmd_site(a, db):
+    from mu import site
+    for name in site.write(db, Path(a.dir)):
+        print(f"wrote {Path(a.dir) / name}")
+
+
 def cmd_sizes(a, db):
     from mu import sizes
     print("building each reference board once per option (a few minutes)...")
@@ -176,6 +182,8 @@ def main():
     s = sub.add_parser("preset"); s.add_argument("preset", nargs="?"); s.set_defaults(fn=cmd_preset)
     sub.add_parser("sizes").set_defaults(fn=cmd_sizes)
     sub.add_parser("docs").set_defaults(fn=cmd_docs)
+    s = sub.add_parser("site", help="write the docs site's generated pages (options, boards, feature matrix, status)")
+    s.add_argument("dir", help="a checkout of the docs site"); s.set_defaults(fn=cmd_site)
     sub.add_parser("menuconfig").set_defaults(fn=cmd_menuconfig)
     a = p.parse_args()
     db = Db()
