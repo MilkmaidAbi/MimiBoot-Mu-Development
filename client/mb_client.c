@@ -245,8 +245,10 @@ int mb_client_install_begin(int slot, const mb_image_hdr_t *hdr) {
     tmp.header_ok = true;
     bool lms = (hdr->flags & MB_IMG_F_LMS) != 0;
     if (lms) { // the signature handed over with mb_client_install_sig()
+#if MB_FEAT_LMS
         tmp.sig_ram = mb_upload_sig.buf;
         tmp.sig_ram_len = mb_upload_sig.len;
+#endif
     }
     if (mb_image_check_sig(port, &tmp) != MB_OK)
         return MB_E_SIGNATURE; // it could never boot: don't wipe the slot for it
@@ -314,7 +316,9 @@ int mb_client_install_end(void) {
     if (mb_image_verify(port, inst.slot, &info) != MB_OK)
         return MB_E_CORRUPT; // slot stays empty
     if (inst.hdr.flags & MB_IMG_F_LMS) { // what boots is the copy in flash: check that one
+#if MB_FEAT_LMS
         info.tlv_flash = port->layout->slot[inst.slot].offset + MB_IMG_HDR_SIZE;
+#endif
         if (mb_image_check_sig(port, &info) != MB_OK)
             return MB_E_SIGNATURE;
     }

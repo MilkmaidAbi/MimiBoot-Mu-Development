@@ -167,8 +167,10 @@ int mb_sink_slot_check(void* ctx, const mb_image_hdr_t* hdr) {
     tmp.hdr = *hdr;
     tmp.header_ok = true;
     if (MB_FEAT_LMS && (hdr->flags & MB_IMG_F_LMS)) {     // the signature that came with it (nothing is erased yet)
+#if MB_FEAT_LMS
         tmp.sig_ram = mb_upload_sig.buf;
         tmp.sig_ram_len = mb_upload_sig.len;
+#endif
     }
     bool s1 = mb_slot_role(s->p, s->slot) == MB_ROLE_STAGE1;
     if ((s1 ? mb_stage1_check_sig(s->p, &tmp) : mb_image_check_sig(s->p, &tmp)) != MB_OK) return MB_E_SIGNATURE;
@@ -193,7 +195,9 @@ int mb_sink_slot_end(void* ctx) {
         return MB_E_REFUSED;    // a stage 1 built for the other copy: left without a header (empty)
     if (MB_FEAT_LMS && (s->hdr.flags & MB_IMG_F_LMS)) {   // the copy in flash is what boots: check that one
         tmp.sig_state = 0;
+#if MB_FEAT_LMS
         tmp.tlv_flash = s->p->layout->slot[s->slot].offset + MB_IMG_HDR_SIZE;
+#endif
         if ((s1 ? mb_stage1_check_sig(s->p, &tmp) : mb_image_check_sig(s->p, &tmp)) != MB_OK) return MB_E_SIGNATURE;
     }
     return mb_slot_write_header(s->p, s->slot, &s->hdr);

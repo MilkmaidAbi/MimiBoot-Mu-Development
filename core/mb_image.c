@@ -63,7 +63,9 @@ int mb_image_read_header(const mb_port_t* p, int slot, mb_slot_info_t* out) {
         out->fmt = MB_FMT_NATIVE;
         out->hash_off = out->hdr.payload_offset;
         out->hash_len = out->hdr.payload_size;
+#if MB_FEAT_LMS
         out->tlv_flash = r->offset + MB_IMG_HDR_SIZE;
+#endif
         return MB_OK;
     }
     memset(out, 0, sizeof(*out));

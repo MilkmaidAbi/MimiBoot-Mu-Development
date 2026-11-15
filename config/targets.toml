@@ -207,7 +207,7 @@ flash = "64K"
 ram = "8K"
 sectors = "64x1K"
 boot = "24K"
-defaults = { CONSOLE = false, RECV = false, CONTROL = false, SIGNATURES = false }
+defaults = { CONSOLE = false, RECV = false, CONTROL = false, SIGNATURES = false, OS_HOOKS = false }
 [chip.stm32f072rb]
 family = "stm32f0"
 flash = "128K"
@@ -223,7 +223,7 @@ flash = "128K"
 ram = "8K"
 sectors = "128x1K"
 boot = "32K"
-defaults = { SIGNATURES = false, RECV = false, CONTROL = false }
+defaults = { SIGNATURES = false, RECV = false, CONTROL = false, OS_HOOKS = false }
 [chip.stm32f103c8]
 family = "stm32f1"
 flash = "64K"
@@ -341,7 +341,7 @@ flash = "64K"
 ram = "8K"
 sectors = "32x2K"
 boot = "24K"
-defaults = { CONSOLE = false, RECV = false, CONTROL = false, SIGNATURES = false }
+defaults = { CONSOLE = false, RECV = false, CONTROL = false, SIGNATURES = false, OS_HOOKS = false }
 [chip.stm32g071rb]
 family = "stm32g0"
 flash = "128K"

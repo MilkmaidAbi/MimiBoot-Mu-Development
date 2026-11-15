@@ -116,11 +116,14 @@ typedef struct {
     uint8_t fmt;                /* MB_FMT_* */
     uint32_t hash_off, hash_len;/* digest coverage, from the slot start */
     mb_image_hdr_t hdr;
+#if MB_FEAT_LMS
     /* where an LMS signature is: an upload's, in RAM (sig_ram), or the slot's own
-     * header-sector TLV list at flash offset tlv_flash (0: none) */
+     * header-sector TLV list at flash offset tlv_flash (0: none). (Only in LMS
+     * builds: the bootloader keeps one of these per slot, and RAM is tight.) */
     const uint8_t* sig_ram;
     uint32_t sig_ram_len;
     uint32_t tlv_flash;
+#endif
 } mb_slot_info_t;
 
 /* Header-sector TLV list (file offset 256..): type u8, 0, length u16 LE, data; 0xFF ends it.
