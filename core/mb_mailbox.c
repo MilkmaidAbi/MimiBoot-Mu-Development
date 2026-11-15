@@ -29,7 +29,10 @@ static bool crashed;
 // The mailbox in one slot's image's buffer, if that image left one
 static bool take_from(const mb_port_t* p, int slot, mb_mailbox_t* m) {
     mb_slot_info_t in;
-    if (mb_image_read_header(p, slot, &in) != MB_OK || in.fmt != MB_FMT_NATIVE) return false;
+    mb_checking_slot = (uint8_t)slot;                   // a fault reading it is this slot's flash
+    int rc = mb_image_read_header(p, slot, &in);
+    mb_checking_slot = MB_SLOT_NONE;
+    if (rc != MB_OK || in.fmt != MB_FMT_NATIVE) return false;
     const mb_image_hdr_t* h = &in.hdr;
     if (!h->handoff_addr || h->handoff_size < MB_HANDOFF_V2_SIZE) return false;     // no room for one there
     volatile mb_mailbox_t* ram = p->ram_ptr(h->handoff_addr, sizeof(*m));
@@ -41,14 +44,13 @@ static bool take_from(const mb_port_t* p, int slot, mb_mailbox_t* m) {
            mb_crc32(0, m, offsetof(mb_mailbox_t, crc)) == m->crc && m->end.reason <= MB_END_LOADER;
 }
 
-// The image that ran last left it: the log says which (asked first), but the log may
-// not know (a board whose log couldn't be written), so every slot's image is asked.
+// The image that ran last left it: the log says which. When the log doesn't know
+// (a board whose log couldn't be written), every slot's image is asked.
 static bool take(const mb_port_t* p, const mb_bcl_rec_t* log, mb_mailbox_t* m) {
     if (!p->ram_ptr || !p->retains_ram) return false;
-    int last = log->last_slot < p->layout->n_slots ? log->last_slot : -1;
-    if (last >= 0 && take_from(p, last, m)) return true;
+    if (log->last_slot < p->layout->n_slots) return take_from(p, log->last_slot, m);
     for (int s = 0; s < p->layout->n_slots; s++)
-        if (s != last && take_from(p, s, m)) return true;
+        if (take_from(p, s, m)) return true;
     return false;
 }
 

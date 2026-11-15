@@ -277,6 +277,7 @@ typedef struct {
 
 #define MB_F_MENU       0x01    /* stop in the menu (key pressed) */
 #define MB_F_NO_TRIAL   0x02    /* only images that need no log write (the log is failing) */
+#define MB_F_AGAIN      0x04    /* not the first decision this power-up: the reset was counted already */
 
 /* Reconcile the log with what is in flash, consume requests, resolve the
  * entry (one-shot, else the default), walk its candidates verifying each

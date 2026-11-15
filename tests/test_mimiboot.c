@@ -2620,6 +2620,31 @@ static void test_os_hooks(void) {
     ctl_out[0] = 0;
     strcpy(line, "frobnicate");
     CHECK(mb_ctl_line(line, ctl_print, NULL) == MB_E_BADARG && strstr(ctl_out, "unknown command"), "an unknown command: help");
+    printf("OS hooks: a panic with a menu request: one strike, however often it decides\n");
+    {
+        sim_reset();
+        put_v2(MB_SLOT_A, "pm", MB_VERSION(1, 0, 0), 59, MB_HANDOFF_V2_SIZE);
+        boot();
+        app_confirms();
+        CHECK(boot() == MB_SLOT_A && log_now().strikes == 0, "A good, no strikes");
+        app_start(MB_SLOT_A);
+        mb_client_next(MB_CONTROL_MENU, NULL, NULL, MB_VIA_AUTO);
+        app_reset(panic_fn, "panic, then the menu");
+        sim.console = true;
+        sim_input("c\rexit\r", 7);
+        CHECK(boot() == MB_SLOT_A && strstr(sim.out, "MimiBoot"), "the menu, then exit: A");
+        sim.console = false;
+        CHECK(log_now().strikes == 1, "one strike, not one per decision (%u)", (unsigned)log_now().strikes);
+        sim.reset_cause = MB_RESET_WATCHDOG;                        // the same through the watchdog: the menu by key
+        sim.console = true;
+        sim.button = true;
+        sim_input("c\rexit\r", 7);
+        boot();
+        sim.button = false;
+        sim.console = false;
+        CHECK(log_now().strikes == 2, "a watchdog reset then the menu: one more (%u)", (unsigned)log_now().strikes);
+        sim.reset_cause = MB_RESET_SOFT;
+    }
     printf("OS hooks: the built-in recovery entry with args (golden only, as a fresh board)\n");
     {
         sim_reset();

@@ -367,7 +367,7 @@ int mb_decide(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg, m
         r.flags &= (uint8_t)~MB_LF_HANDOVER;
     }
 #if MB_FEAT_CRASH_GUARD
-    else {
+    else if (!(flags & MB_F_AGAIN)) {
         // a crash: a watchdog reset, or the OS saying it panicked / faulted (in the mailbox)
         uint32_t cause = p->reset_cause ? p->reset_cause() : 0;
         bool crash = (cause & MB_RESET_WATCHDOG) || mb_mailbox_crashed();
@@ -946,10 +946,6 @@ void mb_main(const mb_port_t *p) {
         static mb_plan_t plan;
         mb_boot_progress(2);
         mb_bcl_load(&log, p);
-        if (!mailbox_read) { // once per power-up: why the last run ended, and what it asked for
-            mb_mailbox_take(p, &log.cur);
-            mailbox_read = true;
-        }
         if (faulted >= 0 && faulted < p->layout->n_slots) {
             mb_bcl_rec_t r = log.cur;
             // the check never finished, so the log may not know this image yet:
@@ -960,6 +956,10 @@ void mb_main(const mb_port_t *p) {
             mb_bcl_commit(&log, &r);
             faulted = -1;
         }
+        if (!mailbox_read) { // once per power-up: why the last run ended, and what it asked for
+            mb_mailbox_take(p, &log.cur);
+            mailbox_read = true;
+        }
 #ifdef MB_BOOT_DIAGNOSTICS
         if(log.cur.request==MB_REQ_NONE)flags|=MB_F_MENU;
         else if(log.cur.request==MB_REQ_BOOT_ONCE||log.cur.request==MB_REQ_ENTRY_ONCE||log.cur.request==MB_REQ_CONTROL)flags&=~MB_F_MENU;
@@ -969,6 +969,7 @@ void mb_main(const mb_port_t *p) {
         mb_boot_progress(4);
         mb_decide(p, &log, &cfg, info, flags, &plan);
         flags &= ~MB_F_MENU;
+        flags |= MB_F_AGAIN;        // a later decision this power-up (after the menu) counts no crash again
         if (plan.choice.want_rom && p->reboot_rom) {
             if (plan.base_dirty)
                 mb_bcl_commit(&log, &plan.base);
