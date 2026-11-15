@@ -18,6 +18,11 @@
 #include "mimiboot/mb_handoff.h"
 #include "mimiboot/mb_control.h"
 
+/* How big an image's handoff buffer is: v2 when its header says so, else v1 */
+static inline uint32_t mb_handoff_size(const mb_image_hdr_t* h) {
+    return h->handoff_size >= MB_HANDOFF_V2_SIZE ? MB_HANDOFF_V2_SIZE : MB_HANDOFF_V1_SIZE;
+}
+
 /* errors */
 #define MB_OK           0
 #define MB_E_IO         (-1)

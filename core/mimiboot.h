@@ -370,11 +370,7 @@ int mb_slot_write(const mb_port_t* p, int slot, uint32_t payload_off, const void
 int mb_slot_write_header(const mb_port_t* p, int slot, const mb_image_hdr_t* hdr);
 int mb_slot_write_lms(const mb_port_t* p, int slot, const uint8_t* sig, size_t len);   /* into the erased header sector */
 
-/* ---- handoff and mailbox ---------------------------------------------------------------
- * How big an image's handoff buffer is: v2 when its header says so, else v1. */
-static inline uint32_t mb_handoff_size(const mb_image_hdr_t* h) {
-    return h->handoff_size >= MB_HANDOFF_V2_SIZE ? MB_HANDOFF_V2_SIZE : MB_HANDOFF_V1_SIZE;
-}
+/* ---- handoff and mailbox (mb_handoff_size(): core/mb_port.h) --------------------------- */
 /* core/mb_mailbox.c: read (and clear) the mailbox the last image left, once per power-up,
  * before the boot decision. mb_last_end then says how the previous run ended (the next
  * handoff carries it); mb_mailbox_next holds its request until the decision takes it
