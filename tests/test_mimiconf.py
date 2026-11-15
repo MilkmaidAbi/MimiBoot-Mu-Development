@@ -356,6 +356,10 @@ def two_stage_checks(db):
     check("#define MB_FEAT_TWO_STAGE 1" in h and "#define MB_FEAT_CONSOLE 0" in h and "#define MB_FEAT_RECV 0" in h,
           "stage 0's header: two-stage on, console and uploads off")
     check("#define MB_FEAT_ENC 0" in h, "stage 0's header: no decryption")
+    check("#define MB_FEAT_OS_HOOKS 0" in h, "stage 0's header: no OS hooks (it starts stage 1, not an OS)")
+    check("#define MB_FEAT_OS_HOOKS 1" in gen.mcu_header(cfg, lay, 0x3000), "OS hooks on by default")
+    small = Config(db, "nucleo-f103rb")
+    check(small.effective("OS_HOOKS") and not small.effective("SHELL_DIAG"), "a 32 KB part: OS hooks on, diagnostics off")
     # encrypted images: a key, a valid one, no open memory dump, and a warning about the debug port
     c4 = Config(db, "nucleo-f411re")
     c4.set("ENCRYPTED_IMAGES", True)

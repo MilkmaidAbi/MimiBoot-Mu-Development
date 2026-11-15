@@ -50,9 +50,14 @@ On the 32-bit chips (the "full" core):
   without flashing it.
 - A console on USB (RP) or a UART: boot menu with a countdown, a command line, uploads with
   `mbtool install`, a small boot config file with GRUB-style entries.
-- Pass a handoff block to the started image (which slot, which entry, its arguments, why
-  the chip reset) and take requests back from it ("reboot into the menu", "boot the
-  other slot once").
+- Work with the running system the way GRUB's tools work with Linux (`OS_HOOKS`,
+  [docs/OS-INTEGRATION.md](docs/OS-INTEGRATION.md)): the started image learns where it
+  runs from, its arguments, how the previous run ended (a reboot, an update, a panic with
+  its message and address, the watchdog) and what the bootloader was built with. It can
+  ask for the menu, another entry or slot once, flash mode or the ROM loader, reboot with
+  a reason, report a crash (counted by the crash-loop guard), roll back to the previous
+  release, power off. Requests travel through RAM, so asking writes no flash. `mbctl`
+  puts all of it into the app's own shell.
 - Wipe its own RAM before jumping, so the app starts with nothing of the bootloader left.
 - A crash-loop guard and a watchdog during trial boots.
 - Lock things down where the chip allows it: on nRF it write-protects its own flash

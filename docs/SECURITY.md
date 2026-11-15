@@ -428,6 +428,19 @@ clock, which is unique but predictable to someone who can also reset the boot
 log. Treat CONSOLE_AUTH on those chips as a guard against casual access, not
 against an attacker who already controls the flash.
 
+## The running system (OS hooks)
+
+The image that runs can ask the bootloader for things (docs/OS-INTEGRATION.md),
+through the boot log in flash or a mailbox in RAM. Neither is a privilege: any
+code running on the chip can write both. What they can ask for is limited to
+what the boot log's requests already allowed (the menu, an entry or slot once,
+flash mode, the ROM loader, a preferred A/B image), each request is checked by
+the same code whichever way it came, and an image asked for still has to pass
+its signature, hash and rollback floor. A mailbox counts only when it carries
+the id of the image in whose buffer it lies and a good CRC, and it is used once.
+A rollback through `mb_client_set_active` only reaches a confirmed image at or
+above the floor.
+
 ## Faults
 
 A HardFault or NMI in the bootloader (a flash ECC error, a bus error reading a

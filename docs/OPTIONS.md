@@ -434,6 +434,18 @@ Lets a running OS queue a versioned request (mb_client_request) that the bootloa
 
 C macro: `MB_FEAT_CONTROL`
 
+### `OS_HOOKS`: OS hooks: how the last run ended, the RAM mailbox, handoff v2
+
+default **on**; needs `HANDOFF`. (full core)
+
+The started image gets more in its handoff (v2): what this bootloader was built with, how the previous run ended (a reboot, an update, a power-off, a panic with its message and address, the watchdog), trial state, how long the boot took, and random bytes for its RNG where the chip has one.
+
+And before it resets, the running OS can leave a note in its handoff buffer: why it is resetting (a reboot, an update, a power-off, a panic with a message and an address) and what to boot next (the menu, an entry, a slot, flash mode). MimiBoot reads it first thing, uses it once, and hands "how the last run ended" to the next boot. Nothing is written to flash, so an OS can reboot into the menu as often as it likes. A panic noted here counts as a crash for the crash-loop guard.
+
+RAM survives a reset but not a power cut: a lost note means a normal boot, and requests that must survive power loss go to the boot log in flash (the client library picks). Needs the image's handoff buffer at its full size (images built with this MimiBoot's headers have it).
+
+C macro: `MB_FEAT_OS_HOOKS`
+
 ### `SCRUB_RAM`: Wipe the bootloader's RAM before handing over
 
 default **off**; cost ~32 B on nucleo-f411re. (full core; builds: STM32/nRF/SAMD)
