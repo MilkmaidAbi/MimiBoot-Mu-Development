@@ -1,132 +1,114 @@
 # MimiBoot-Mu
 
-> TUI is damn ugly rn, Imma try to fix it soon? Idk, I can't make good UI. Sowwy OwO
+A bootloader for microcontrollers that you configure like a Linux kernel. It runs on the
+RP2040 and RP2350, STM32, Nordic nRF51 and nRF52, Microchip SAM D21 and D51, and classic
+AVRs such as the ATmega328P on an Arduino Uno.
 
-MimiBoot-Mu is a bootloader for microcontrollers, from small to big bois: RP2040 and RP2350, STM32,
-Nordic nRF51/nRF52, Microchip SAM D21/D51, and classic AVRs like the ATmega328P on
-an Arduino Uno.
+You run **MuConfigurator** (`python muconfigurator.py`), pick your board, switch features
+on or off, and build. The binary contains only what you picked. Change your mind later,
+rerun it, rebuild.
 
-You configure it the way you'd configure a Linux kernel. `python muconfigurator.py` opens a
-menu, you pick your board and switch features on or off, and the build only contains
-what you picked. Change your mind later, rerun it, rebuild.
+**Documentation:** https://milkmaidabi.github.io/MimiBoot-Mu-Docs/ ·
+[feature matrix](https://milkmaidabi.github.io/MimiBoot-Mu-Docs/matrix.html) ·
+[before you flash](https://milkmaidabi.github.io/MimiBoot-Mu-Docs/before-you-flash.html)
 
-Documentation: https://milkmaidabi.github.io/MimiBoot-Mu-Docs/
+> **Status: most of this hasn't run on real hardware yet.** Earlier builds of the
+> RP2040 and RP2350 ports have run on real boards. Everything else has run in emulators
+> (QEMU, simavr), against register models, or has only been compiled.
+> **On STM32, no flash write has ever run on a real chip**: keep an ST-Link on SWD while
+> you try one, and check that you can connect under reset before you start. On nRF and
+> SAM D, have an SWD probe ready; on AVR, an ISP programmer. The
+> [feature matrix](https://milkmaidabi.github.io/MimiBoot-Mu-Docs/matrix.html) shows how
+> far each feature has been tested on each board.
 
-## Why another bootloader - Because duh, this proj is dumb?
+## Why
 
-There are good bootloaders around already. Optiboot on AVR, UF2 bootloaders on SAMD
-and nRF52, MCUboot for Zephyr, the ROM loaders the chips ship with. Each of them is one
-fixed design for one family, and if you want something they don't do - you kinda need to make
-hooks and all, add modules. 
+There are good bootloaders already: Optiboot on AVR, the UF2 bootloaders on SAM D and
+nRF52, MCUboot for Zephyr, the ROM loaders chips ship with. Each is one fixed design for
+one family. If you want something it doesn't do, you end up patching it.
 
-MimiBoot-Mu takes the opposite approach. Every feature is a build option, the same
-options exist on every chip that can support them, and turning one off removes its code.
-The smallest build on an Uno is under 1 KB and only starts the app. The biggest one on
-an STM32 or nRF52 does signed A/B updates with rollback, a boot menu, uploads over the
-console and an API for the running OS, in about 34 KB. Most real setups sit somewhere in
-between, and you can move between them by flipping options instead of switching
-bootloaders.
+MimiBoot-Mu goes the other way. Every feature is a build option, the same options exist
+on every chip that can support them, and turning one off removes its code. The smallest
+build on an Uno is under 1 KB and only starts the app. A big one on an STM32 or nRF52
+does signed A/B updates with rollback, a boot menu, uploads over a serial console or
+mcumgr, and lets the running OS reboot, power off, roll back or pick its next boot,
+in 30 to 50 KB. Most setups sit in between, and you move between them by flipping
+options instead of switching bootloaders.
 
-MimiBoot-Mu is literally no kidding meant to be customisable and an un-serious project.
-Just idk, do stuff I guess? Makes it easy for rapid prototyping and all. Built to be 
-fucked around with. A dumb project - better solutions exist. MimiBoot is a WORSE solution
-that's convenient... because yes. I have no real justification.
+It's built for prototyping and for fiddling with: convenient first, and easy to bend.
 
-## What it does / can do
+## What it can do
 
-On the 32-bit chips (the "full" core):
+On the 32-bit chips (the full core, codename Komorebi):
 
-- Hold one image, an A/B pair, or A/B plus a golden recovery image, plus a few extra slots.
-- Try new A/B images for a few boots and roll back if the app never confirms itself. Or
-  skip that and trust a new image once it checks out, for firmware that knows nothing
-  about MimiBoot.
-- Check images with SHA-256 on every boot, only on their first boot, or not at all.
-- Verify Ed25519, ECDSA P-256 or LMS signatures, optionally refusing anything unsigned. LMS
-  is hash-based, so it holds against quantum computers; a build can carry LMS alone, with no
-  Ed25519 in it. Anti-rollback with a security version floor.
-- Boot MimiBoot's own image format, Zephyr / MCUboot images signed with imgtool, and
-  plain firmware binaries (FreeRTOS, bare metal, Arduino builds).
-- Run images from RAM on chips that need it (RP2040) or when you want to try something
-  without flashing it.
-- A console on USB (RP) or a UART: boot menu with a countdown, a command line, uploads with
-  `mbtool install`, a small boot config file with GRUB-style entries.
-- Work with the running system the way GRUB's tools work with Linux (`OS_HOOKS`,
-  [docs/OS-INTEGRATION.md](docs/OS-INTEGRATION.md)): the started image learns where it
-  runs from, its arguments, how the previous run ended (a reboot, an update, a panic with
-  its message and address, the watchdog) and what the bootloader was built with. It can
-  ask for the menu, another entry or slot once, flash mode or the ROM loader, reboot with
-  a reason, report a crash (counted by the crash-loop guard), roll back to the previous
-  release, power off. Requests travel through RAM, so asking writes no flash. `mbctl`
-  puts all of it into the app's own shell.
-- Wipe its own RAM before jumping, so the app starts with nothing of the bootloader left.
-- A crash-loop guard and a watchdog during trial boots.
-- Lock things down where the chip allows it: on nRF it write-protects its own flash
-  before the app starts, keeps the rollback floors in that locked flash, and can keep
-  the debug port shut. A console lock makes uploads and changes wait for a signed
-  unlock. `mbtool provision` prints the fuse / option-byte steps for the other chips.
-  What holds against whom is in [docs/SECURITY.md](docs/SECURITY.md).
-- Take encrypted images (`ENCRYPTED_IMAGES`): `mbtool pack --encrypt` encrypts the
-  payload for one board key, MimiBoot decrypts it on the way in. Same scheme as
-  MCUboot (AES-CTR, ECIES-X25519). Keeps update files private, not the flash.
-- Measured boot (`BOOT_RECORD`): the started image can get a record of what was
-  checked (signature and key, hash, trial) with a hash of the bootloader and a
-  measurement a server can recompute. A report, not attestation.
-- A console over the chip's own USB on SAM D21/D51 (`CONSOLE_USB`, TinyUSB): for boards
-  whose only connection is USB. Built, not yet run on a board.
-- Talk mcumgr / SMP on the console (`SMP`): Zephyr's tools (mcumgr, smpmgr, smpclient)
-  can list, upload, test, confirm and erase images, MimiBoot's own and imgtool-signed ones.
-- Update itself in the field (`TWO_STAGE`, Cortex-M parts with 192 KB+): a small fixed
-  stage 0 picks between two signed copies of the rest, tries a new one for a few boots
-  and goes back to the old one if it never gets as far as starting an app.
-  `mbtool loader build/` sends a new one.
+- **Slots**: one image, an A/B pair, or A/B plus a golden recovery image, plus extra
+  slots for things you boot on purpose.
+- **Safe updates**: new images get a few trial boots and roll back if the app never
+  confirms itself, or are trusted once they check out, for firmware that knows nothing
+  about MimiBoot. A crash-loop guard and a watchdog during trials.
+- **Checks**: SHA-256 on every boot, on the first boot only, or never.
+- **Signatures**: Ed25519, ECDSA P-256 and LMS (hash-based, post-quantum, RFC 8554), in
+  any mix, optionally refusing anything unsigned. Anti-rollback floors, key revocation,
+  a signed boot config.
+- **Image formats**: MimiBoot's own, Zephyr / MCUboot images signed with imgtool, and
+  plain binaries (FreeRTOS, bare metal, Arduino). Encrypted images in MCUboot's scheme.
+  Images that run from RAM.
+- **Console**: on a UART or USB, with a boot menu, a command line, uploads with
+  `mbtool install`, mcumgr (SMP), and a boot config file with GRUB-style entries. It can
+  be locked behind a signed unlock.
+- **OS hooks**: the running OS learns how it was started and how the previous run ended
+  (a reboot, an update, a panic with its message and address, the watchdog). It can ask
+  for its next boot (the menu, another entry or slot, flash mode, the ROM loader) without
+  writing flash, reboot with a reason, report a crash, roll back, or power off. `mbctl`
+  puts all of it into your app's own shell, the way `bootctl` and `grub-reboot` do on
+  Linux. See [docs/OS-INTEGRATION.md](docs/OS-INTEGRATION.md).
+- **Lock-down**: write-protect the bootloader before the app starts and keep the debug
+  port shut (nRF), wipe the bootloader's RAM before the jump, a measured-boot record for
+  the app. `mbtool provision` prints the fuse and option-byte steps for each chip. What
+  holds against whom is in [docs/SECURITY.md](docs/SECURITY.md).
+- **Updating itself**: a two-stage build has a small fixed stage 0 and two copies of the
+  rest, so a bootloader update can't brick the board.
 
-On AVR (the "lite" core, 1 to 2 KB):
+On AVR (the Lite core, 1 to 2 KB):
 
 - STK500 uploads, so the Arduino IDE and avrdude work unchanged.
-- A CRC-32 check of the app on every boot.
-- Apps can reboot into the bootloader, confirm a trial build, write their own flash
-  through a small service, and stage an update that the bootloader installs.
+- A CRC-32 check of the app on every boot, trial boots, and a flash-write service apps
+  can use to stage an update that the bootloader installs.
 
-All of it is optional. `docs/OPTIONS.md` lists every option with what it costs in flash.
+[docs/OPTIONS.md](docs/OPTIONS.md) lists every option and what it costs in flash.
 
-## Supported boards - (Most untested. I kinda prioritised these because these are the ones I use. Easy to expand)
+## Boards
 
 | Family | Boards |
 |---|---|
 | RP2040, RP2350 | Raspberry Pi Pico, Pico 2 (Arm or RISC-V), Waveshare RP2350-LCD |
 | STM32 F0, F1, F2, F3, F4, F7, L4, G0, G4 | Nucleo boards, Blue Pill, Black Pill F401/F411, F4 Discovery |
-| nRF52832/833/840/810/811/820, nRF51822 | Nordic DKs, Feather nRF52840, XIAO nRF52840, Nano 33 BLE, micro:bit v1/v2 |
+| nRF51822, nRF52832/833/840/810/811/820 | Nordic DKs, Feather nRF52840, XIAO nRF52840, Nano 33 BLE, micro:bit v1/v2 |
 | SAM D21, SAM D51 | Arduino Zero, MKR boards, Feather M0/M4, Trinket M0, XIAO SAMD21, Wio Terminal |
 | ATmega328P, 168, 644P, 1284P, 2560 | Uno, Nano, Pro Mini, Mega and friends |
 
-Adding a board for a chip that's already supported is a few lines in `config/targets.toml`.
-
-How much of this has run on real hardware is written down in
-[docs/HARDWARE-STATUS.md](docs/HARDWARE-STATUS.md). Short version: earlier builds of the
-RP2040/RP2350 ports have run on boards; the rest has run in emulators (QEMU, simavr) or
-only been compiled.
-Read it before you flash something you can't easily recover. (Please, get SWD AND hardware debuggers ready if you wanna
-test the NRF/ SAM D stuff - the code has been audited but just take caution...)
+54 boards in all. A board for a chip that's already supported is a few lines in
+`config/targets.toml`. What ran where is in
+[docs/HARDWARE-STATUS.md](docs/HARDWARE-STATUS.md).
 
 ## Getting started
 
-Need Python 3.11+ and the toolchain for your chip: the Arm GNU Toolchain for STM32,
-nRF and SAMD, avr-gcc (the one the Arduino IDE installs is fine), or the Pico SDK for
-RP boards. `python muconfigurator.py toolchains` shows what it found.
+You need Python 3.11+ and the toolchain for your chip: the Arm GNU Toolchain for STM32,
+nRF and SAM D, avr-gcc (the one the Arduino IDE installs is fine), or the Pico SDK for RP
+boards. `python muconfigurator.py toolchains` shows what it found. On Windows the menu
+also needs `pip install windows-curses`.
 
 ```
 python muconfigurator.py              # pick a board, change options, build
 python muconfigurator.py build        # build the current .config
 ```
 
-The menu's home screen says what the configuration does, area by area, lists what you
-changed from the board's defaults, and puts anything wrong at the bottom (Enter on it
-goes to the option that fixes it). The line under the title shows how much of the
-bootloader's flash it takes: an estimate while you change things, the real figure after
-a build. Changing an option says what else it switched on or off; `u` undoes, `d` puts
-an option back to its default, `/` finds options (or boards) as you type.
+The home screen says what your configuration does, lists what you changed from the
+board's defaults, and shows anything wrong (Enter on it goes to the fix). A gauge under
+the title shows how much of the bootloader's flash it takes. `u` undoes, `d` puts an
+option back to its default, `/` finds options or boards as you type.
 
-Or without the menu (just use the menu, it's easier):
+Without the menu:
 
 ```
 python muconfigurator.py defconfig nucleo-f411re
@@ -135,47 +117,54 @@ python muconfigurator.py set IMG_MCUBOOT=y BOOT_VERIFY=once
 python muconfigurator.py build
 ```
 
-Builds land in `~/MimiBoot/<board>/` unless you set another folder. Along with the
-binary you get a flash map that tells you where to link your app, linker snippets, a
-Zephyr partition overlay, and on AVR the fuse value and a `boards.txt` entry. You can
-also have it export the exact sources it compiled, with a Makefile.
+Builds land in `~/MimiBoot/<board>/` unless you set another folder. With the binary you
+get a flash map that says where to link your app, linker snippets, a Zephyr partition
+overlay, the list of files your app needs for the client library, and on AVR the fuse
+value and a `boards.txt` entry. It can also export the exact sources it compiled, with a
+Makefile.
 
-On Windows the menu needs `pip install windows-curses`. Everything also works from the
-command line.
+Then read [before you flash](https://milkmaidabi.github.io/MimiBoot-Mu-Docs/before-you-flash.html).
 
 ## Tests
 
 ```
-python tests/run.py                       # core logic on the host
-python tests/test_profiles.py             # the core with features switched off
-python tests/test_muconfigurator.py --build-all # configurator, every board compiles
-python tests/qemu/test_qemu.py            # STM32 and nRF51 in QEMU
-python tests/test_sim_flash.py            # SAM D flash driver against a model
-python tests/avr/test_avr.py              # AVR in simavr with avrdude (Linux/WSL)
+python tests/run.py                              # the core on the host
+python tests/test_profiles.py                    # the core with features switched off
+python tests/test_muconfigurator.py --build-all  # the configurator; every board compiles
+python tests/qemu/test_qemu.py                   # STM32 and nRF51 in QEMU
+python tests/test_sim_flash.py                   # SAM D flash driver against a model
+python tests/avr/test_avr.py                     # AVR in simavr with avrdude (Linux/WSL)
+python tests/fuzz/run_fuzz.py                    # libFuzzer on the input parsers (Linux)
 ```
 
-## Source layout - For roguh ref
+CI runs these on every push.
+
+## Source layout
 
 ```
-muconfigurator.py         configurator and builder
+muconfigurator.py   MuConfigurator: menu, command line, builder
 config/             features.toml (the options), targets.toml (chips and boards)
-tools/mu/           the configurator's code
-tools/mbtool.py     pack, sign and upload images
-core/               the full core
-port/               RP2040/RP2350 (Pico SDK), Cortex-M, and the STM32 / nRF / SAMD parts
+tools/mu/           MuConfigurator's code
+tools/mbtool.py     pack, sign, encrypt and upload images; keys; provisioning
+core/               the full core (Komorebi)
+port/               RP2040/RP2350 (Pico SDK), Cortex-M, and the STM32 / nRF / SAM D parts
 lite/               the AVR core
-client/             libraries for apps
-docs/               test status, security, option reference, Zephyr / FreeRTOS notes
+client/             the app library and mbctl
+docs/               test status, security, OS integration, options, Zephyr / FreeRTOS
 ```
+
+## History
+
+> This proj goes all the way back to like Dec 2025 or smth iirc, kinda lost the git
+>  history because I deleted the repo during a iffy moment of bad decisions
+> Some stuff was like poorly reimplemented and all. tryna recreate it.
 
 ## License
 
 MIT. The STK500 code was written from Atmel's AVR061 application note. The ECDSA
-arithmetic is micro-ecc (BSD 2-clause, `third_party/micro-ecc`). The USB console
-uses TinyUSB 0.21.0 (MIT, `third_party/tinyusb`), Arm's CMSIS 6.4.0 core headers
-(Apache-2.0, `third_party/cmsis`) and Microchip's SAM D USB and NVMCTRL register
-headers (Apache-2.0, `third_party/microchip`), all unmodified, with their licence
-files next to them. The AES in `core/mb_enc.c` is adapted from BearSSL's
-constant-time implementation (MIT, Thomas Pornin; the notice is in the file).
-
-(I doubt people will even ever see this proj, so Imma just anyhow put MIT lol)
+arithmetic is micro-ecc (BSD 2-clause, `third_party/micro-ecc`). The USB console uses
+TinyUSB 0.21.0 (MIT, `third_party/tinyusb`), Arm's CMSIS 6.4.0 core headers
+(Apache-2.0, `third_party/cmsis`) and Microchip's SAM D USB and NVMCTRL register headers
+(Apache-2.0, `third_party/microchip`), all unmodified, with their licence files next to
+them. The AES in `core/mb_enc.c` is adapted from BearSSL's constant-time implementation
+(MIT, Thomas Pornin; the notice is in the file).
