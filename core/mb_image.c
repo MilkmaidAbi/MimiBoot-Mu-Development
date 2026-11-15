@@ -8,7 +8,10 @@ _Static_assert(sizeof(mb_image_hdr_t) == MB_IMG_HDR_SIZE, "image header must be 
 _Static_assert(MB_IMG_SIGNED_BYTES == 188, "signed part of the header moved");
 _Static_assert(sizeof(mb_bcl_rec_t) == MB_BCL_REC_SIZE, "log record must be 256 bytes");
 _Static_assert(sizeof(mb_bcl_sect_t) == MB_BCL_REC_SIZE, "log sector header must be one record");
-_Static_assert(sizeof(mb_handoff_t) == 160 && offsetof(mb_handoff_t, crc) == 156, "handoff layout moved");
+_Static_assert(sizeof(mb_handoff_t) == MB_HANDOFF_V2_SIZE && offsetof(mb_handoff_t, crc) == 156 &&
+               offsetof(mb_handoff_t, features) == MB_HANDOFF_V1_SIZE && offsetof(mb_handoff_t, crc2) == 316,
+               "handoff layout moved");
+_Static_assert(sizeof(mb_mailbox_t) <= MB_HANDOFF_V2_SIZE && sizeof(mb_end_t) == 64, "mailbox doesn't fit the buffer");
 
 const char* mb_slot_name(const mb_port_t* p, int slot) {
     if (slot == MB_SLOT_AB) return "ab";

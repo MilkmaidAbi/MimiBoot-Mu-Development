@@ -15,15 +15,25 @@
  *   mb_client_install_*()            write a new image into the other slot (A/B update)
  *   mb_client_recv(...)              ... or receive one over a byte stream (OTA)
  *
- * Two ways to ask for a boot mode:
- *   mb_client_request()   writes the request into the boot log. Always works,
- *                         with any MimiBoot build and without a handoff.
- *   mb_client_control()   the control service: more (boot profiles, config
- *                         mode, reboot at once). Only when this boot's
- *                         handoff says the bootloader has it: check
- *                         mb_client_capabilities() & MB_CAP_CONTROL first;
- *                         without it the call returns MB_E_UNSUPP and
- *                         mb_client_request() is the fallback.
+ * OS hooks (docs/OS-INTEGRATION.md): the next boot, reboots, crashes, power-off
+ *   mb_client_next(action, target, args, how)   what the next boot does, once: the menu,
+ *                         an entry or slot (with args), flash mode, the ROM loader
+ *   mb_client_reboot(reason, msg)   reset now, telling the next boot why
+ *   mb_client_panic(msg) / mb_client_fault(pc, lr, info)   give up: counted as a crash
+ *   mb_client_poweroff(msg)          off (where the chip can), noted as a clean shutdown
+ *   mb_client_last_end(&end)         how the previous run ended (reason, message, address)
+ *   mb_client_slot_info / set_active / rollback / entries / loader_info
+ *   client/mb_ctl.h: all of it as shell commands (`mbctl ...`) for the OS's own shell
+ *
+ * How a request travels (mb_client_transport(), picked for you):
+ *   MB_VIA_MAILBOX  RAM, read once by the next boot: no flash write, lost on a power cut.
+ *                   When this boot's handoff (v2) says the bootloader reads one.
+ *   MB_VIA_FLASH    the boot log (control service): survives a power cut. Asked for
+ *                   explicitly (how = MB_VIA_FLASH), or when there is no mailbox.
+ *   MB_VIA_LEGACY   the boot log's old one-shot requests (mb_client_request): any
+ *                   MimiBoot, no handoff needed; menu, entry, slot, flash mode, ROM only.
+ * The older calls stay: mb_client_request() writes the log directly (always works),
+ * mb_client_control() / mb_client_reboot_*() go through the control service.
  */
 #ifndef MIMIBOOT_CLIENT_H
 #define MIMIBOOT_CLIENT_H
@@ -82,6 +92,68 @@ int mb_client_recv(int slot, void *io, int (*getc)(void *io, uint32_t ms), void 
                    uint16_t max_frame);
 
 uint32_t mb_client_capabilities(void);
+
+/* ---- OS hooks ---------------------------------------------------------------------- */
+#define MB_VIA_AUTO     0       /* how: the mailbox when there is one, else the log */
+#define MB_VIA_FLASH    1       /* how: the log in flash (survives a power cut); also a result */
+#define MB_VIA_MAILBOX  2       /* result: RAM, for the next reset */
+#define MB_VIA_LEGACY   3       /* result: the log's old one-shot request */
+int mb_client_transport(void);                          /* MB_VIA_MAILBOX / _FLASH / _LEGACY */
+/* action MB_CONTROL_*: target = an entry name (ENTRY) or a slot name (SLOT), args = the
+ * command line for that boot (NULL: the entry's own). >0: how it went (MB_VIA_*), <0: error.
+ * A mailbox request takes effect with the next mb_client_reboot() (or any reset this
+ * library does); a log request at the next reset of any kind. */
+int mb_client_next(unsigned action, const char *target, const char *args, int how);
+int mb_client_next_boot(const mb_control_request_t *q, int how);
+/* reset now (doesn't return; MB_E_UNSUPP when the port can't). reason MB_END_*: REBOOT, UPDATE... */
+int mb_client_reboot(int reason, const char *msg);
+/* give up: noted as a crash (the crash-loop guard counts it; after a few in a row the
+ * previous image boots instead). Safe from a fault handler: RAM only, never flash. Without
+ * the mailbox, a watchdog reset where the port has one. pc for panic: the caller. */
+void mb_client_panic(const char *msg) __attribute__((noreturn));
+void mb_client_fault(uint32_t pc, uint32_t lr, uint32_t info) __attribute__((noreturn));
+int mb_client_poweroff(const char *msg);                /* MB_E_UNSUPP: this chip/port can't */
+int mb_client_last_end(mb_end_t *out);                  /* MB_E_UNSUPP without a v2 handoff */
+
+typedef struct {
+    int slot;
+    char name[8];               /* "a", "b", "g", ... */
+    uint8_t role;               /* MB_ROLE_* */
+    uint32_t size;              /* bytes */
+    bool present;               /* a valid header */
+    bool running;               /* this image */
+    bool active;                /* the preferred A/B slot */
+    bool below_floor;           /* under the rollback floor: won't boot */
+    uint8_t format;             /* MB_FMT_* */
+    uint8_t state;              /* MB_ST_* for this image (NEW: not booted yet) */
+    uint8_t bad_reason;         /* MB_BAD_* */
+    uint8_t tries_left;
+    uint32_t version, security_version, flags, payload_size;
+    uint64_t image_id;
+    char image_name[32];
+} mb_client_slot_t;
+int mb_client_slot_info(int slot, mb_client_slot_t *out);
+/* make another confirmed A/B image the preferred one (GOOD, at or above the floor) */
+int mb_client_set_active(int slot);
+int mb_client_rollback(void);                           /* set_active(the other A/B slot) */
+
+typedef struct {
+    char name[16], title[32];
+    uint8_t slot;               /* MB_SLOT_AB for "the A/B pair" */
+    bool is_default;
+} mb_client_entry_t;
+int mb_client_entries(mb_client_entry_t *out, int max); /* how many (the built-in ones without a config) */
+
+typedef struct {
+    const char *board, *target;
+    int n_slots;
+    uint32_t version;           /* MB_VERSION() of the bootloader */
+    uint32_t caps;              /* MB_CAP_* */
+    uint64_t features;          /* MB_HF_* (v2 handoffs) */
+    int handoff_version;        /* 1, 2 */
+    uint32_t boot_ms;
+} mb_client_loader_t;
+int mb_client_loader_info(mb_client_loader_t *out);    /* MB_E_UNSUPP: no handoff (board and layout still filled) */
 int mb_client_control(const mb_control_request_t *request, bool reboot_now);
 int mb_client_reboot_menu(void);
 int mb_client_reboot_config(void);

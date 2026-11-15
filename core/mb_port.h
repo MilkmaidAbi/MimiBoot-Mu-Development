@@ -169,6 +169,11 @@ typedef struct mb_port {
     /* MB_FEAT_LMS: hash-based (post-quantum) image keys, and the stage-1 ones (two-stage) */
     const mb_keyring_lms_t* lms_keys;
     const mb_keyring_lms_t* stage1_lms_keys;
+
+    /* OS hooks: RAM keeps its contents across a reset that isn't a power cut (the
+     * RAM mailbox is read only then), and the app side can power the chip off */
+    bool retains_ram;
+    void (*poweroff)(void);
 } mb_port_t;
 
 #endif

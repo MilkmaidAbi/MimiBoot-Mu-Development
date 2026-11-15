@@ -16,6 +16,7 @@
  */
 #include "tests/sim_port.h"
 #include "client/mb_client.h"
+#include "client/mb_ctl.h"
 #include "tests/gen_signed.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -2339,6 +2340,289 @@ static void test_lms_images(void) {
 }
 #endif
 
+
+// ---------------------------------------------------------------------------
+// OS hooks: handoff v2, the RAM mailbox, crashes, slots (MB_FEAT_OS_HOOKS)
+// ---------------------------------------------------------------------------
+#if MB_FEAT_OS_HOOKS
+// an image whose handoff buffer is v2-sized (what mbtool writes for apps built with today's headers)
+static mb_image_hdr_t put_v2(int slot, const char* name, uint32_t version, uint32_t seed, uint16_t hsize) {
+    make_payload(seed, 20000);
+    mb_image_hdr_t h = make_header_ex(name, version, 1, 20000, slot == MB_SLOT_GOLDEN ? MB_IMG_F_GOLDEN : 0, MB_ARCH_ARM,
+                                      MB_LOAD_CHAIN, 0, HANDOFF_ADDR);
+    h.handoff_size = hsize;
+    mb_image_seal(&h);
+    put_image(slot, &h);
+    return h;
+}
+
+// the app side, as it starts: init, take the handoff
+static void app_start(int slot) {
+    sim.self_slot = slot;
+    mb_client_init(&sim_port);
+    mb_client_set_handoff(ram_handoff());
+}
+
+typedef struct { int reason; const char* msg; } reboot_t;
+static void reboot_fn(void* ctx) { reboot_t* r = ctx; mb_client_reboot(r->reason, r->msg); }
+static void panic_fn(void* ctx) { mb_client_panic((const char*)ctx); }
+static void fault_fn(void* ctx) { (void)ctx; mb_client_fault(0x00012345u, 0x00023457u, 0x00000400u); }
+
+// reset from the app (the next power_on sees a soft reset, as the hardware would say)
+static sim_outcome_t app_reset(void (*fn)(void*), void* ctx) {
+    sim.reset_cause = MB_RESET_SOFT;
+    sim_outcome_t o = sim_guard(fn, ctx);
+    return o;
+}
+
+static char ctl_out[4096];
+static void ctl_print(void* ctx, const char* s) {
+    (void)ctx;
+    strncat(ctl_out, s, sizeof(ctl_out) - strlen(ctl_out) - 1);
+}
+static void ctl_reboot_fn(void* ctx) { mb_ctl_line((char*)ctx, ctl_print, NULL); }
+// MBCTL_SHOW=1 prints what mbctl says (to read it as a person would)
+static int mb_ctl_show(char* line) {
+    char copy[64];
+    snprintf(copy, sizeof copy, "%s", line);
+    int rc = mb_ctl_line(line, ctl_print, NULL);
+    if (getenv("MBCTL_SHOW")) printf("\n$ mbctl %s\n%s", copy, ctl_out);
+    return rc;
+}
+
+static void test_os_hooks(void) {
+    printf("OS hooks: handoff v2 (what the image learns)\n");
+    sim_reset();
+    sim.reset_cause = MB_RESET_POWER;
+    mb_image_hdr_t ha = put_v2(MB_SLOT_A, "os", MB_VERSION(1, 0, 0), 51, MB_HANDOFF_V2_SIZE);
+    CHECK(boot() == MB_SLOT_A, "boots");
+    mb_handoff_t* ho = ram_handoff();
+    CHECK(ho->version == 2 && ho->size == MB_HANDOFF_V2_SIZE && ho->crc2 == mb_crc32(0, ho, offsetof(mb_handoff_t, crc2)),
+          "a v2 block, both CRCs");
+    CHECK(ho->crc == mb_crc32(0, ho, offsetof(mb_handoff_t, crc)), "its v1 part checks out alone (old readers)");
+    CHECK((ho->caps & MB_CAP_MAILBOX) && (ho->features & MB_HF_MAILBOX) && (ho->features & MB_HF_CONTROL), "caps and features");
+    CHECK(ho->prev.reason == MB_END_POWER_ON && !(ho->prev.flags & MB_ENDF_NOTED), "previous run: power-on (from the reset cause)");
+    CHECK((ho->hflags & MB_HO_TRIAL) && ho->trial_ms == MB_DEFAULT_TRIAL_MS && ho->tries_left > 0, "a trial boot says so");
+    app_start(MB_SLOT_A);
+    mb_client_loader_t li;
+    CHECK(mb_client_loader_info(&li) == MB_OK && li.handoff_version == 2 && li.version == MIMIBOOT_VERSION_NUM,
+          "loader_info from the handoff");
+    CHECK(mb_client_transport() == MB_VIA_MAILBOX, "requests can go through RAM");
+    mb_client_confirm();
+
+    printf("OS hooks: an image with a v1 buffer gets v1, nothing written past it\n");
+    put_v2(MB_SLOT_B, "old", MB_VERSION(0, 9, 0), 52, 0);         // (handoff_size 0: built before v2)
+    memset(sim_ram + (HANDOFF_ADDR - SIM_RAM_BASE), 0xAA, MB_HANDOFF_V2_SIZE);
+    sim.self_slot = MB_SLOT_A;
+    mb_client_init(&sim_port);
+    mb_client_request(MB_REQ_BOOT_ONCE, MB_SLOT_B);
+    CHECK(boot() == MB_SLOT_B && ho->version == 1 && ho->size == MB_HANDOFF_V1_SIZE, "a v1 block");
+    bool untouched = true;
+    for (unsigned i = MB_HANDOFF_V1_SIZE; i < MB_HANDOFF_V2_SIZE; i++)
+        untouched &= sim_ram[HANDOFF_ADDR - SIM_RAM_BASE + i] == 0xAA;
+    CHECK(untouched, "bytes 160..319 untouched");
+    app_start(MB_SLOT_B);
+    mb_end_t e;
+    CHECK(mb_client_handoff() && mb_client_last_end(&e) == MB_E_UNSUPP && mb_client_transport() != MB_VIA_MAILBOX,
+          "the client takes v1: no previous-run record, no mailbox");
+
+    printf("OS hooks: reboot into the menu through RAM, no flash write\n");
+    app_confirms();                                                 // B good (and preferred) ...
+    sim.self_slot = MB_SLOT_B;
+    mb_client_init(&sim_port);
+    mb_client_request(MB_REQ_BOOT_ONCE, MB_SLOT_A);
+    CHECK(boot() == MB_SLOT_A, "A once");
+    app_confirms();                                                 // ... then A again: both good, A preferred
+    CHECK(boot() == MB_SLOT_A, "A");
+    app_start(MB_SLOT_A);
+    CHECK(mb_client_next(MB_CONTROL_MENU, NULL, NULL, MB_VIA_AUTO) == MB_VIA_MAILBOX, "queued in RAM");
+    uint32_t w = writes();
+    reboot_t rb = { MB_END_REBOOT, "menu please" };
+    CHECK(app_reset(reboot_fn, &rb) == SIM_REBOOT, "the app resets");
+    sim.console = true;
+    sim_input("c\rlast\rexit\r", 12);
+    CHECK(boot() == MB_SLOT_A && strstr(sim.out, "MimiBoot"), "the menu came up; exit boots A");
+    CHECK(strstr(sim.out, "last run ended: reboot (the OS said so)") && strstr(sim.out, "menu please"), "the console's 'last'");
+    sim.console = false;
+    CHECK(writes() == w, "and nothing was written to flash (%u writes)", (unsigned)(writes() - w));
+    CHECK(ho->prev.reason == MB_END_REBOOT && (ho->prev.flags & MB_ENDF_NOTED) && !strcmp(ho->prev.msg, "menu please"),
+          "the next handoff says why the last run ended");
+    CHECK(boot() == MB_SLOT_A && ho->prev.reason == MB_END_UNKNOWN, "used once: a plain reset after it is 'unknown'");
+
+    printf("OS hooks: boot another slot once, with args, through RAM\n");
+    app_start(MB_SLOT_A);
+    CHECK(mb_client_next(MB_CONTROL_SLOT, "b", "safe=1", MB_VIA_AUTO) == MB_VIA_MAILBOX, "queued");
+    rb.reason = MB_END_UPDATE;
+    rb.msg = "trying b";
+    app_reset(reboot_fn, &rb);
+    CHECK(boot() == MB_SLOT_B && log_now().last_kind == MB_KIND_ONCE && !strcmp(ho->args, "safe=1"), "B once, with its args");
+    CHECK(boot() == MB_SLOT_A, "then A again");
+
+    printf("OS hooks: what the bootloader ignores\n");
+    app_start(MB_SLOT_A);
+    mb_client_next(MB_CONTROL_SLOT, "b", NULL, MB_VIA_AUTO);
+    app_reset(reboot_fn, &rb);
+    mb_mailbox_t* m = (mb_mailbox_t*)ram_handoff();
+    m->image_id ^= 1;
+    m->crc = mb_crc32(0, m, offsetof(mb_mailbox_t, crc));
+    CHECK(boot() == MB_SLOT_A && log_now().last_kind != MB_KIND_ONCE, "a mailbox from another image: ignored");
+    app_start(MB_SLOT_A);
+    mb_client_next(MB_CONTROL_SLOT, "b", NULL, MB_VIA_AUTO);
+    app_reset(reboot_fn, &rb);
+    m->end.msg[0] ^= 1;                                             // CRC now wrong
+    CHECK(boot() == MB_SLOT_A, "a damaged one: ignored");
+    app_start(MB_SLOT_A);
+    mb_control_request_t q;
+    memset(&q, 0, sizeof q);
+    q.version = MB_CONTROL_API_VERSION;
+    q.size = sizeof q;
+    q.action = MB_CONTROL_SLOT;
+    q.slot = 9;                                                     // no such slot
+    CHECK(mb_client_next_boot(&q, MB_VIA_AUTO) == MB_VIA_MAILBOX, "(the client passes what it can't know)");
+    app_reset(reboot_fn, &rb);
+    sim.console = true;
+    sim_input("c\rexit\r", 7);
+    boot();
+    sim.console = false;
+    CHECK(strstr(sim.out, "MimiBoot") != NULL, "a bad request (the log's own check refuses it): stops in the menu");
+
+    printf("OS hooks: a request in flash comes before one in RAM\n");
+    app_start(MB_SLOT_A);
+    mb_client_next(MB_CONTROL_MENU, NULL, NULL, MB_VIA_AUTO);       // RAM
+    CHECK(mb_client_request(MB_REQ_BOOT_ONCE, MB_SLOT_B) == MB_OK, "and B once in the log (written directly)");
+    app_reset(reboot_fn, &rb);
+    CHECK(boot() == MB_SLOT_B, "flash wins: B once (no menu)");
+    boot();
+
+    printf("OS hooks: panics count as crashes; enough in a row and the other image boots\n");
+    install_raw(MB_SLOT_B, "older", MB_VERSION(0, 9, 5), 1, 53, 20000);
+    sim.self_slot = MB_SLOT_A;
+    mb_client_init(&sim_port);
+    mb_client_request(MB_REQ_BOOT_ONCE, MB_SLOT_B);
+    boot();
+    app_confirms();                                                 // B good
+    sim.self_slot = MB_SLOT_B;
+    mb_client_init(&sim_port);
+    mb_client_request(MB_REQ_BOOT_ONCE, MB_SLOT_A);
+    CHECK(boot() == MB_SLOT_A, "A");
+    app_confirms();                                                 // A good and active again
+    CHECK(boot() == MB_SLOT_A, "A active");
+    app_start(MB_SLOT_A);
+    CHECK(app_reset(panic_fn, "out of heap") == SIM_REBOOT, "panic resets");
+    CHECK(boot() == MB_SLOT_A && log_now().strikes == 1, "one strike");
+    CHECK(ho->prev.reason == MB_END_PANIC && (ho->prev.flags & MB_ENDF_CRASH) && ho->prev.pc && !strcmp(ho->prev.msg, "out of heap"),
+          "the next boot knows: panic, where, why");
+    app_start(MB_SLOT_A);
+    app_reset(fault_fn, NULL);
+    CHECK(boot() == MB_SLOT_A && log_now().strikes == 2 && ho->prev.reason == MB_END_FAULT && ho->prev.pc == 0x12345u &&
+          ho->prev.info == 0x400u, "a fault: strike two, its registers handed on");
+    int got = MB_SLOT_A;
+    for (int i = 2; i < MB_STRIKES_MAX && got == MB_SLOT_A; i++) {
+        app_start(MB_SLOT_A);
+        app_reset(panic_fn, "again");
+        got = boot();
+    }
+    CHECK(got == MB_SLOT_B, "after %d crashes in a row: the other good image (B)", MB_STRIKES_MAX);
+
+    printf("OS hooks: without a mailbox, a panic goes through the watchdog and still counts\n");
+    sim_reset();
+    install_raw(MB_SLOT_B, "older", MB_VERSION(0, 9, 5), 1, 53, 20000);
+    boot();
+    app_confirms();                                                 // B good
+    put_v2(MB_SLOT_A, "v1buf", MB_VERSION(1, 1, 0), 54, 0);         // A: a v1 buffer, no mailbox
+    boot();
+    app_confirms();
+    got = MB_SLOT_A;
+    for (int i = 0; i < MB_STRIKES_MAX && got == MB_SLOT_A; i++) {
+        app_start(MB_SLOT_A);
+        CHECK(app_reset(panic_fn, "no box") == SIM_REBOOT && sim.reset_cause == MB_RESET_WATCHDOG, "panic %d: a watchdog reset", i + 1);
+        got = boot();
+    }
+    CHECK(got == MB_SLOT_B, "counted all the same: B after %d", MB_STRIKES_MAX);
+
+    printf("OS hooks: slots, rollback on demand, entries\n");
+    sim_reset();
+    install_raw(MB_SLOT_B, "first", MB_VERSION(1, 0, 0), 1, 55, 20000);
+    boot();
+    app_confirms();
+    put_v2(MB_SLOT_A, "second", MB_VERSION(1, 1, 0), 56, MB_HANDOFF_V2_SIZE);
+    boot();
+    app_confirms();                                                 // A active, B good
+    app_start(MB_SLOT_A);
+    mb_client_slot_t si;
+    CHECK(mb_client_slot_info(MB_SLOT_A, &si) == MB_OK && si.present && si.running && si.active && si.state == MB_ST_GOOD &&
+          si.version == MB_VERSION(1, 1, 0) && !strcmp(si.image_name, "second"), "slot a: running, active, good");
+    CHECK(mb_client_slot_info(MB_SLOT_B, &si) == MB_OK && si.present && !si.running && !si.active && si.state == MB_ST_GOOD,
+          "slot b: good, standing by");
+    CHECK(mb_client_slot_info(MB_SLOT_GOLDEN, &si) == MB_OK && !si.present, "golden: empty");
+    CHECK(mb_client_rollback() == MB_OK && log_now().active == MB_SLOT_B, "rollback: B is preferred");
+    CHECK(boot() == MB_SLOT_B, "and boots");
+    sim.self_slot = MB_SLOT_B;
+    mb_client_init(&sim_port);
+    CHECK(mb_client_set_active(MB_SLOT_A) == MB_OK && boot() == MB_SLOT_A, "and forward again");
+    // a floor above both (security 1): neither may become the preferred one
+    mb_bcl_t lb;
+    mb_bcl_load(&lb, &sim_port);
+    mb_bcl_rec_t r = lb.cur;
+    r.min_security = 2;
+    mb_bcl_commit(&lb, &r);
+    sim.self_slot = MB_SLOT_B;
+    mb_client_init(&sim_port);
+    CHECK(mb_client_set_active(MB_SLOT_A) == MB_E_REFUSED, "an image below the rollback floor can't be made active");
+    CHECK(mb_client_set_active(MB_SLOT_GOLDEN) == MB_E_BADARG, "golden isn't an A/B slot");
+    save_cfg("default os\nentry os\n title The OS\n slot ab\nentry rescue\n title Rescue\n slot g\n");
+    mb_client_entry_t ent[4];
+    int ne = mb_client_entries(ent, 4);
+    CHECK(ne == 2 && !strcmp(ent[0].name, "os") && ent[0].is_default && !strcmp(ent[1].title, "Rescue"), "the config's entries");
+    CHECK(mb_client_poweroff("bye") == MB_E_UNSUPP, "power-off: this port can't");
+    (void)ha;
+
+    printf("OS hooks: mbctl, the shell commands\n");
+    r.min_security = 1;                                             // (floor back where the images are)
+    mb_bcl_load(&lb, &sim_port);
+    r = lb.cur;
+    r.min_security = 1;
+    mb_bcl_commit(&lb, &r);
+    CHECK(boot() == MB_SLOT_A, "A");
+    app_start(MB_SLOT_A);
+    ctl_out[0] = 0;
+    char line[64];
+    strcpy(line, "mbctl status");
+    CHECK(mb_ctl_show(line) == MB_OK && strstr(ctl_out, "running   slot a: \"second\" 1.1.0") &&
+          strstr(ctl_out, "handoff v2") && strstr(ctl_out, "through RAM"), "status (%s)", ctl_out);
+    ctl_out[0] = 0;
+    strcpy(line, "slots");
+    CHECK(mb_ctl_show(line) == MB_OK && strstr(ctl_out, "a   >*  second") && strstr(ctl_out, "(empty)"),
+          "slots (%s)", ctl_out);
+    ctl_out[0] = 0;
+    strcpy(line, "entries");
+    CHECK(mb_ctl_show(line) == MB_OK && strstr(ctl_out, "* os") && strstr(ctl_out, "Rescue"), "entries");
+    ctl_out[0] = 0;
+    strcpy(line, "info");
+    CHECK(mb_ctl_show(line) == MB_OK && strstr(ctl_out, "mailbox") && strstr(ctl_out, "control"), "info (%s)", ctl_out);
+    ctl_out[0] = 0;
+    strcpy(line, "next slot q");
+    CHECK(mb_ctl_line(line, ctl_print, NULL) == MB_E_BADARG, "a slot that doesn't exist: refused");
+    put_v2(MB_SLOT_GOLDEN, "rescue", MB_VERSION(1, 0, 0), 57, MB_HANDOFF_V2_SIZE);
+    boot();                                                         // (golden seen and verified once)
+    CHECK(sim.booted_slot == MB_SLOT_A, "A again");
+    app_start(MB_SLOT_A);
+    ctl_out[0] = 0;
+    strcpy(line, "reboot entry rescue level=2 -- testing");
+    CHECK(sim_guard(ctl_reboot_fn, line) == SIM_REBOOT && strstr(ctl_out, "next boot: entry rescue, through RAM"),
+          "reboot entry rescue (%s)", ctl_out);
+    sim.reset_cause = MB_RESET_SOFT;
+    uint32_t w2 = writes();
+    CHECK(boot() == MB_SLOT_GOLDEN && !strcmp(ram_handoff()->args, "level=2") && !strcmp(ram_handoff()->entry_name, "rescue"),
+          "golden, as the rescue entry, with the args");
+    CHECK(!strcmp(ram_handoff()->prev.msg, "testing") && ram_handoff()->prev.reason == MB_END_REBOOT, "and the reason given");
+    CHECK(log_now().request == MB_REQ_NONE, "consumed (%u flash writes: the boot record)", (unsigned)(writes() - w2));
+    ctl_out[0] = 0;
+    strcpy(line, "frobnicate");
+    CHECK(mb_ctl_line(line, ctl_print, NULL) == MB_E_BADARG && strstr(ctl_out, "unknown command"), "an unknown command: help");
+}
+#endif
+
 int main(int argc, char** argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc == 3 && !strcmp(argv[1], "--image")) return boot_file(argv[2]);
@@ -2375,6 +2659,9 @@ int main(int argc, char** argv) {
     test_two_stage();
     test_store_compaction();
     test_smp();
+#if MB_FEAT_OS_HOOKS
+    test_os_hooks();
+#endif
 #if MB_FEAT_LMS
     test_lms_images();
 #endif

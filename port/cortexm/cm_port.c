@@ -360,11 +360,23 @@ static int client_self_slot(void) {
     }
     return MB_SLOT_NONE;
 }
+#ifdef MB_VENDOR_NRF
+// POWER->SYSTEMOFF (0x40000500 on nRF51 and nRF52): off until a wake-up source (a
+// GPIO with SENSE, NFC, a reset) starts the chip again, through the bootloader
+static void client_poweroff(void) {
+    *(volatile uint32_t*)0x40000500u = 1;
+    for (;;) __asm volatile("wfe");
+}
+#define POWEROFF client_poweroff
+#else
+#define POWEROFF NULL
+#endif
 const mb_port_t mb_mcu_port = {
     .name = MB_BOARD_NAME, .target = MB_TARGET, .layout = &layout, .arch = MB_ARCH_ARM,
     .keys = KEYRING, .p256_keys = P256_RING, .lms_keys = LMS_RING, .require_signature = MB_REQUIRE_SIGNATURE,
     .flash_read = f_read, .flash_erase = f_erase, .flash_program = f_program, .reboot = client_reboot,
     .self_slot = client_self_slot, .floor = FLOOR, .revoke_keys = REVOKE_RING,
+    .retains_ram = true, .poweroff = POWEROFF,
 };
 #else
 
@@ -624,6 +636,7 @@ const mb_port_t mb_mcu_port = {
     .capabilities = caps, .floor = FLOOR, .fault_slot = fault_slot, .lockdown = LOCK_TXT DEBUG_TXT,
     .stage1_slot = STAGE1_SLOT, .stage1_keys = S1_RING, .stage1_p256_keys = S1_P256_RING, .stage1_lms_keys = S1_LMS_RING, .flash_base = MB_FLASH_BASE, .revoke_keys = REVOKE_RING,
     .enc_key = ENC_KEY, .loader_hash = LOADER_HASH,
+    .retains_ram = true,    /* SRAM keeps its contents across a soft or watchdog reset on these parts */
 };
 
 int main(void) {

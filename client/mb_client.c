@@ -15,8 +15,10 @@ static struct {
     uint32_t page_at;           /* payload offset of the page being gathered */
     uint8_t page[256];          /* written whole, once (write-once flash units) */
 } inst;
-static mb_handoff_t ho; // our copy of this boot's handoff
+static mb_handoff_t ho; // our copy of this boot's handoff (v1: the v2 part zeroed)
 static bool ho_valid;
+static volatile mb_handoff_t *ho_buf; // the image's own buffer: the mailbox goes there
+static mb_mailbox_t mbox;             // what this run leaves for the next boot (written at the reset)
 static char args_buf[MB_ARGS_MAX];
 
 int mb_client_init(const mb_port_t *p) {
@@ -24,6 +26,8 @@ int mb_client_init(const mb_port_t *p) {
         return MB_E_BADARG;
     port = p;
     ho_valid = false;
+    ho_buf = NULL;
+    memset(&mbox, 0, sizeof(mbox));
     inst.open = false;
     self = p->self_slot ? p->self_slot() : MB_SLOT_NONE;
     return MB_OK;
@@ -33,17 +37,22 @@ int mb_client_other_slot(void) { return self == MB_SLOT_A ? MB_SLOT_B : MB_SLOT_
 
 // Take the handoff only if it was written for *this* image this boot, then
 // clear it so nothing later mistakes it for a fresh one.
+// A v1 block (160 bytes, an older MimiBoot) is taken as well: its v2 part reads as zeros.
 void mb_client_set_handoff(volatile mb_handoff_t *h) {
     ho_valid = false;
+    ho_buf = h;
     if (!h || !port)
         return;
     mb_handoff_t copy;
     memcpy(&copy, (const void *)h, sizeof(copy));
     h->magic = 0;
-    if (copy.magic != MB_HANDOFF_MAGIC || copy.version != MB_HANDOFF_VERSION || copy.size != sizeof(copy))
+    if (copy.magic != MB_HANDOFF_MAGIC || mb_crc32(0, &copy, offsetof(mb_handoff_t, crc)) != copy.crc)
         return;
-    if (mb_crc32(0, &copy, offsetof(mb_handoff_t, crc)) != copy.crc)
-        return;
+    if (copy.version == 1 && copy.size == MB_HANDOFF_V1_SIZE)
+        memset((uint8_t *)&copy + MB_HANDOFF_V1_SIZE, 0, sizeof(copy) - MB_HANDOFF_V1_SIZE);
+    else if (copy.version < 2 || copy.size != MB_HANDOFF_V2_SIZE ||
+             mb_crc32(0, &copy, offsetof(mb_handoff_t, crc2)) != copy.crc2)
+        return; // (a later version starts with a v2 block: its size says so)
     mb_slot_info_t info;
     if (self == MB_SLOT_NONE && copy.slot != 0xFF) {
         /* RAM images have no physical XIP mapping. Bind identity to both this
@@ -61,6 +70,7 @@ void mb_client_set_handoff(volatile mb_handoff_t *h) {
             return;
     }
     copy.args[sizeof(copy.args) - 1] = 0;
+    copy.prev.msg[sizeof(copy.prev.msg) - 1] = 0;
     ho = copy;
     ho_valid = true;
 }
@@ -375,16 +385,282 @@ int mb_client_recv(int slot, void *io, int (*getc)(void *io, uint32_t ms), void 
 }
 
 uint32_t mb_client_capabilities(void) {
-    return ho_valid && (ho.reserved & MB_HOFF_NIGHT) && ho.loader_version >= MB_VERSION(2, 0, 0)
-               ? (ho.reserved >> 8) & 0xffffu
-               : 0;
+    if (!ho_valid)
+        return 0;
+    if (ho.version >= 2)
+        return ho.caps;
+    return (ho.reserved & MB_HOFF_HAS_CAPS) && ho.loader_version >= MB_VERSION(2, 0, 0) ? (ho.reserved >> 8) & 0xffffu
+                                                                                        : 0;
 }
+
+// ---------------------------------------------------------------------------
+// OS hooks: the next boot, reboots with a reason, panics, power-off
+// ---------------------------------------------------------------------------
+
+// The RAM mailbox is there when this boot's handoff was v2 and the bootloader reads it
+static bool mailbox_ok(void) { return ho_valid && ho_buf && ho.version >= 2 && (ho.caps & MB_CAP_MAILBOX); }
+
+int mb_client_transport(void) {
+    return mailbox_ok() && (ho.caps & MB_CAP_CONTROL) ? MB_VIA_MAILBOX
+           : mb_client_capabilities() & MB_CAP_CONTROL ? MB_VIA_FLASH
+                                                         : MB_VIA_LEGACY;
+}
+
+// The old one-shot requests in the log (any MimiBoot): what they can say
+static int legacy(const mb_control_request_t *q) {
+    switch (q->action) {
+    case MB_CONTROL_MENU:
+        return mb_client_request(MB_REQ_MENU, 0);
+    case MB_CONTROL_FLASH:
+        return mb_client_request(MB_REQ_FLASH, 0);
+    case MB_CONTROL_ROM:
+        return mb_client_request(MB_REQ_BOOTSEL, 0);
+    case MB_CONTROL_SLOT:
+        return q->args[0] ? MB_E_UNSUPP : mb_client_request(MB_REQ_BOOT_ONCE, q->slot);
+    case MB_CONTROL_ENTRY:
+        return mb_client_request_entry(q->entry, q->args);
+    case MB_CONTROL_RESTART:
+        return MB_OK;
+    default:
+        return MB_E_UNSUPP; // config mode, topologies: the control service only
+    }
+}
+
+int mb_client_next_boot(const mb_control_request_t *q, int how) {
+    if (!port || !q || q->version != MB_CONTROL_API_VERSION || q->size != sizeof(*q))
+        return MB_E_BADARG;
+    int via = how == MB_VIA_FLASH && mb_client_transport() == MB_VIA_MAILBOX ? MB_VIA_FLASH : mb_client_transport();
+    if (via == MB_VIA_MAILBOX) {
+        // the bootloader checks it again before it acts on it; this catches mistakes early
+        if (q->action > MB_CONTROL_SLOT || !memchr(q->entry, 0, sizeof(q->entry)) || !memchr(q->args, 0, sizeof(q->args)))
+            return MB_E_BADARG;
+        mbox.next = *q; // goes into RAM with the reset (mb_client_reboot)
+        return MB_VIA_MAILBOX;
+    }
+    memset(&mbox.next, 0, sizeof(mbox.next)); // the log has it now: not twice
+    int rc = via == MB_VIA_FLASH ? mb_control_submit(port, q) : legacy(q);
+    return rc < 0 ? rc : via;
+}
+
+static mb_control_request_t request(unsigned action, const char *target, const char *args, int *err) {
+    mb_control_request_t q;
+    memset(&q, 0, sizeof(q));
+    q.version = MB_CONTROL_API_VERSION;
+    q.size = sizeof(q);
+    q.action = action;
+    *err = MB_OK;
+    if (args && strlen(args) >= sizeof(q.args))
+        *err = MB_E_BADARG;
+    else if (args)
+        memcpy(q.args, args, strlen(args) + 1);
+    if (action == MB_CONTROL_ENTRY) {
+        if (!target || !*target || strlen(target) >= sizeof(q.entry))
+            *err = MB_E_BADARG;
+        else
+            memcpy(q.entry, target, strlen(target) + 1);
+    } else if (action == MB_CONTROL_SLOT) {
+        int s = target ? mb_slot_parse(port, target) : -1;
+        if (s < 0)
+            *err = MB_E_BADARG;
+        q.slot = (uint8_t)(s < 0 ? 0 : s);
+    }
+    return q;
+}
+
+int mb_client_next(unsigned action, const char *target, const char *args, int how) {
+    if (!port)
+        return MB_E_BADARG;
+    int err;
+    mb_control_request_t q = request(action, target, args, &err);
+    return err ? err : mb_client_next_boot(&q, how);
+}
+
+// Fill in the note for the next boot and put the mailbox into RAM (right before the
+// reset, so a note never sits there while the system keeps running)
+static bool post(int reason, const char *msg, uint32_t pc, uint32_t lr, uint32_t info) {
+    if (!mailbox_ok())
+        return false;
+    mbox.magic = MB_MAILBOX_MAGIC;
+    mbox.version = MB_MAILBOX_VERSION;
+    mbox.size = sizeof(mbox);
+    mbox.image_id = ho.image_id;
+    memset(&mbox.end, 0, sizeof(mbox.end));
+    mbox.end.reason = (uint8_t)reason;
+    mbox.end.pc = pc;
+    mbox.end.lr = lr;
+    mbox.end.info = info;
+    if (msg) {
+        size_t n = strlen(msg);
+        memcpy(mbox.end.msg, msg, n < sizeof(mbox.end.msg) - 1 ? n : sizeof(mbox.end.msg) - 1);
+    }
+    mbox.crc = mb_crc32(0, &mbox, offsetof(mb_mailbox_t, crc));
+    volatile uint8_t *dst = (volatile uint8_t *)ho_buf;
+    const uint8_t *src = (const uint8_t *)&mbox;
+    for (size_t i = 0; i < sizeof(mbox); i++) // (volatile: the compiler may not drop a store before a reset)
+        dst[i] = src[i];
+    return true;
+}
+
+int mb_client_reboot(int reason, const char *msg) {
+    if (!port || !port->reboot)
+        return MB_E_UNSUPP;
+    post(reason, msg, 0, 0, 0);
+    port->reboot();
+    return MB_E_UNSUPP; // still here: the port couldn't reset
+}
+
+// A crash has to reach the crash-loop guard: with the mailbox the note says so; without
+// one, a watchdog reset does (never a flash write from here: this runs from fault handlers).
+__attribute__((noreturn)) static void crash(int reason, const char *msg, uint32_t pc, uint32_t lr, uint32_t info) {
+    if (port && !post(reason, msg, pc, lr, info) && port->watchdog_arm) {
+        port->watchdog_arm(1);
+        for (;;) {
+        }
+    }
+    if (port && port->reboot)
+        port->reboot();
+    for (;;) {
+    }
+}
+
+void mb_client_panic(const char *msg) {
+    crash(MB_END_PANIC, msg, (uint32_t)(uintptr_t)__builtin_return_address(0), 0, 0);
+}
+
+void mb_client_fault(uint32_t pc, uint32_t lr, uint32_t info) { crash(MB_END_FAULT, "fault", pc, lr, info); }
+
+int mb_client_poweroff(const char *msg) {
+    if (!port || !port->poweroff)
+        return MB_E_UNSUPP;
+    post(MB_END_POWEROFF, msg, 0, 0, 0);
+    port->poweroff();
+    return MB_E_UNSUPP;
+}
+
+int mb_client_last_end(mb_end_t *out) {
+    if (!ho_valid || ho.version < 2)
+        return MB_E_UNSUPP;
+    *out = ho.prev;
+    return MB_OK;
+}
+
+// ---------------------------------------------------------------------------
+// What is on the board: slots, entries, the bootloader
+// ---------------------------------------------------------------------------
+
+static uint32_t floor_now(const mb_bcl_rec_t *r) {
+    uint32_t hw[MB_FLOOR_COUNT];
+    mb_floor_get(port, hw); // the protected copy wins when it is higher
+    return r->min_security > hw[MB_FLOOR_SECURITY] ? r->min_security : hw[MB_FLOOR_SECURITY];
+}
+
+int mb_client_slot_info(int slot, mb_client_slot_t *out) {
+    if (!port || !out || slot < 0 || slot >= port->layout->n_slots)
+        return MB_E_BADARG;
+    memset(out, 0, sizeof(*out));
+    mb_bcl_t log;
+    if (mb_bcl_load(&log, port) != MB_OK)
+        return MB_E_IO;
+    const mb_slot_def_t *d = &port->layout->slot[slot];
+    out->slot = slot;
+    out->role = d->role;
+    out->size = d->size;
+    snprintf(out->name, sizeof(out->name), "%s", d->name);
+    out->running = slot == self;
+    out->active = slot == log.cur.active;
+    mb_slot_info_t in;
+    if (mb_image_read_header(port, slot, &in) != MB_OK)
+        return MB_OK; // empty
+    out->present = true;
+    out->format = in.fmt;
+    out->version = in.hdr.version;
+    out->security_version = in.hdr.security_version;
+    out->flags = in.hdr.flags;
+    out->image_id = mb_image_id(&in.hdr);
+    out->payload_size = in.hdr.payload_size;
+    memcpy(out->image_name, in.hdr.name, sizeof(out->image_name));
+    out->image_name[sizeof(out->image_name) - 1] = 0;
+    const mb_slot_rec_t *s = &log.cur.slot[slot];
+    if (s->image_id == out->image_id) { // the log's record is about this image
+        out->state = s->state;
+        out->bad_reason = s->bad_reason;
+        out->tries_left = s->tries_left;
+    } else {
+        out->state = MB_ST_NEW;
+    }
+    out->below_floor = d->role == MB_ROLE_AB && in.hdr.security_version < floor_now(&log.cur);
+    return MB_OK;
+}
+
+// Rollback (or forward) on demand: make another confirmed A/B image the preferred one.
+// Only a GOOD image at or above the rollback floor (the protected copy counts), so this
+// never brings back an image the board has moved past.
+int mb_client_set_active(int slot) {
+    if (!port || slot < 0 || slot >= port->layout->n_slots || mb_slot_role(port, slot) != MB_ROLE_AB)
+        return MB_E_BADARG;
+    mb_client_slot_t s;
+    int rc = mb_client_slot_info(slot, &s);
+    if (rc != MB_OK)
+        return rc;
+    if (!s.present || s.state != MB_ST_GOOD || s.below_floor)
+        return MB_E_REFUSED;
+    mb_bcl_t log;
+    if (mb_bcl_load(&log, port) != MB_OK)
+        return MB_E_IO;
+    if (log.cur.active == slot)
+        return MB_OK;
+    mb_bcl_rec_t r = log.cur;
+    r.active = (uint8_t)slot;
+    return mb_bcl_commit(&log, &r);
+}
+
+int mb_client_rollback(void) {
+    int other = mb_client_other_slot();
+    return mb_client_set_active(other);
+}
+
+int mb_client_entries(mb_client_entry_t *out, int max) {
+    if (!port || !out || max <= 0)
+        return MB_E_BADARG;
+    static mb_config_t cfg;
+    mb_config_load(port, &cfg);
+    int n = 0;
+    for (int i = 0; i < cfg.n && n < max; i++, n++) {
+        memset(&out[n], 0, sizeof(out[n]));
+        snprintf(out[n].name, sizeof(out[n].name), "%s", cfg.e[i].name);
+        snprintf(out[n].title, sizeof(out[n].title), "%s", cfg.e[i].title);
+        out[n].slot = cfg.e[i].slot;
+        out[n].is_default = i == cfg.def;
+    }
+    return n;
+}
+
+int mb_client_loader_info(mb_client_loader_t *out) {
+    if (!port || !out)
+        return MB_E_BADARG;
+    memset(out, 0, sizeof(*out));
+    out->board = port->name;
+    out->target = port->target;
+    out->n_slots = port->layout->n_slots;
+    if (!ho_valid)
+        return MB_E_UNSUPP; // (board and layout only: no handoff this boot)
+    out->version = ho.loader_version;
+    out->caps = mb_client_capabilities();
+    out->features = ho.features;
+    out->handoff_version = ho.version;
+    out->boot_ms = ho.boot_ms;
+    return MB_OK;
+}
+
 int mb_client_control(const mb_control_request_t *q, bool now) {
     if (!port)
         return MB_E_BADARG;
     if (!(mb_client_capabilities() & MB_CAP_CONTROL))
         return MB_E_UNSUPP;
-    return now ? mb_control_reboot(port, q) : mb_control_submit(port, q);
+    if (!now)
+        return mb_control_submit(port, q);
+    int rc = mb_client_next_boot(q, MB_VIA_AUTO); // the mailbox when there is one (no flash write)
+    return rc < 0 ? rc : mb_client_reboot(MB_END_REBOOT, NULL);
 }
 static int reboot_mode(unsigned action) {
     mb_control_request_t q = {0};

@@ -110,6 +110,9 @@
 #ifndef MB_FEAT_ENC
 #define MB_FEAT_ENC             0   /* take encrypted images (core/mb_enc.c): decrypted as they are installed */
 #endif
+#ifndef MB_FEAT_OS_HOOKS
+#define MB_FEAT_OS_HOOKS        1   /* OS hooks: handoff v2 (how the last run ended, features, seed) + the RAM mailbox (core/mb_mailbox.c) */
+#endif
 #ifndef MB_FEAT_LMS
 #define MB_FEAT_LMS             0   /* LMS (hash-based, post-quantum) image signatures (core/mb_lms.c) */
 #endif
@@ -204,6 +207,9 @@
 #endif
 #if MB_FEAT_CFG_SIGNED && (!MB_FEAT_CFG_FILE || !MB_FEAT_SIGNATURES)
 #error "MB_FEAT_CFG_SIGNED needs MB_FEAT_CFG_FILE and MB_FEAT_SIGNATURES"
+#endif
+#if MB_FEAT_OS_HOOKS && !MB_FEAT_HANDOFF
+#error "MB_FEAT_OS_HOOKS needs MB_FEAT_HANDOFF: they extend the handoff, and the mailbox lives in its buffer"
 #endif
 #if MB_FEAT_GRUB && !MB_FEAT_CFG_FILE
 #error "MB_FEAT_GRUB needs MB_FEAT_CFG_FILE"

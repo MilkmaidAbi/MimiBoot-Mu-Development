@@ -524,10 +524,10 @@ static int f_launch_ram(const mb_image_hdr_t *hdr) {
    * NOLOAD handoff commonly follows the file-backed bytes; include it too. */
   if (hdr->handoff_addr) {
     if (hdr->handoff_addr < hdr->load_addr ||
-        !f_ram_ptr(hdr->handoff_addr, sizeof(mb_handoff_t)))
+        !f_ram_ptr(hdr->handoff_addr, mb_handoff_size(hdr)))
       return MB_E_REFUSED;
     uint32_t handoff_end =
-        hdr->handoff_addr - hdr->load_addr + sizeof(mb_handoff_t);
+        hdr->handoff_addr - hdr->load_addr + mb_handoff_size(hdr);
     if (handoff_end > size)
       size = (handoff_end + 3u) & ~3u;
   }

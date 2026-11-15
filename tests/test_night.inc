@@ -68,6 +68,6 @@ static void test_night(void){
  q=request(MB_CONTROL_CONFIG);sim.cut_at=0;ops=sim.ops;mb_control_submit(&sim_port,&q);uint32_t count=sim.ops-ops;
  for(uint32_t cut=1;cut<=count;cut++){memcpy(sim_flash,saved,sizeof saved);sim.ops=0;sim.cut_at=cut;sim_guard(submit_reboot,&q);sim.cut_at=0;mb_bcl_load(&b,&sim_port);mb_topology_t top;int action=-1;mb_config_load(&sim_port,&c);int rc=mb_control_consume(&sim_port,&b.cur,&c,&top,&action);CHECK(rc==1&&(action==MB_CONTROL_MENU||action==MB_CONTROL_CONFIG),"request power cut %lu recovers old or new",(unsigned long)cut);}
  memcpy(sim_flash,saved,sizeof saved);sim.fail_writes=true;CHECK(sim_guard(submit_reboot,&q)!=SIM_REBOOT,"failed request commit never reboots");sim.fail_writes=false;
- CHECK(sizeof(mb_handoff_t)==160&&sizeof(mb_bcl_rec_t)==256,"legacy disk and handoff sizes retained");
+ CHECK(sizeof(mb_handoff_t)==MB_HANDOFF_V2_SIZE&&offsetof(mb_handoff_t,crc)==156&&MB_HANDOFF_V1_SIZE==160&&sizeof(mb_bcl_rec_t)==256,"legacy disk layout and the v1 handoff prefix retained");
  sim_port.capabilities=NULL;sim_port.prepare_topology=NULL;sim_reset();
 }

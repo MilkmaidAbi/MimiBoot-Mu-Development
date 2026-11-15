@@ -22,6 +22,7 @@ if(NOT TARGET mimiboot_client)
         ${_MB}/core/mb_floor.c
         ${_MB}/core/mb_formats.c
         ${_MB}/client/mb_client.c
+        ${_MB}/client/mb_ctl.c
     )
     target_include_directories(mimiboot_client INTERFACE ${_MB} ${_MB}/include)
     if(PICO_PLATFORM STREQUAL "rp2040")

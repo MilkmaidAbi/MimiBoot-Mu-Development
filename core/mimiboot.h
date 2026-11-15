@@ -247,6 +247,8 @@ int mb_config_set_default(const mb_port_t*,const char*);
 int mb_config_validate_save(const mb_port_t*,const char*,size_t,char*,size_t);
 int mb_grub_translate(const char*,size_t,char*,size_t,char*,size_t);
 int mb_control_consume(const mb_port_t*,mb_bcl_rec_t*,const mb_config_t*,mb_topology_t*,int*);
+/* Check a control request and store it into a log record in RAM (consumed like one from flash) */
+int mb_control_put(const mb_port_t* p, mb_bcl_rec_t* r, const mb_config_t* c, const mb_control_request_t* q);
 struct mb_choice;
 void mb_control_requeue(mb_bcl_rec_t*,const mb_config_t*,const struct mb_choice*);
 int  mb_config_find(const mb_config_t* c, const char* name);                         /* name or number */
@@ -367,7 +369,20 @@ int mb_slot_write(const mb_port_t* p, int slot, uint32_t payload_off, const void
 int mb_slot_write_header(const mb_port_t* p, int slot, const mb_image_hdr_t* hdr);
 int mb_slot_write_lms(const mb_port_t* p, int slot, const uint8_t* sig, size_t len);   /* into the erased header sector */
 
-/* ---- handoff -------------------------------------------------------------------------- */
+/* ---- handoff and mailbox ---------------------------------------------------------------
+ * How big an image's handoff buffer is: v2 when its header says so, else v1. */
+static inline uint32_t mb_handoff_size(const mb_image_hdr_t* h) {
+    return h->handoff_size >= MB_HANDOFF_V2_SIZE ? MB_HANDOFF_V2_SIZE : MB_HANDOFF_V1_SIZE;
+}
+/* core/mb_mailbox.c: read (and clear) the mailbox the last image left, once per power-up,
+ * before the boot decision. mb_last_end then says how the previous run ended (the next
+ * handoff carries it); mb_mailbox_next holds its request until the decision takes it
+ * (version 0: none). mb_mailbox_crashed(): it ended in a panic or a fault (a strike). */
+extern mb_end_t mb_last_end;
+extern mb_control_request_t mb_mailbox_next;
+void mb_mailbox_take(const mb_port_t* p, const mb_bcl_rec_t* log);
+bool mb_mailbox_crashed(void);
+uint64_t mb_handoff_features(const mb_port_t* p);
 void mb_handoff_build(const mb_port_t* p, const mb_bcl_rec_t* log, const mb_config_t* cfg, const mb_image_hdr_t* hdr,
                       const mb_choice_t* c, mb_handoff_t* out);
 

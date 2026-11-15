@@ -218,7 +218,11 @@ static int f_launch_ram(const mb_image_hdr_t* hdr) {
 }
 
 static uint32_t f_time(void) { return sim.time_ms += 1; }
-static void f_wdt(uint32_t ms) { sim.watchdog_ms = ms; }
+// the shortest period is an app making the watchdog reset it now (mb_client_panic without a mailbox)
+static void f_wdt(uint32_t ms) {
+    sim.watchdog_ms = ms;
+    if (ms <= 1 && sim.jmp) { sim.reset_cause = MB_RESET_WATCHDOG; sim.outcome = SIM_REBOOT; longjmp(*sim.jmp, 1); }
+}
 static void f_wdt_off(void) { sim.watchdog_ms = 0; }
 static bool f_button(void) { return sim.button; }
 static bool f_console_open(uint32_t wait_ms) { (void)wait_ms; return sim.console; }
@@ -280,7 +284,7 @@ mb_port_t sim_port = {
     .time_ms = f_time, .watchdog_arm = f_wdt, .watchdog_disarm = f_wdt_off, .button = f_button,
     .console_open = f_console_open, .getc = f_getc, .write = f_write,
     .reboot = f_reboot, .reboot_rom = f_rom, .reset_cause = f_cause, .reset_reason = f_reason, .self_slot = f_self,
-    .floor = &floor_store, .fault_slot = f_fault_slot, .loader_hash = f_loader_hash,
+    .floor = &floor_store, .fault_slot = f_fault_slot, .loader_hash = f_loader_hash, .retains_ram = true,
 };
 
 void sim_reset(void) {

@@ -237,14 +237,14 @@ flash = "128K"
 ram = "20K"
 sectors = "128x1K"
 boot = "32K"
-defaults = { SIGNATURES = false }
+defaults = { SIGNATURES = false, SHELL_DIAG = false }
 [chip.stm32f103rb]
 family = "stm32f1"
 flash = "128K"
 ram = "20K"
 sectors = "128x1K"
 boot = "32K"
-defaults = { SIGNATURES = false }
+defaults = { SIGNATURES = false, SHELL_DIAG = false }
 [chip.stm32f103rc]
 family = "stm32f1"
 flash = "256K"
@@ -276,7 +276,7 @@ flash = "256K"
 ram = "64K"
 sectors = "4x16K,1x64K,1x128K"
 boot = "32K"
-defaults = { SIGNATURES = false }
+defaults = { SIGNATURES = false, SHELL_DIAG = false }
 [chip.stm32f401re]
 family = "stm32f4"
 flash = "512K"
@@ -363,7 +363,7 @@ flash = "128K"
 ram = "32K"
 sectors = "64x2K"
 boot = "32K"
-defaults = { SIGNATURES = false }
+defaults = { SIGNATURES = false, SHELL_DIAG = false }
 [chip.stm32g474re]
 family = "stm32g4"
 flash = "512K"
@@ -721,7 +721,7 @@ ram = "24K"
 sectors = "48x4K"
 boot = "32K"
 nrf_uart = "uarte"
-defaults = { SIGNATURES = false }
+defaults = { SIGNATURES = false, SHELL_DIAG = false }
 [chip.nrf52811]
 family = "nrf52"
 flash = "192K"
@@ -729,7 +729,7 @@ ram = "24K"
 sectors = "48x4K"
 boot = "32K"
 nrf_uart = "uarte"
-defaults = { SIGNATURES = false }
+defaults = { SIGNATURES = false, SHELL_DIAG = false }
 [chip.nrf52820]
 family = "nrf52"
 flash_lock = "acl"

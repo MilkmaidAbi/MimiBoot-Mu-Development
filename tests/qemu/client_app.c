@@ -47,5 +47,25 @@ void reset(void) {
     puts_(" args=[");
     puts_(mb_client_args());
     puts_("]\r\nMU-CLIENT-DONE\r\n");
+    // OS hooks: the first run asks for a restart with new args and says why, through the
+    // RAM mailbox (a real reset in the emulator); the second run reads it back
+    mb_end_t e;
+    if (mb_client_last_end(&e) == MB_OK) {
+        puts_("MU-HOOK prev=");
+        dec(e.reason);
+        puts_(" msg=[");
+        puts_(e.msg);
+        puts_("] via=");
+        dec(mb_client_transport());
+        puts_("\r\n");
+        if (e.reason != MB_END_UPDATE) {
+            int rc = mb_client_next(MB_CONTROL_RESTART, 0, "hop=2", MB_VIA_AUTO);
+            puts_("MU-HOOK next=");
+            dec(rc);
+            puts_("\r\n");
+            mb_client_reboot(MB_END_UPDATE, "qemu-hop");
+            puts_("MU-HOOK reboot returned\r\n");
+        }
+    }
     for (;;) {}
 }

@@ -65,6 +65,7 @@ TLV_LMS = 0x4C              # header-sector TLV: an LMS signature (enc.TLV_X2551
 TLV_AREA = 4096 - 256
 TARGET = "rp2350"
 RECORD_ADDR = 0             # set by read_input(): the image's mb_boot_record buffer
+HANDOFF_SIZE = 0            # set by read_input(): the size of its mb_handoff buffer (160: v1, 320: v2)
 XIP_BASE = 0x10000000
 SRAM_BASE, SRAM_END = 0x20000000, 0x20082000
 # offset, size (bytes) - keep in sync with include/mimiboot/mb_layout.h
@@ -88,10 +89,10 @@ UF2_FAMILY_RP2350_RISCV = 0xE48BFF5A
 UF2_EXT_RP2_IGNORE_BLOCK = 0x9957E3
 
 # mb_image_hdr_t (include/mimiboot/mb_image.h), everything but hdr_crc
-HDR_FMT = "<IHHIIII32sIIIIII32s16sB3sIII44s64s"
+HDR_FMT = "<IHHIIII32sIIIIII32s16sB3sIIIH42s64s"
 HDR_FIELDS = ["magic", "hdr_version", "hdr_size", "flags", "load_type", "payload_offset", "payload_size", "sha256",
               "version", "security_version", "build_time", "load_addr", "entry", "trial_timeout_ms", "name", "target",
-              "arch", "pad", "handoff_addr", "key_id", "record_addr", "reserved", "signature"]
+              "arch", "pad", "handoff_addr", "key_id", "record_addr", "handoff_size", "reserved", "signature"]
 assert struct.calcsize(HDR_FMT) == HDR_SIZE - 4
 assert struct.calcsize(HDR_FMT[:HDR_FMT.index("64s")]) == SIGNED_BYTES
 
@@ -118,6 +119,9 @@ def fmt_version(v):
 # Inputs: ELF, UF2, BIN
 # ---------------------------------------------------------------------------
 
+SYM_SIZES = {}
+
+
 def read_elf(data):
     """Flat image of the PT_LOAD segments (by physical address), e_machine, symbols."""
     if data[:4] != b"\x7fELF" or data[4] != 1 or data[5] != 1:
@@ -139,17 +143,19 @@ def read_elf(data):
     img = bytearray(b"\xff" * (end - base))
     for a, d in segs:
         img[a - base:a - base + len(d)] = d
-    # symbols, for mb_handoff
+    # symbols, for mb_handoff (address, and in SYM_SIZES its size)
     syms = {}
+    SYM_SIZES.clear()
     for i in range(e_shnum):
         sh = struct.unpack_from("<IIIIIIIIII", data, e_shoff + i * e_shentsize)
         if sh[1] != 2:                                      # SHT_SYMTAB
             continue
         strtab = struct.unpack_from("<IIIIIIIIII", data, e_shoff + sh[6] * e_shentsize)
         for k in range(sh[5] // 16):
-            st_name, st_value = struct.unpack_from("<II", data, sh[4] + k * 16)
+            st_name, st_value, st_size = struct.unpack_from("<III", data, sh[4] + k * 16)
             nm = data[strtab[4] + st_name:data.index(b"\0", strtab[4] + st_name)].decode(errors="replace")
             syms[nm] = st_value
+            SYM_SIZES[nm] = st_size
     arch = {40: ARCH_ARM, 243: ARCH_RISCV}.get(e_machine)
     if arch is None:
         die("ELF machine %d is neither Arm nor RISC-V" % e_machine)
@@ -224,8 +230,12 @@ def read_input(path, load_addr=None, target=TARGET):
         arch = cpu if arch is None else arch
     if arch is None:
         arch = ARCH_ARM
-    global RECORD_ADDR
+    global RECORD_ADDR, HANDOFF_SIZE
     RECORD_ADDR = syms.get("mb_boot_record", 0)            # a MB_BOOT_RECORD_BUFFER, if the image has one
+    # how big its handoff buffer is: MimiBoot writes no more than that (an older image: 160)
+    HANDOFF_SIZE = SYM_SIZES.get("mb_handoff", 0) if "mb_handoff" in syms else 0
+    if HANDOFF_SIZE and HANDOFF_SIZE < 160:
+        die("mb_handoff is %d bytes: a handoff buffer holds at least 160 (MB_HANDOFF_BUFFER)" % HANDOFF_SIZE)
     return payload, base, arch, syms.get("mb_handoff", 0), syms.get("__vectors", base)
 
 
@@ -235,7 +245,7 @@ def read_input(path, load_addr=None, target=TARGET):
 
 def build_header(payload, name, version, secver=0, golden=False, trial_ms=0, target=TARGET, arch=ARCH_ARM,
                  load_type=LOAD_CHAIN, load_addr=0, handoff_addr=0, secret=None, build_time=None, entry=None,
-                 stage1=False, encrypted=False, record_addr=0):
+                 stage1=False, encrypted=False, record_addr=0, handoff_size=None):
     """stage1: a two-stage build's stage 1 (entry = the flash offset of its vector table).
     encrypted: the file will carry the payload encrypted (the header still describes the plaintext)"""
     flags = (F_GOLDEN if golden else 0) | (F_STAGE1 if stage1 else 0) | (F_ENCRYPTED if encrypted else 0)
@@ -248,7 +258,8 @@ def build_header(payload, name, version, secver=0, golden=False, trial_ms=0, tar
     fields = [MAGIC, HDR_VERSION, HDR_SIZE, flags, load_type, PAYLOAD_OFF, len(payload), hashlib.sha256(payload).digest(),
               version, secver, int(time.time() if build_time is None else build_time), load_addr, load_addr if entry is None else entry, trial_ms,
               name.encode()[:31].ljust(32, b"\0"), target.encode()[:15].ljust(16, b"\0"), arch, b"\0" * 3,
-              handoff_addr, key_id, record_addr, b"\0" * 44, b"\0" * 64]
+              handoff_addr, key_id, record_addr,
+              min(HANDOFF_SIZE if handoff_size is None else handoff_size, 0xFFFF) if handoff_addr else 0, b"\0" * 42, b"\0" * 64]
     body = struct.pack(HDR_FMT, *fields)
     if secret:
         body = body[:SIGNED_BYTES] + secret.sign(body[:SIGNED_BYTES])
@@ -543,7 +554,8 @@ def cmd_info(a):
     print("payload   %d bytes at +0x%x" % (h["payload_size"], h["payload_offset"]))
     print("sha256    %s" % h["sha256"].hex())
     if h["handoff_addr"]:
-        print("handoff   @0x%08x" % h["handoff_addr"])
+        print("handoff   @0x%08x, %s" % (h["handoff_addr"], "%d bytes (v2: OS hooks, mailbox)" % h["handoff_size"]
+                                          if h["handoff_size"] >= 320 else "v1 (160 bytes: no mailbox)"))
     if h["record_addr"]:
         print("record    @0x%08x (boot record: what MimiBoot checked and measured)" % h["record_addr"])
     print("built     %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(h["build_time"])))

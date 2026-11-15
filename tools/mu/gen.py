@@ -13,7 +13,7 @@ ROLE_NAMES = {ROLE_AB: "A/B", ROLE_GOLDEN: "golden", 3: "aux", ROLE_STAGE1: "sta
 STAGE0_OFF = {"IMG_MCUBOOT": False, "IMG_RAW": False, "CONSOLE": False, "SHELL": False, "SHELL_DIAG": False,
               "RECV": False, "CFG_FILE": False, "CFG_SIGNED": False, "CONSOLE_AUTH": False, "GRUB": False,
               "CONTROL": False, "HANDOFF": False, "RAM_IMAGES": False, "SCRUB_RAM": False, "SMP": False,
-              "CONSOLE_USB": False, "ENCRYPTED_IMAGES": False}
+              "CONSOLE_USB": False, "ENCRYPTED_IMAGES": False, "OS_HOOKS": False}
 NATIVE_HDR = 0x1000
 VECTOR_MODES = {"vtor": 0, "remap": 1, "relay": 2}
 
@@ -549,7 +549,7 @@ def mcu_outputs(cfg: Config, lay: Layout, out: Path):
 
 VENDOR_FLASH = {"stm32": "port/stm32/stm32_flash.c", "nrf": "port/nrf/nrf_flash.c", "samd": "port/samd/samd_flash.c"}
 CLIENT_CORE = ["core/mb_hash.c", "core/mb_ed25519.c", "core/mb_image.c", "core/mb_bcl.c", "core/mb_config.c",
-               "core/mb_control.c", "core/mb_grub.c", "core/mb_recv.c", "core/mb_enc.c", "core/mb_lms.c", "core/mb_formats.c", "core/mb_floor.c", "core/mb_ecdsa.c", "client/mb_client.c",
+               "core/mb_control.c", "core/mb_grub.c", "core/mb_recv.c", "core/mb_enc.c", "core/mb_lms.c", "core/mb_formats.c", "core/mb_floor.c", "core/mb_ecdsa.c", "client/mb_client.c", "client/mb_ctl.c",
                "port/cortexm/cm_port.c"]
 CHUNK = {"stm32": "8 bytes (L4/G0/G4 program 8 bytes once per erase)", "nrf": "4 bytes",
          "samd": "64 bytes on SAM D21 (a page is written once per erase), 16 on SAM D51 (ECC quad-words)"}

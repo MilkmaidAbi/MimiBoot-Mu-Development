@@ -368,14 +368,15 @@ int mb_decide(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg, m
     }
 #if MB_FEAT_CRASH_GUARD
     else {
+        // a crash: a watchdog reset, or the OS saying it panicked / faulted (in the mailbox)
         uint32_t cause = p->reset_cause ? p->reset_cause() : 0;
-        if ((cause & MB_RESET_WATCHDOG) && r.last_slot < p->layout->n_slots &&
-            r.slot[r.last_slot].state == MB_ST_GOOD) {
+        bool crash = (cause & MB_RESET_WATCHDOG) || mb_mailbox_crashed();
+        if (crash && r.last_slot < p->layout->n_slots && r.slot[r.last_slot].state == MB_ST_GOOD) {
             if (r.strikes < 0xFF)
                 r.strikes++;
             if (r.strikes >= MB_STRIKES_MAX)
                 suspect = r.last_slot;
-        } else if (!(cause & MB_RESET_WATCHDOG) && r.strikes) {
+        } else if (!crash && r.strikes) {
             r.strikes = 0;
         }
     }
@@ -387,7 +388,19 @@ int mb_decide(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg, m
     const char *args = NULL;
     char once_args[MB_ARGS_MAX];
     int action = -1;
-    int control = mb_control_consume(p, &r, cfg, &plan->choice.topology, &action);
+    int control = 0;
+    // A request from the RAM mailbox goes into this copy of the log record (never into
+    // flash) and is consumed below exactly like one an app wrote to the log. One that
+    // is already in the log (written to flash, so it survives a power cut) comes first.
+#if MB_FEAT_OS_HOOKS
+    if (mb_mailbox_next.version) {
+        if (r.request == MB_REQ_NONE)
+            control = mb_control_put(p, &r, cfg, &mb_mailbox_next);
+        mb_mailbox_next.version = 0;
+    }
+#endif
+    if (control == 0)
+        control = mb_control_consume(p, &r, cfg, &plan->choice.topology, &action);
     if (control < 0) {
         r.request = MB_REQ_NONE;
         r.request_arg = 0;
@@ -562,12 +575,42 @@ int mb_plan_slot(const mb_port_t *p, const mb_bcl_t *log, mb_slot_info_t info[MB
 // Handoff and launch
 // ---------------------------------------------------------------------------
 
+// What the bootloader was built with, for the OS (mb_handoff_t.features)
+uint64_t mb_handoff_features(const mb_port_t *p) {
+    return (MB_FEAT_SIGNATURES ? MB_HF_SIGNATURES : 0) | (MB_FEAT_ECDSA ? MB_HF_ECDSA : 0) | (MB_FEAT_LMS ? MB_HF_LMS : 0) |
+           (p->require_signature ? MB_HF_REQUIRE_SIGNATURE : 0) | (MB_FEAT_ANTI_ROLLBACK ? MB_HF_ANTI_ROLLBACK : 0) |
+           (MB_FEAT_AB_TRIAL ? MB_HF_AB_TRIAL : 0) | (MB_FEAT_TRIAL_WATCHDOG ? MB_HF_TRIAL_WATCHDOG : 0) |
+           (MB_FEAT_CRASH_GUARD ? MB_HF_CRASH_GUARD : 0) | (MB_FEAT_CONSOLE ? MB_HF_CONSOLE : 0) |
+           (MB_FEAT_SHELL ? MB_HF_SHELL : 0) | (MB_FEAT_RECV ? MB_HF_RECV : 0) | (MB_FEAT_SMP ? MB_HF_SMP : 0) |
+           (MB_FEAT_CFG_FILE ? MB_HF_CFG_FILE : 0) | (MB_FEAT_CFG_SIGNED ? MB_HF_CFG_SIGNED : 0) |
+           (MB_FEAT_CONSOLE_AUTH ? MB_HF_CONSOLE_AUTH : 0) | (MB_FEAT_ENC ? MB_HF_ENCRYPTED_IMAGES : 0) |
+           (MB_FEAT_BOOT_RECORD ? MB_HF_BOOT_RECORD : 0) | (MB_FEAT_TWO_STAGE ? MB_HF_TWO_STAGE : 0) |
+           (MB_FEAT_PROTECTED_FLOOR ? MB_HF_PROTECTED_FLOOR : 0) | (MB_FEAT_BOOT_LOCK ? MB_HF_BOOT_LOCK : 0) |
+           (MB_FEAT_DEBUG_LOCK ? MB_HF_DEBUG_LOCK : 0) | (MB_FEAT_REVOKE ? MB_HF_REVOKE : 0) |
+           (MB_FEAT_RAM_IMAGES ? MB_HF_RAM_IMAGES : 0) | (MB_FEAT_IMG_MCUBOOT ? MB_HF_IMG_MCUBOOT : 0) |
+           (MB_FEAT_IMG_RAW ? MB_HF_IMG_RAW : 0) | (MB_FEAT_SCRUB_RAM ? MB_HF_SCRUB_RAM : 0) |
+           (MB_FEAT_FAULT_HARDENING ? MB_HF_FAULT_HARDENING : 0) | (MB_FEAT_CONTROL ? MB_HF_CONTROL : 0) |
+           (MB_FEAT_OS_HOOKS && p->retains_ram ? MB_HF_MAILBOX : 0) | (MB_CONSOLE_USB ? MB_HF_CONSOLE_USB : 0);
+}
+
+static uint32_t boot_caps(const mb_port_t *p) {
+    return (mb_control_caps(p) & ~MB_CAP_MAILBOX) | (MB_FEAT_OS_HOOKS && p->retains_ram ? MB_CAP_MAILBOX : 0);
+}
+
+// How much of the handoff this build writes: v2 needs OS_HOOKS and an image buffer that big
+static uint32_t handoff_size(const mb_image_hdr_t *hdr) {
+    return MB_FEAT_OS_HOOKS ? mb_handoff_size(hdr) : MB_HANDOFF_V1_SIZE;
+}
+
+// The handoff for the image about to start: v1 (160 bytes), or v2 (320) when the
+// build has OS_HOOKS and the image's buffer is that big. h must have room for v2.
 void mb_handoff_build(const mb_port_t *p, const mb_bcl_rec_t *log, const mb_config_t *cfg, const mb_image_hdr_t *hdr,
                       const mb_choice_t *c, mb_handoff_t *h) {
     memset(h, 0, sizeof(*h));
+    bool v2 = handoff_size(hdr) == MB_HANDOFF_V2_SIZE;
     h->magic = MB_HANDOFF_MAGIC;
-    h->version = MB_HANDOFF_VERSION;
-    h->size = sizeof(*h);
+    h->version = v2 ? 2 : 1;
+    h->size = (uint16_t)handoff_size(hdr);
     h->image_id = mb_image_id(hdr);
     h->boot_count = log->boot_count;
     h->slot = (uint8_t)c->slot;
@@ -577,24 +620,48 @@ void mb_handoff_build(const mb_port_t *p, const mb_bcl_rec_t *log, const mb_conf
     h->reset_cause = p->reset_cause ? p->reset_cause() : 0;
     h->loader_version = MIMIBOOT_VERSION_NUM;
     h->reserved =
-        MB_HOFF_NIGHT | c->topology.core0 | ((uint32_t)c->topology.core1 << 2) | ((mb_control_caps(p) & 0xffffu) << 8);
+        MB_HOFF_HAS_CAPS | c->topology.core0 | ((uint32_t)c->topology.core1 << 2) | ((boot_caps(p) & 0xffffu) << 8);
     snprintf(h->slot_name, sizeof(h->slot_name), "%s", c->slot == 0xFF ? "ram" : mb_slot_name(p, c->slot));
     if (cfg && c->entry >= 0 && c->entry < cfg->n)
         snprintf(h->entry_name, sizeof(h->entry_name), "%s", cfg->e[c->entry].name);
     snprintf(h->args, sizeof(h->args), "%s", c->args);
     h->crc = mb_crc32(0, h, offsetof(mb_handoff_t, crc));
+#if MB_FEAT_OS_HOOKS
+    if (!v2)
+        return;
+    h->features = mb_handoff_features(p);
+    h->caps = boot_caps(p);
+    h->boot_ms = p->time_ms ? p->time_ms() : 0;
+    h->min_security = security_floor(log);
+    h->active = log->active;
+    h->strikes = log->strikes;
+    if (c->slot < p->layout->n_slots)
+        h->tries_left = log->slot[c->slot].tries_left;
+    if (c->trial) {
+        h->hflags |= MB_HO_TRIAL;
+        if (MB_FEAT_TRIAL_WATCHDOG && p->watchdog_arm)
+            h->trial_ms = hdr->trial_timeout_ms ? hdr->trial_timeout_ms : MB_DEFAULT_TRIAL_MS;
+    }
+    h->prev = mb_last_end;
+    if (p->random && p->random(h->seed, sizeof(h->seed)) == MB_OK)
+        h->hflags |= MB_HO_SEED;
+    h->crc2 = mb_crc32(0, h, offsetof(mb_handoff_t, crc2));
+#else
+    (void)v2;
+#endif
 }
 
 static void write_handoff(const mb_port_t *p, const mb_bcl_rec_t *log, const mb_config_t *cfg,
                           const mb_image_hdr_t *hdr, const mb_choice_t *c) {
     if (!MB_FEAT_HANDOFF || !hdr->handoff_addr || !p->ram_ptr)
         return;
-    mb_handoff_t *dst = p->ram_ptr(hdr->handoff_addr, sizeof(mb_handoff_t));
+    uint32_t size = handoff_size(hdr); // never more than the image's buffer holds
+    mb_handoff_t *dst = p->ram_ptr(hdr->handoff_addr, size);
     if (!dst)
         return; // not somewhere we may write: the app falls back to flash
     mb_handoff_t h;
     mb_handoff_build(p, log, cfg, hdr, c, &h);
-    memcpy(dst, &h, sizeof(h));
+    memcpy(dst, &h, size);
 }
 
 // Measured boot: tell the image what was checked and what ran (mimiboot/mb_record.h).
@@ -871,6 +938,7 @@ void mb_main(const mb_port_t *p) {
     // The CPU faulted while checking a slot last time (an ECC error or bus
     // fault on damaged flash): that image is bad, so the next pass falls back
     int faulted = p->fault_slot ? p->fault_slot() : -1;
+    bool mailbox_read = false;      // the mailbox: read once per power-up, before the first decision
     for (;;) {
         static mb_bcl_t log;
         static mb_config_t cfg;
@@ -878,6 +946,10 @@ void mb_main(const mb_port_t *p) {
         static mb_plan_t plan;
         mb_boot_progress(2);
         mb_bcl_load(&log, p);
+        if (!mailbox_read) { // once per power-up: why the last run ended, and what it asked for
+            mb_mailbox_take(p, &log.cur);
+            mailbox_read = true;
+        }
         if (faulted >= 0 && faulted < p->layout->n_slots) {
             mb_bcl_rec_t r = log.cur;
             // the check never finished, so the log may not know this image yet:

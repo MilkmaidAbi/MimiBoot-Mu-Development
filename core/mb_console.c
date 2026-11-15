@@ -178,6 +178,21 @@ static void cmd_verify(const mb_port_t* p, mb_slot_info_t* info, int i) {
     put(p, "\n");
 }
 
+#if MB_FEAT_OS_HOOKS && MB_FEAT_SHELL
+// How the previous run ended: the OS's note in the mailbox, or what the reset hardware says
+static void cmd_last(const mb_port_t* p) {
+    static const char* const why[] = { "unknown (a reset nobody announced)", "power-on", "reboot", "reboot for an update",
+                                       "power-off", "panic", "fault", "watchdog", "the bootloader reset" };
+    const mb_end_t* e = &mb_last_end;
+    mb_printf(p, "last run ended: %s%s\n", e->reason <= MB_END_LOADER ? why[e->reason] : "?",
+              e->flags & MB_ENDF_NOTED ? " (the OS said so)" : " (from the reset cause)");
+    if (e->msg[0]) mb_printf(p, "  \"%s\"\n", e->msg);
+    if (e->reason == MB_END_PANIC || e->reason == MB_END_FAULT)
+        mb_printf(p, "  pc 0x%08lx  lr 0x%08lx  info 0x%08lx\n", (unsigned long)e->pc, (unsigned long)e->lr, (unsigned long)e->info);
+    if (e->flags & MB_ENDF_CRASH) put(p, "  counted as a crash (crash-loop guard)\n");
+}
+#endif
+
 #if MB_FEAT_SHELL_DIAG
 static void cmd_log(const mb_port_t* p, const mb_bcl_t* log) {
     const mb_bcl_rec_t* r = &log->cur;
@@ -620,6 +635,9 @@ static const char* help =
     "  ramboot [args...]       receive a RAM image (mbtool ramboot) and start it, flash untouched\n"
     "  erase <slot>            wipe a slot (asks first)\n"
     "  cfg show|recv|reset     the boot config\n"
+#if MB_FEAT_OS_HOOKS
+    "  last                    how the previous run ended (what the OS said, or the reset cause)\n"
+#endif
 #if MB_FEAT_SHELL_DIAG
     "  keys                    signature policy and trusted keys\n"
     "  log | layout            boot log state | flash map\n"
@@ -719,7 +737,7 @@ static void cmd_unlock(const mb_port_t* p, const mb_bcl_t* log) {
 // What a locked console may still do: look, and boot an entry as configured
 static bool allowed_locked(const char* cmd, int argc) {
     static const char* const open_cmds[] = { "help", "?", "ls", "entries", "info", "verify", "version", "capabilities",
-                                             "menu", "exit", "reboot", "keys", "log", "layout", "unlock" };
+                                             "menu", "exit", "reboot", "keys", "log", "layout", "unlock", "last" };
     for (unsigned i = 0; i < sizeof open_cmds / sizeof open_cmds[0]; i++)
         if (!strcmp(cmd, open_cmds[i])) return true;
     return !strcmp(cmd, "boot") && argc == 2;           // no args, no force
@@ -860,6 +878,9 @@ static bool shell(const mb_port_t* p, mb_bcl_t* log, mb_config_t* cfg, mb_slot_i
             int rc = mb_slot_erase(p, slot, p->layout->slot[slot].size - MB_IMG_PAYLOAD_OFF);
             mb_printf(p, "%s\n", rc == MB_OK ? "erased" : "erase FAILED");
         } else if (!strcmp(cmd, "cfg")) cmd_cfg(p, cfg, argc, argv);
+#if MB_FEAT_OS_HOOKS
+        else if (!strcmp(cmd, "last")) cmd_last(p);
+#endif
 #if MB_FEAT_SHELL_DIAG
         else if (!strcmp(cmd, "keys")) cmd_keys(p);
         else if (!strcmp(cmd, "log")) cmd_log(p, log);

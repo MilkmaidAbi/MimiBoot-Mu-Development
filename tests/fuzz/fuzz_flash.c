@@ -8,7 +8,10 @@
  * fuzzer gets past them), bit 1 signatures required, bit 2 two-stage layout
  * (slots c/d become stage-1 copies, stage 0's choice runs too), bit 3 the
  * store as two units, then a floor raise and a counted entry (which compact a
- * full unit, whatever the fuzzer put in it).
+ * full unit, whatever the fuzzer put in it), bit 5 the RAM mailbox: the first
+ * bytes go into slot a's handoff buffer as a mailbox (magic, size, image id and
+ * CRC made right), slot a counts as the image that ran last, and the boot reads
+ * it before deciding (its request goes through the control service's checks).
  */
 #include "tests/sim_port.h"
 #include "tests/gen_signed.h"
@@ -38,6 +41,9 @@ static void fix_crcs(void) {
     }
 }
 
+#define MBOX_ADDR (SIM_RAM_BASE + 0x40000)
+static bool mailbox;
+
 static void decide(void* ctx) {
     (void)ctx;
     static mb_bcl_t log;
@@ -46,6 +52,11 @@ static void decide(void* ctx) {
     static mb_plan_t plan;
     mb_bcl_load(&log, &sim_port);
     mb_config_load(&sim_port, &cfg);
+    if (mailbox) {
+        mb_bcl_rec_t r = log.cur;
+        r.last_slot = MB_SLOT_A;
+        mb_mailbox_take(&sim_port, &r);
+    }
     mb_decide(&sim_port, &log, &cfg, info, 0, &plan);
     if (plan.choice.slot != MB_SLOT_NONE) mb_boot(&sim_port, &log, &cfg, info, &plan);   // launches: longjmps out
 }
@@ -65,12 +76,37 @@ int LLVMFuzzerTestOneInput(const uint8_t* d, size_t n) {
     sim_port.require_signature = (d[0] & 2) != 0;
     sim_lms((d[0] & 16) ? lms_public : NULL, NULL);     // bit 4: LMS keys (signatures read from slot header sectors)
     size_t i = 1;
+    mailbox = (d[0] & 32) != 0;
+    mb_mailbox_t m;
+    memset(&m, 0, sizeof(m));
+    if (mailbox) {                                      // the mailbox first, then the flash regions
+        size_t k = n - i < sizeof(m) ? n - i : sizeof(m);
+        memcpy(&m, d + i, k);
+        i += k;
+    }
     for (size_t r = 0; r < sizeof(region) / sizeof(region[0]) && i < n; r++) {
         size_t k = n - i < region[r].len ? n - i : region[r].len;
         memcpy(sim_flash + region[r].off, d + i, k);
         i += k;
     }
     if (d[0] & 1) fix_crcs();
+    if (mailbox) {
+        mb_image_hdr_t* h = (mb_image_hdr_t*)(sim_flash + region[2].off);
+        h->magic = MB_IMG_MAGIC;
+        h->hdr_version = MB_IMG_HDR_VERSION;
+        h->hdr_size = MB_IMG_HDR_SIZE;
+        h->payload_offset = MB_IMG_PAYLOAD_OFF;
+        h->payload_size = h->payload_size % 0x3000 + 1;
+        h->handoff_addr = MBOX_ADDR;
+        h->handoff_size = MB_HANDOFF_V2_SIZE;
+        mb_image_seal(h);
+        m.magic = MB_MAILBOX_MAGIC;
+        m.version = MB_MAILBOX_VERSION;
+        m.size = sizeof(m);
+        m.image_id = mb_image_id(h);
+        m.crc = mb_crc32(0, &m, offsetof(mb_mailbox_t, crc));
+        memcpy(sim_ram + (MBOX_ADDR - SIM_RAM_BASE), &m, sizeof(m));
+    }
     if (d[0] & 4) {
         mb_stage0_choice_t c;
         mb_stage0_choose(&sim_port, &c);

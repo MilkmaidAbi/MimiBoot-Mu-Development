@@ -6,9 +6,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
-        "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc", "mb_lms"]
+        "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc", "mb_lms", "mb_mailbox"]
 OFF_ALL = dict(CONSOLE=0, SHELL=0, SHELL_DIAG=0, RECV=0, CFG_FILE=0, GRUB=0, CONTROL=0, SIGNATURES=0, ANTI_ROLLBACK=0,
-               RAM_IMAGES=0, HANDOFF=0, CRASH_GUARD=0, TRIAL_WATCHDOG=0)
+               RAM_IMAGES=0, HANDOFF=0, OS_HOOKS=0, CRASH_GUARD=0, TRIAL_WATCHDOG=0)
 NO_TRIAL = dict(AB_TRIAL=0, TRIAL_WATCHDOG=0)
 PROFILES = {
     "full": {},
@@ -36,6 +36,9 @@ PROFILES = {
     "lms-only": {**OFF_ALL, "LMS": 1, "MB_REQUIRE_SIGNATURE": 1},
     "lms+smp+ed25519": dict(LMS=1, SMP=1, ENC=1),
     "lms-two-stage": dict(LMS=1, TWO_STAGE=1, SIGNATURES=0),
+    "no-os-hooks": dict(OS_HOOKS=0),
+    "os-hooks-no-control": dict(CONTROL=0),
+    "os-hooks-minimal": {**OFF_ALL, "HANDOFF": 1, "OS_HOOKS": 1},
 }
 INVALID = {
     "recv-without-console": dict(CONSOLE=0, SHELL=0, SHELL_DIAG=0, RECV=1),
@@ -48,6 +51,7 @@ INVALID = {
     "smp-without-recv": dict(SMP=1, RECV=0),
     "encrypted-without-recv": dict(ENC=1, RECV=0),
     "required-signature-without-any": {**OFF_ALL, "MB_REQUIRE_SIGNATURE": 1},
+    "os-hooks-without-handoff": dict(HANDOFF=0, OS_HOOKS=1),
 }
 
 

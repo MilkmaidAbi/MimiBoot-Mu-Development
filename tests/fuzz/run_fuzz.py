@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE = ["mb_hash", "mb_ed25519", "mb_image", "mb_bcl", "mb_config", "mb_policy", "mb_recv", "mb_console",
-        "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc", "mb_lms"]
+        "mb_control", "mb_grub", "mb_formats", "mb_floor", "mb_ecdsa", "mb_stage0", "mb_smp", "mb_enc", "mb_lms", "mb_mailbox"]
 TARGETS = ["smp", "recv", "config", "flash"]
 FEATURES = ["-DMB_FEAT_SMP=1", "-DMB_FEAT_ENC=1", "-DMB_FEAT_REVOKE=1", "-DMB_FEAT_ECDSA=1", "-DMB_FEAT_IMG_MCUBOOT=1", "-DMB_FEAT_IMG_RAW=1", "-DMB_FEAT_LMS=1"]
 
@@ -45,6 +45,12 @@ def seeds(target, d):
     elif target == "flash":
         hdr = c_arrays(ROOT / "tests/gen_signed.h")["signed_good_hdr"]
         (d / "image-in-a").write_bytes(b"\x01" + b"\xff" * 0x4000 + hdr)
+        # a RAM mailbox asking for the menu (bit 5), then a log and an image like the one above
+        import struct
+        mbox = bytearray(216)
+        mbox[16] = 2                                    # end.reason: reboot
+        struct.pack_into("<HHI", mbox, 80, 1, 128, 1)  # next: version 1, size 128, MB_CONTROL_MENU
+        (d / "mailbox-menu").write_bytes(b"\x21" + bytes(mbox) + b"\xff" * 0x4000 + hdr)
     else:
         (d / "empty").write_bytes(b"\x00" * 300)
 

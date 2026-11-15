@@ -53,6 +53,10 @@ int mb_topology_resolve(const mb_port_t *p, mb_topology_t t, uint8_t image, mb_t
 /* No OS control service: requests are refused, the log's Night area is ignored. */
 int mb_control_submit(const mb_port_t *p, const mb_control_request_t *q) { (void)p; (void)q; return MB_E_UNSUPP; }
 int mb_control_reboot(const mb_port_t *p, const mb_control_request_t *q) { (void)p; (void)q; return MB_E_UNSUPP; }
+int mb_control_put(const mb_port_t *p, mb_bcl_rec_t *r, const mb_config_t *c, const mb_control_request_t *q) {
+    (void)p; (void)r; (void)c; (void)q;
+    return MB_E_UNSUPP;
+}
 int mb_control_consume(const mb_port_t *p, mb_bcl_rec_t *r, const mb_config_t *cfg, mb_topology_t *t, int *action) {
     (void)p; (void)cfg; (void)t; (void)action;
     if (r->request == MB_REQ_CONTROL) { memset(r->reserved, 0, sizeof r->reserved); r->request = MB_REQ_NONE; }
@@ -72,7 +76,12 @@ static void store(mb_bcl_rec_t *r, unsigned action, mb_topology_t t, const char 
     memcpy(r->reserved, &s, sizeof s);
     r->request = MB_REQ_CONTROL;
 }
-int mb_control_submit(const mb_port_t *p, const mb_control_request_t *q) {
+// The one check every control request gets, whichever way it came: written to the
+// boot log by an app (mb_control_submit) or left in the RAM mailbox (mb_control_put
+// from the boot decision). Version, size, action, reserved bytes, terminated strings,
+// topology, and the entry or slot it names. MB_OK: *arg and entry[] are what to store.
+static int check(const mb_port_t *p, const mb_config_t *c, const mb_control_request_t *q, unsigned *arg,
+                 char entry[16]) {
     if (!p || !q || q->version != MB_CONTROL_API_VERSION || q->size != sizeof *q || q->action > MB_CONTROL_SLOT ||
         q->reserved[0] || q->reserved[1] || q->reserved[2] || !memchr(q->entry, 0, sizeof q->entry) ||
         !memchr(q->args, 0, sizeof q->args))
@@ -83,31 +92,48 @@ int mb_control_submit(const mb_port_t *p, const mb_control_request_t *q) {
     if ((q->topology.core0 || q->topology.core1) && q->action != MB_CONTROL_ENTRY && q->action != MB_CONTROL_SLOT &&
         q->action != MB_CONTROL_RESTART)
         return MB_E_BADARG;
-    mb_bcl_t b;
-    if (mb_bcl_load(&b, p) != MB_OK)
-        return MB_E_IO;
-    mb_bcl_rec_t r = b.cur;
-    unsigned arg = 0;
-    char entry[16] = {0};
+    *arg = 0;
+    memset(entry, 0, 16);
     if (q->action == MB_CONTROL_ENTRY) {
-        mb_config_t c;
-        mb_config_load(p, &c);
-        int i = mb_config_find(&c, q->entry);
+        int i = c ? mb_config_find(c, q->entry) : -1;
         if (i < 0)
             return MB_E_BADARG;
-        arg = (unsigned)i;
-        snprintf(entry, sizeof entry, "%s", c.e[i].name);
+        *arg = (unsigned)i;
+        snprintf(entry, 16, "%s", c->e[i].name);
     }
     if (q->action == MB_CONTROL_SLOT) {
         if (q->slot >= p->layout->n_slots)
             return MB_E_BADARG;
-        arg = q->slot;
+        *arg = q->slot;
     }
-    store(&r, q->action, q->topology, entry);
-    r.request_arg = (uint8_t)arg;
-    memset(r.args, 0, sizeof r.args);
-    memcpy(r.args, q->args, strlen(q->args));
-    return mb_bcl_commit(&b, &r);
+    return MB_OK;
+}
+
+int mb_control_put(const mb_port_t *p, mb_bcl_rec_t *r, const mb_config_t *c, const mb_control_request_t *q) {
+    unsigned arg;
+    char entry[16];
+    int rc = check(p, c, q, &arg, entry);
+    if (rc)
+        return rc;
+    store(r, q->action, q->topology, entry);
+    r->request_arg = (uint8_t)arg;
+    memset(r->args, 0, sizeof r->args);
+    memcpy(r->args, q->args, strlen(q->args));
+    return MB_OK;
+}
+
+int mb_control_submit(const mb_port_t *p, const mb_control_request_t *q) {
+    if (!p || !q)
+        return MB_E_BADARG;
+    mb_config_t c;
+    if (q->action == MB_CONTROL_ENTRY) // (only an entry name needs the config)
+        mb_config_load(p, &c);
+    mb_bcl_t b;
+    if (mb_bcl_load(&b, p) != MB_OK)
+        return MB_E_IO;
+    mb_bcl_rec_t r = b.cur;
+    int rc = mb_control_put(p, &r, q->action == MB_CONTROL_ENTRY ? &c : NULL, q);
+    return rc ? rc : mb_bcl_commit(&b, &r);
 }
 int mb_control_reboot(const mb_port_t *p, const mb_control_request_t *q) {
     if (!p || !p->reboot)
