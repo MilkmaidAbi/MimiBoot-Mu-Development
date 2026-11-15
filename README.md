@@ -119,6 +119,13 @@ python mimiconf.py              # pick a board, change options, build
 python mimiconf.py build        # build the current .config
 ```
 
+The menu's home screen says what the configuration does, area by area, lists what you
+changed from the board's defaults, and puts anything wrong at the bottom (Enter on it
+goes to the option that fixes it). The line under the title shows how much of the
+bootloader's flash it takes: an estimate while you change things, the real figure after
+a build. Changing an option says what else it switched on or off; `u` undoes, `d` puts
+an option back to its default, `/` finds options (or boards) as you type.
+
 Or without the menu (just use the menu, it's easier):
 
 ```
