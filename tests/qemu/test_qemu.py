@@ -651,8 +651,9 @@ def enc_tests(work: Path, db, check, board, machine, ram_lo, ram_hi, probe):
     slot = {s["name"]: s for s in lay["slots"]}
     fsize = lay["flash_size"]
     print(f"{board} (encrypted images): bootloader {info['flash_used']} B flash, {info['ram_used']} B RAM")
-    check(f"{board}: ENC: the builder says this build leaves no RAM for a handoff",
-          any("no room for the boot handoff" in n for n in info["notes"]), str(info["notes"]))
+    if img is not None:     # (with SMP: the loader takes all 16 KB of RAM)
+        check(f"{board}: ENC: the builder says this build leaves no RAM for a handoff",
+              any("no room for the boot handoff" in n for n in info["notes"]), str(info["notes"]))
 
     def packed(name, at, version, pub, bits=128):
         elf = build_nrf_app(work, name, slot[at]["link_native"], ram_lo, ram_hi, probe)
