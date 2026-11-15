@@ -689,7 +689,8 @@ class TuiState:
         """find options (or boards, when none is picked yet) whose name, title or help hold every word"""
         if not text:
             return
-        kind = "search" if self.cfg else "boardsearch"
+        picking = not self.cfg or self.view.kind in ("makers", "categories", "boards", "boardsearch")
+        kind = "boardsearch" if picking else "search"
         if self.view.kind == kind:
             self.view.arg = text
             self.view.cursor = 0
@@ -707,7 +708,7 @@ class TuiState:
 
     def keys_hint(self) -> list[tuple[str, str]]:
         """[(key, what it does here)]: only what applies to the highlighted line"""
-        if not self.cfg:
+        if not self.cfg or self.view.kind in ("makers", "categories", "boards", "boardsearch"):
             return [("Enter", "open"), ("/", "find a board"), ("Esc", "back"), ("Q", "quit")]
         it = self.current()
         out = []

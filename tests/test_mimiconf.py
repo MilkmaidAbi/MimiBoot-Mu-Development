@@ -257,6 +257,9 @@ def main():
         st.select("board")
         st.enter()
         check(st.view.kind == "makers", "board row opens the picker")
+        st.search("uno")
+        check(st.view.kind == "boardsearch" and "uno" in [i.key for i in st.items()], "find in the picker finds boards")
+        st.back()
         st2 = TuiState(db, Path(td) / "other")
         st2.search("f411")
         check(st2.view.kind == "boardsearch" and {"nucleo-f411re", "blackpill-f411ce"} <= {i.key for i in st2.items()},
