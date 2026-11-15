@@ -3,7 +3,7 @@
 Generated from `config/features.toml` by `python mimiconf.py docs`; don't edit by hand.
 Set options in the TUI (`python mimiconf.py`) or with `python mimiconf.py set ID=value`.
 
-**Cost** is the flash a feature adds when it is on, measured by building a reference board with its defaults and again with that one option flipped: nucleo-f411re (mcu, default build 33.3 KB), uno (avr, default build 1.6 KB). Other chips differ a little (Cortex-M0 code is larger).
+**Cost** is the flash a feature adds when it is on, measured by building a reference board with its defaults and again with that one option flipped: nucleo-f411re (mcu, default build 38.6 KB), uno (avr, default build 1.6 KB). Other chips differ a little (Cortex-M0 code is larger).
 
 ## Presets
 
@@ -40,7 +40,7 @@ More images to boot from menu/config entries: a test build, a second OS, a facto
 
 ### `AB_TRIAL`: Updates must confirm (trial boots + automatic rollback)
 
-default **on**; off on STM32/nRF/SAMD; needs `LAYOUT!=single`; cost ~16 B on nucleo-f411re. (full core)
+default **on**; off on STM32/nRF/SAMD; needs `LAYOUT!=single`. (full core)
 
 A new A/B image gets a few boots to call mb_client_confirm(); if it doesn't, the bootloader goes back to the previous good image.
 
@@ -78,7 +78,7 @@ C macro: `MB_DEFAULT_TRIAL_MS`
 
 ### `CRASH_GUARD`: Crash-loop guard
 
-default **on**; needs `LAYOUT!=single`; cost ~112 B on nucleo-f411re. (full core)
+default **on**; needs `LAYOUT!=single`; cost ~160 B on nucleo-f411re. (full core)
 
 After several watchdog resets in a row of a confirmed image, boot the other good image (or golden) instead. Needs somewhere to fall back to, so not with a single slot.
 
@@ -86,7 +86,7 @@ C macro: `MB_FEAT_CRASH_GUARD`
 
 ### `ANTI_ROLLBACK`: Anti-rollback (security version floor)
 
-default **on**; cost ~32 B on nucleo-f411re. (full core)
+default **on**; cost ~284 B on nucleo-f411re. (full core)
 
 Once an image with security version N is confirmed, A/B images below N are refused, so nobody can reinstall an old vulnerable build.
 
@@ -106,7 +106,7 @@ C macro: `MB_FEAT_IMG_NATIVE`
 
 ### `IMG_MCUBOOT`: Zephyr / MCUboot images (imgtool, west sign)
 
-default **off**; cost ~792 B on nucleo-f411re. (full core; builds: STM32/nRF/SAMD, RP2040/RP2350)
+default **off**; cost ~1.2 KB on nucleo-f411re. (full core; builds: STM32/nRF/SAMD, RP2040/RP2350)
 
 Boot images in MCUboot format: what Zephyr builds with CONFIG_BOOTLOADER_MCUBOOT=y and signs with imgtool / west sign.
 
@@ -120,7 +120,7 @@ C macro: `MB_FEAT_IMG_MCUBOOT`
 
 ### `IMG_RAW`: Raw firmware (FreeRTOS, bare metal, Arduino .bin)
 
-default **off**; cost ~356 B on nucleo-f411re. (full core; builds: STM32/nRF/SAMD)
+default **off**; cost ~340 B on nucleo-f411re. (full core; builds: STM32/nRF/SAMD)
 
 Boot a plain .bin whose vector table sits at the very start of a slot (link the firmware at the slot address).
 
@@ -132,7 +132,7 @@ C macro: `MB_FEAT_IMG_RAW`
 
 ### `RAM_IMAGES`: RAM images
 
-default **on**; cost ~432 B on nucleo-f411re. (full core)
+default **on**; cost ~544 B on nucleo-f411re. (full core)
 
 Images that are copied to RAM, checked there and started there, and the console's 'ramboot' (try an image without touching flash). The RP2040 port needs this (it can't remap XIP slots).
 
@@ -144,7 +144,7 @@ What the bootloader checks before it starts an image: the payload hash (every bo
 
 ### `BOOT_VERIFY`: Check the image hash: every boot / once / never
 
-default **every-boot**; one of `every-boot`, `once`, `never`; `once` +48 B on nucleo-f411re. (full core)
+default **every-boot**; one of `every-boot`, `once`, `never`; `once` -96 B on nucleo-f411re; `never` -136 B on nucleo-f411re. (full core)
 
 every-boot: SHA-256 of the whole payload before every start (catches flash corruption; roughly 10-100 ms per 100 KB at reset clocks).
 
@@ -158,7 +158,7 @@ C macro: `MB_BOOT_VERIFY`
 
 ### `SIGNATURES`: Ed25519 signatures
 
-default **on**; cost ~5.4 KB on nucleo-f411re. (full core)
+default **on**; cost ~5.5 KB on nucleo-f411re. (full core)
 
 Verify image signatures against the public keys compiled in (KEYS). About 6 KB of code; checks take ~100-500 ms on a Cortex-M at reset clocks.
 
@@ -166,7 +166,7 @@ C macro: `MB_FEAT_SIGNATURES`
 
 ### `ECDSA`: ECDSA P-256 signatures as well
 
-default **off**; needs `SIGNATURES`. (full core; builds: STM32/nRF/SAMD)
+default **off**; needs `SIGNATURES`; cost ~3.7 KB on nucleo-f411re. (full core; builds: STM32/nRF/SAMD)
 
 Also accept images signed with ECDSA P-256: MimiBoot images signed with a P-256 key (mbtool keygen --type p256, then pack --key) and Zephyr/MCUboot images signed by imgtool with an ecdsa-p256 key (the ECDSA_SIG TLV). P-256 is on the EU's agreed-mechanisms list; Ed25519 isn't (it is recommended by ETSI TS 119 312).
 
@@ -176,7 +176,7 @@ C macro: `MB_FEAT_ECDSA`
 
 ### `LMS`: LMS signatures (hash-based, post-quantum)
 
-default **off**. (full core)
+default **off**; cost ~1.9 KB on nucleo-f411re. (full core)
 
 Accept images signed with LMS (RFC 8554, NIST SP 800-208): a signature scheme built on SHA-256 alone, so a quantum computer doesn't break it. CNSA 2.0 names it for firmware signing, and the EU's agreed-mechanisms list has it. Keys: 'mbtool keygen --type lms' (1024 signatures with the default H10, then a new key is needed); put the public key in the KEYS file, Ed25519 off if you want nothing a quantum computer could forge.
 
@@ -216,7 +216,7 @@ C macro: `MB_FEAT_ENC`
 
 ### `BOOT_RECORD`: Boot record for the app (measured boot)
 
-default **off**. (full core; builds: STM32/nRF/SAMD)
+default **off**; cost ~372 B on nucleo-f411re. (full core; builds: STM32/nRF/SAMD)
 
 Right before starting an image that asks for it (an MB_BOOT_RECORD_BUFFER in its RAM, see mimiboot/mb_record.h), MimiBoot writes what held on this boot: signature verified and with which key, payload hashed, trial or not, the rollback floor, the payload hash, the SHA-256 of the bootloader's own image and a measurement binding the two with the image header. A server that knows both builds can recompute the measurement. It is a report the image can pass on, not attestation: nothing in it is signed by the device. Costs about 0.4 KB, and hashing the bootloader takes a few milliseconds on each boot of an image that asks.
 
@@ -240,7 +240,7 @@ C macro: `MB_FEAT_CFG_SIGNED`
 
 ### `FAULT_HARDENING`: Harden the boot decision against glitches
 
-default **on**. (full core)
+default **on**; cost ~224 B on nucleo-f411re. (full core)
 
 Makes a voltage or clock glitch that skips one instruction much less likely to start an image that failed its checks. The hash and the final signature comparison run in constant time and twice; each check leaves a multi-bit token only when it really passes; right before jumping, the tokens and the rollback floor are checked again, from a different place in the code. A glitch now has to hit two independent spots.
 
@@ -310,7 +310,7 @@ The text console on USB (RP) or a UART: boot menu, command line, diagnostic comm
 
 ### `CONSOLE`: Console with boot menu
 
-default **on**; cost ~14.5 KB on nucleo-f411re. (full core)
+default **on**; cost ~16.7 KB on nucleo-f411re. (full core)
 
 USB (RP) or UART (STM32, nRF, SAMD) text console with the boot menu. Without it, a board with nothing bootable falls back to the chip's ROM loader (RP, STM32; nRF and SAMD have none and wait for a debugger).
 
@@ -318,7 +318,7 @@ C macro: `MB_FEAT_CONSOLE`
 
 ### `SHELL`: Command line (ls, boot, confirm, recv, erase, cfg ...)
 
-default **on**; needs `CONSOLE`; cost ~11.7 KB on nucleo-f411re. (full core)
+default **on**; needs `CONSOLE`; cost ~13.3 KB on nucleo-f411re. (full core)
 
 The console's command line ('c' in the menu). Off: the menu alone (pick an entry, edit its args, reboot). Uploads need it.
 
@@ -326,7 +326,7 @@ C macro: `MB_FEAT_SHELL`
 
 ### `SHELL_DIAG`: Diagnostic commands (md memory dump, sha, log, layout, keys)
 
-default **on**; needs `SHELL`; cost ~2.1 KB on nucleo-f411re. (full core)
+default **on**; needs `SHELL`; cost ~2.3 KB on nucleo-f411re. (full core)
 
 Handy on the bench. Turn off for products: 'md' reads any flash or RAM the bootloader can see.
 
@@ -334,7 +334,7 @@ C macro: `MB_FEAT_SHELL_DIAG`
 
 ### `RECV`: Image upload over the console (mbtool install / ota / ramboot)
 
-default **on**; needs `SHELL`; cost ~1.2 KB on nucleo-f411re. (full core)
+default **on**; needs `SHELL`; cost ~1.8 KB on nucleo-f411re. (full core)
 
 Receive images in CRC-checked frames and write them to a slot.
 
@@ -366,7 +366,7 @@ C macro: `MB_USB_PID`
 
 ### `SMP`: mcumgr / SMP on the console (Zephyr's update tools)
 
-default **off**; needs `RECV`. (full core)
+default **off**; needs `RECV`; cost ~5.9 KB on nucleo-f411re. (full core)
 
 Speak the Simple Management Protocol on the console's UART, the subset MCUboot's serial recovery offers: image list, upload, test/confirm, erase, reset, echo, MCUmgr parameters. mcumgr, smpmgr, AuTerm and smpclient can then update the board: MimiBoot images and imgtool-signed Zephyr images alike. Open the console first (button, a key right after reset, or the app's request); SMP lines and the menu share the UART.
 
@@ -420,7 +420,7 @@ What the started image gets from the bootloader and how a running OS can talk ba
 
 ### `HANDOFF`: Boot handoff (slot, entry, args, reset cause -> the image's RAM)
 
-default **on**; cost ~368 B on nucleo-f411re. (full core)
+default **on**; cost ~1.7 KB on nucleo-f411re. (full core)
 
 A checksummed block the image finds at the address its header names: which slot and entry it was started from, the args, why the chip reset.
 
@@ -428,7 +428,7 @@ C macro: `MB_FEAT_HANDOFF`
 
 ### `CONTROL`: OS control service (reboot into menu / entry / slot / flash mode)
 
-default **on**; cost ~608 B on nucleo-f411re. (full core)
+default **on**; cost ~704 B on nucleo-f411re. (full core)
 
 Lets a running OS queue a versioned request (mb_client_request) that the bootloader consumes on the next boot.
 
@@ -436,7 +436,7 @@ C macro: `MB_FEAT_CONTROL`
 
 ### `OS_HOOKS`: OS hooks: how the last run ended, the RAM mailbox, handoff v2
 
-default **on**; needs `HANDOFF`. (full core)
+default **on**; needs `HANDOFF`; cost ~1.3 KB on nucleo-f411re. (full core)
 
 The started image gets more in its handoff (v2): what this bootloader was built with, how the previous run ended (a reboot, an update, a power-off, a panic with its message and address, the watchdog), trial state, how long the boot took, and random bytes for its RNG where the chip has one.
 
@@ -448,7 +448,7 @@ C macro: `MB_FEAT_OS_HOOKS`
 
 ### `SCRUB_RAM`: Wipe the bootloader's RAM before handing over
 
-default **off**; cost ~32 B on nucleo-f411re. (full core; builds: STM32/nRF/SAMD)
+default **off**; cost ~16 B on nucleo-f411re. (full core; builds: STM32/nRF/SAMD)
 
 On the way out the bootloader zeroes its own RAM region (its data, boot log copy, config text, stack) from registers only, then jumps: the image starts with nothing of the bootloader left in RAM. The handoff block lives in the image's RAM and survives. Costs a few microseconds.
 
@@ -498,7 +498,7 @@ With TWO_STAGE this is stage 0's region (stage 0 + the store); chip means auto t
 
 ### `TWO_STAGE`: Two-stage bootloader (updatable in the field)
 
-default **off**. (full core; builds: STM32/nRF/SAMD)
+default **off**; cost ~172 B on nucleo-f411re. (full core; builds: STM32/nRF/SAMD)
 
 Split MimiBoot in two. Stage 0 is small and never changes: it checks the two stage-1 copies (s1a, s1b) and starts the best one. Stage 1 is the whole bootloader (console, uploads, A/B, everything), and is updated like an app: upload a new one into the copy that isn't running (mbtool loader), reboot. A new stage 1 is on trial until it gets as far as starting an image; after 3 boots that don't, stage 0 goes back to the old copy.
 

@@ -14,7 +14,7 @@ def _kb(n: int) -> str:
 
 
 def render(db: Db) -> str:
-    sizes = load()
+    sizes = {k: v for k, v in load().items() if k != "boards"}     # (per-board bases: the TUI's gauge)
     lines = ["# MimiBoot-Mu options", "",
              "Generated from `config/features.toml` by `python mimiconf.py docs`; don't edit by hand.",
              "Set options in the TUI (`python mimiconf.py`) or with `python mimiconf.py set ID=value`.", ""]
