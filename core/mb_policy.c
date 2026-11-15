@@ -823,7 +823,7 @@ int mb_boot_ram(const mb_port_t *p, const mb_bcl_t *log, const mb_config_t *cfg,
     memset(&tmp, 0, sizeof(tmp));
     tmp.hdr = *hdr;
     tmp.header_ok = true;
-    if (hdr->flags & MB_IMG_F_LMS) { // a RAM image's LMS signature: the one its upload brought
+    if (MB_FEAT_LMS && (hdr->flags & MB_IMG_F_LMS)) { // a RAM image's LMS signature: the one its upload brought
         tmp.sig_ram = mb_upload_sig.buf;
         tmp.sig_ram_len = mb_upload_sig.len;
     }

@@ -386,7 +386,7 @@ static int begin(const mb_port_t* p) {
         if (h.payload_offset != MB_IMG_PAYLOAD_OFF || up.len != MB_IMG_PAYLOAD_OFF + h.payload_size) return IE_INVALID_LENGTH;
         up.mimg = true;
         up.enc = (h.flags & MB_IMG_F_ENCRYPTED) != 0;
-        up.lms = (h.flags & MB_IMG_F_LMS) != 0;
+        up.lms = MB_FEAT_LMS && (h.flags & MB_IMG_F_LMS) != 0;
         if (up.enc && (!MB_FEAT_ENC || !p->enc_key)) return IE_BAD_HEADER;   // no key here to open it
         if (up.lms && !MB_FEAT_LMS) return IE_BAD_HEADER;
         up.sink.p = p;
